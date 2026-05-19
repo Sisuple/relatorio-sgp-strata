@@ -1,0 +1,11 @@
+# Core
+streamlit==1.32.0
+python-dotenv==1.0.1
+
+# Database - MySQL
+pymysql==1.1.0
+sqlalchemy==2.0.28
+
+# Data manipulation
+pandas==2.2.1
+numpy==1.26.4
