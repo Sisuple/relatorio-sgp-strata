@@ -1,13 +1,31 @@
 from __future__ import annotations
 
+import html
+import json
+import math
+from datetime import date
+from io import BytesIO
+
+import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from components.cards.metric_card import render_metric_card
 from components.charts.iap_distribution import render_iap_distribution
 from components.charts.linear_diagram import render_linear_diagrams
 from components.layout.sidebar import render_sidebar
-from components.maps.overview_map import render_overview_map
-from services.overview_service import get_available_roads, get_available_scenarios, get_overview_data
+from components.maps.overview_map import render_overview_map, _CLASS_COLORS as _MAP_CLASS_COLORS
+from components.maps.dnit_map import render_dnit_map
+from services.overview_service import (
+    get_available_roads,
+    get_available_scenarios,
+    get_dnit_overview_data,
+    get_overview_data,
+    get_projection_data,
+    get_solutions_data,
+)
+from services.prioritization import calcular_indice_priorizacao, classificar_prioridade
+from services.work_plan_pdf import build_work_plan_pdf
 
 
 st.set_page_config(
@@ -51,7 +69,7 @@ def inject_css() -> None:
             .brand-title { font-size: 13px; font-weight: 800; color: var(--text); letter-spacing: .01em; }
             .brand-subtitle { font-size: 11px; color: var(--muted); margin-top: 2px; }
             .side-menu { padding: 14px 8px 0; }
-            .side-item { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; min-height: 48px; padding: 7px 10px; margin-bottom: 8px; border-radius: 8px; color: #95a4af; }
+            .side-item { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; min-height: 48px; padding: 7px 10px; margin-bottom: 8px; border-radius: 8px; color: #95a4af; text-decoration: none; }
             .side-item.active { background: #063f4c; color: #00c2e8; }
             .side-icon { display: grid; place-items: center; }
             .menu-svg { width: 16px; height: 16px; }
@@ -128,6 +146,147 @@ def inject_css() -> None:
             .linear-solution-legend { justify-self: end; margin-top: -4px; padding-top: 4px; max-width: none; }
             .linear-legend-item { display: inline-flex; align-items: center; gap: 5px; color: #cbd5dd; font-size: 11px; font-weight: 700; white-space: nowrap; }
             .linear-dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+            .solution-card { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; box-shadow: 0 18px 44px rgba(0,0,0,.24); overflow: hidden; }
+            .solution-card-head { padding: 20px 20px 16px; border-bottom: 1px solid rgba(148,163,184,.1); }
+            .solution-card-head h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
+            .solution-card-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+            .solution-table-wrap { overflow-x: auto; }
+            .solution-table { width: 100%; border-collapse: collapse; min-width: 920px; }
+            .solution-table th { padding: 11px 14px; color: #8f9eaa; background: rgba(18,39,52,.72); font-size: 10px; letter-spacing: .11em; text-transform: uppercase; text-align: left; white-space: nowrap; }
+            .solution-table td { padding: 12px 14px; border-top: 1px solid rgba(148,163,184,.08); color: #dce6ed; font-size: 13px; white-space: nowrap; }
+            .solution-table tr:hover td { background: rgba(0,194,232,.04); }
+            .solution-table .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; }
+            .solution-table .muted { color: #9aa8b3; }
+            .segment-table { min-width: 720px; width: 100%; border-collapse: collapse; background: rgba(6,16,24,.42); border: 1px solid rgba(148,163,184,.16); border-radius: 8px; overflow: hidden; }
+            .segment-table th { padding: 8px 10px; background: rgba(6,16,24,.52); color: #8f9eaa; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+            .segment-table td { padding: 8px 10px; border-top: 1px solid rgba(148,163,184,.08); font-size: 11px; }
+            .solution-chip-cell { border-radius: 6px; font-weight: 850; text-align: center; }
+            .solution-table td.detail-toggle-cell { text-align: center; white-space: nowrap; }
+            .detail-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; padding: 5px 12px; border-radius: 999px; border: 1px solid #244257; background: #0b1a23; color: var(--cyan); font-size: 11px; font-weight: 800; white-space: nowrap; user-select: none; transition: background .15s, border-color .15s; }
+            .detail-toggle:hover { background: #06303a; border-color: #00c2e8; }
+            .detail-toggle .caret { font-size: 9px; line-height: 1; transition: transform .15s ease; }
+            .detail-row td.detail-cell { padding: 0 !important; border-top: 0 !important; background: rgba(6,16,24,.4); }
+            .detail-checkbox { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+            .detail-content { display: none; padding: 14px 18px 18px; }
+            .detail-checkbox:checked ~ .detail-content { display: block; }
+            .detail-summary { color: #9aa8b3; font-size: 11px; font-weight: 700; margin-bottom: 10px; }
+            .snv-strip-wrap { margin: 2px 0 18px; }
+            .snv-strip { display: flex; height: 28px; border-radius: 6px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05); }
+            .snv-strip-seg { height: 100%; min-width: 1px; border-right: 1px solid rgba(6,16,24,.5); transition: filter .15s; }
+            .snv-strip-seg:hover { filter: brightness(1.15); }
+            .snv-strip-axis { display: flex; justify-content: space-between; color: #8f9eaa; font-size: 10px; margin-top: 5px; }
+            .snv-strip-legend { display: flex; flex-wrap: wrap; gap: 5px 14px; margin-top: 9px; }
+            .snv-strip-leg { display: inline-flex; align-items: center; gap: 6px; color: #cbd5dd; font-size: 11px; font-weight: 700; }
+            .snv-strip-leg .dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+            .snv-cost-bars { display: grid; gap: 8px; margin-top: 4px; }
+            .snv-cost-row { display: grid; grid-template-columns: minmax(120px, 220px) 1fr minmax(120px, auto); align-items: center; gap: 12px; }
+            .snv-cost-lbl { color: #dce6ed; font-size: 12px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .snv-cost-track { height: 16px; background: rgba(148,163,184,.12); border-radius: 4px; overflow: hidden; }
+            .snv-cost-bar { display: block; height: 100%; border-radius: 4px; min-width: 2px; }
+            .snv-cost-val { color: #9aa8b3; font-size: 11px; white-space: nowrap; }
+            .proj-chart { margin-top: 18px; }
+            .proj-legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 14px; padding-top: 13px; border-top: 1px solid rgba(148,163,184,.12); }
+            .proj-leg { display: inline-flex; align-items: center; gap: 8px; color: #cbd5dd; font-size: 12px; font-weight: 700; }
+            .proj-leg .sw { width: 16px; height: 4px; border-radius: 2px; display: inline-block; }
+            .proj-leg .sw-dash { border-top: 2px dashed #ff314a; height: 0; width: 16px; }
+            .alert-list { margin-top: 18px; display: grid; gap: 8px; }
+            .alert-item { display: grid; grid-template-columns: 10px 1fr; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 10px; border: 1px solid #1d3848; background: #0b1d28; color: #dce6ed; font-size: 13px; }
+            .alert-item .alert-dot { width: 9px; height: 9px; border-radius: 999px; }
+            .alert-critico { border-color: rgba(255,49,74,.5); }
+            .alert-critico .alert-dot { background: #ff314a; box-shadow: 0 0 10px rgba(255,49,74,.6); }
+            .alert-atencao { border-color: rgba(255,138,0,.45); }
+            .alert-atencao .alert-dot { background: #ff8a00; }
+            .alert-ok .alert-dot { background: #22c55e; }
+            .alert-more { color: #8f9eaa; font-size: 12px; padding: 4px 2px; }
+            .sol-chip { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; margin: 2px 5px 2px 0; white-space: nowrap; }
+            .cp-headline { margin-top: 14px; font-size: 13px; color: #cbd5dd; line-height: 1.5; }
+            .cp-headline strong { color: var(--text); }
+            .cp-chart { display: flex; align-items: flex-end; gap: 6px; margin-top: 18px; height: 232px; }
+            .cp-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
+            .cp-bar { width: 100%; max-width: 38px; height: 200px; display: flex; flex-direction: column; border-radius: 4px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); }
+            .cp-seg { width: 100%; }
+            .cp-seg:hover { filter: brightness(1.15); }
+            .cp-year { margin-top: 8px; font-size: 10px; color: #8f9eaa; }
+            .cp-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,.12); }
+            .cp-leg { display: inline-flex; align-items: center; gap: 7px; color: #cbd5dd; font-size: 12px; font-weight: 700; }
+            .cp-sw { width: 13px; height: 13px; border-radius: 3px; display: inline-block; }
+            tr.snv-row:has(+ tr.detail-row .detail-checkbox:checked) .detail-toggle { background: #06303a; border-color: #00c2e8; }
+            tr.snv-row:has(+ tr.detail-row .detail-checkbox:checked) .detail-toggle .caret { transform: rotate(90deg); }
+            div[data-testid="stPopover"] button {
+                min-height: 38px;
+                border-radius: 10px;
+                border: 1px solid #38bdf8;
+                background: rgba(0,194,232,.10);
+                color: var(--cyan);
+                font-size: 12px;
+                font-weight: 850;
+            }
+            .iap-pill { display: inline-flex; align-items: center; gap: 8px; }
+            .iap-pill-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
+            .solution-distribution { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; padding: 20px 20px 24px; box-shadow: 0 18px 44px rgba(0,0,0,.18); overflow: hidden; }
+            .solution-distribution-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+            .solution-distribution-title { display: flex; align-items: center; gap: 10px; }
+            .solution-distribution-icon { width: 32px; height: 32px; border-radius: 12px; display: grid; place-items: center; background: #00c2e8; color: #031019; font-weight: 900; }
+            .solution-distribution h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
+            .solution-distribution p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+            .solution-distribution-meta { display: flex; align-items: center; gap: 16px; color: #8f9eaa; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+            .solution-distribution-meta strong { color: var(--text); letter-spacing: 0; }
+            .solution-distribution-meta .accent { color: var(--cyan); }
+            .solution-bars { height: 270px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
+            .solution-y-axis { position: relative; height: 188px; margin-top: 18px; border-right: 1px solid rgba(148,163,184,.14); }
+            .solution-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; }
+            .solution-chart-area { position: relative; padding-top: 18px; overflow-x: auto; overflow-y: visible; }
+            .solution-chart-plot { height: 188px; border-bottom: 2px solid rgba(148,163,184,.34); background: repeating-linear-gradient(to top, transparent 0, transparent 48px, rgba(148,163,184,.10) 49px, transparent 50px); }
+            .solution-bar-grid { height: 188px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); align-items: end; gap: 26px; padding: 0 16px; min-width: 100%; }
+            .solution-bar-item { height: 188px; display: grid; align-items: end; justify-items: center; min-width: 156px; }
+            .solution-bar { width: min(100%, 118px); min-height: 3px; border-radius: 5px 5px 0 0; position: relative; box-shadow: 0 10px 22px rgba(0,0,0,.18); }
+            .solution-bar-value { position: absolute; top: -30px; left: 50%; transform: translateX(-50%); color: #f4f7fb; font-size: 11px; font-weight: 850; white-space: nowrap; text-align: center; line-height: 1.15; }
+            .solution-bar-value span { display: block; color: #9aa8b3; font-size: 10px; font-weight: 750; margin-top: 2px; }
+            .solution-label-grid { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); gap: 26px; padding: 9px 16px 0; min-width: 100%; justify-items: center; }
+            .solution-bar-label { color: #9aa8b3; font-size: 11px; text-align: center; white-space: normal; line-height: 1.25; min-width: 156px; max-width: 156px; }
+            .solution-panel { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; padding: 20px; box-shadow: 0 18px 44px rgba(0,0,0,.18); }
+            .solution-panel-title { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
+            .solution-panel-subtitle { margin: 4px 0 18px; color: var(--muted); font-size: 12px; }
+            .solution-panel-spacer { height: 12px; }
+            .solution-filter-label { margin: 0 0 6px; color: #8f9eaa; font-size: 10px; letter-spacing: .11em; text-transform: uppercase; font-weight: 850; }
+            div[data-testid="stMultiSelect"] label,
+            div[data-testid="stSlider"] label { display: none; }
+            div[data-baseweb="tag"] { background: rgba(0,194,232,.14); color: var(--text); }
+            .pagination-summary { color: #9aa8b3; font-size: 12px; padding-top: 28px; text-align: right; }
+            div[data-testid="stNumberInput"] label { display: none; }
+            div[data-testid="stNumberInput"] input,
+            div[data-testid="stSelectbox"] input { color: var(--text); }
+            div[data-testid="stDownloadButton"] button {
+                min-height: 40px;
+                border-radius: 10px;
+                border: 1px solid #244257;
+                background: #0b1a23;
+                color: var(--text);
+                font-size: 12px;
+                font-weight: 800;
+            }
+            .economic-panel { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; padding: 20px; box-shadow: 0 18px 44px rgba(0,0,0,.18); }
+            .economic-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+            .economic-title { display: flex; align-items: center; gap: 10px; }
+            .economic-icon { width: 32px; height: 32px; border-radius: 12px; display: grid; place-items: center; background: #00c2e8; color: #031019; font-weight: 900; }
+            .economic-head h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
+            .economic-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+            .economic-note { color: #9aa8b3; font-size: 11px; line-height: 1.45; border: 1px solid rgba(148,163,184,.14); background: rgba(6,16,24,.36); border-radius: 10px; padding: 10px 12px; margin-top: 16px; }
+            .economic-control-value { color: var(--cyan); text-align: right; font-size: 12px; font-weight: 850; margin-top: -20px; margin-bottom: 6px; }
+            .economic-chart { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 10px; min-height: 276px; }
+            .economic-y-axis { position: relative; height: 210px; margin-top: 28px; border-right: 1px solid rgba(148,163,184,.14); }
+            .economic-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; }
+            .economic-plot { position: relative; height: 210px; margin-top: 28px; border-bottom: 2px solid rgba(148,163,184,.34); background: repeating-linear-gradient(to top, transparent 0, transparent 51px, rgba(148,163,184,.10) 52px, transparent 53px); overflow: visible; }
+            .economic-bars { position: absolute; inset: 0 16px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(82px, 1fr); align-items: end; gap: 18px; }
+            .economic-bar-item { height: 210px; display: grid; align-items: end; justify-items: center; }
+            .economic-bar { width: 54px; min-height: 3px; border-radius: 5px 5px 0 0; background: #ff7a00; opacity: .72; position: relative; }
+            .economic-bar span { position: absolute; top: -24px; left: 50%; transform: translateX(-50%); color: #f4f7fb; font-size: 10px; font-weight: 850; white-space: nowrap; text-shadow: 0 1px 3px rgba(0,0,0,.72); }
+            .economic-line { position: absolute; left: 0; right: 0; height: 2px; background: #00c2e8; opacity: .62; }
+            .economic-labels { margin: 8px 16px 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(82px, 1fr); gap: 18px; color: #8f9eaa; font-size: 11px; text-align: center; }
+            .economic-legend { display: flex; justify-content: center; gap: 16px; color: #cbd5dd; font-size: 11px; margin-top: 16px; flex-wrap: wrap; }
+            .economic-legend span { display: inline-flex; align-items: center; gap: 6px; }
+            .economic-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+            .priority-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; margin-right: 7px; }
 
             @media (max-width: 980px) {
                 .block-container { padding-left: 1rem; padding-right: 1rem; }
@@ -149,17 +308,22 @@ def _filter_label(label: str) -> None:
     st.markdown(f'<div class="filter-label">{label}</div>', unsafe_allow_html=True)
 
 
-def render_top_bar(selected_road: str) -> tuple[str, str, str | None]:
+def render_top_bar(selected_road: str, *, page_title: str = "Diagnóstico Paragon", show_diagnosis: bool = True) -> tuple[str, str, str | None]:
     left, right = st.columns([0.82, 1.92], gap="large")
     with right:
-        diagnosis_col, road_col, scenario_col = st.columns([0.8, 0.8, 1.35], gap="small")
-        with diagnosis_col:
-            _filter_label("Diagnóstico")
-            diagnosis = st.selectbox(
-                "Diagnóstico",
-                ["Diagnóstico Paragon", "Diagnóstico DNIT"],
-                label_visibility="collapsed",
-            )
+        if show_diagnosis:
+            diagnosis_col, road_col, scenario_col = st.columns([0.8, 0.8, 1.35], gap="small")
+            with diagnosis_col:
+                _filter_label("Diagnóstico")
+                diagnosis = st.selectbox(
+                    "Diagnóstico",
+                    ["Diagnóstico Paragon", "Diagnóstico DNIT"],
+                    label_visibility="collapsed",
+                )
+        else:
+            road_col, scenario_col = st.columns([0.86, 1.34], gap="small")
+            diagnosis = page_title
+
         with road_col:
             _filter_label("Rodovias")
             roads = get_available_roads()
@@ -187,7 +351,7 @@ def render_top_bar(selected_road: str) -> tuple[str, str, str | None]:
             f"""
             <div class="top-copy">
                 <p class="eyebrow">RELATÓRIOS</p>
-                <h1 class="page-title">{diagnosis}</h1>
+                <h1 class="page-title">{page_title if not show_diagnosis else diagnosis}</h1>
             </div>
             """,
             unsafe_allow_html=True,
@@ -203,15 +367,2020 @@ def render_metric_cards(cards: list[dict]) -> None:
             render_metric_card(card)
 
 
+def _format_km(value: float) -> str:
+    return f"{value:.2f}".replace(".", ",")
+
+
+def _filter_caption(label: str) -> None:
+    st.markdown(f'<div class="solution-filter-label">{html.escape(label)}</div>', unsafe_allow_html=True)
+
+
+def _render_solution_filters(table_df):
+    if table_df is None or table_df.empty:
+        return table_df
+
+    sre_options = sorted(str(value) for value in table_df["SNV"].dropna().unique())
+    iap_class_order = ["Excelente", "Bom", "++ Regular", "+ Regular", "- Regular", "Mau", "Péssimo"]
+    iap_options = [
+        label
+        for label in iap_class_order
+        if label in set(table_df["_classe_iap"].dropna().astype(str))
+    ]
+    solution_options = sorted(str(value) for value in table_df["Solução recomendada"].dropna().unique())
+
+    first_row = st.columns([1, 1, 1], gap="medium")
+    with first_row[0]:
+        _filter_caption("SRE")
+        selected_sre = st.multiselect(
+            "SRE",
+            sre_options,
+            placeholder="Todos os SREs",
+            label_visibility="collapsed",
+        )
+    with first_row[1]:
+        _filter_caption("Conceito IAP")
+        selected_iap_classes = st.multiselect(
+            "Conceito IAP",
+            iap_options,
+            placeholder="Todos os conceitos",
+            label_visibility="collapsed",
+        )
+    with first_row[2]:
+        _filter_caption("Tipo de solução")
+        selected_solutions = st.multiselect(
+            "Tipo de solução",
+            solution_options,
+            placeholder="Todas as soluções",
+            label_visibility="collapsed",
+        )
+
+    filtered = table_df.copy()
+    if selected_sre:
+        filtered = filtered[filtered["SNV"].astype(str).isin(selected_sre)]
+    if selected_iap_classes:
+        filtered = filtered[filtered["_classe_iap"].astype(str).isin(selected_iap_classes)]
+    if selected_solutions:
+        filtered = filtered[filtered["Solução recomendada"].astype(str).isin(selected_solutions)]
+
+    return filtered
+
+
+def _render_solution_filter_panel(table_df):
+    return _render_solution_filters(table_df)
+
+
+def _solution_table_to_excel(table_df) -> bytes:
+    export_columns = [
+        "SNV",
+        "Km Inicial",
+        "Km Final",
+        "Extensão",
+        "IAP",
+        "IRI",
+        "IGG",
+        "Solução recomendada",
+    ]
+    output = BytesIO()
+    export_df = table_df[export_columns].copy()
+    with st.spinner("Preparando Excel..."):
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            export_df.to_excel(writer, index=False, sheet_name="Matriz")
+            workbook = writer.book
+            worksheet = writer.sheets["Matriz"]
+            header_format = workbook.add_format(
+                {"bold": True, "bg_color": "#0b1d28", "font_color": "#ffffff", "border": 1}
+            )
+            number_format = workbook.add_format({"num_format": "0.00"})
+            for col_index, column in enumerate(export_df.columns):
+                worksheet.write(0, col_index, column, header_format)
+                width = max(12, min(42, int(export_df[column].astype(str).str.len().max() or 12) + 2))
+                worksheet.set_column(col_index, col_index, width)
+            for column in ["Km Inicial", "Km Final", "Extensão", "IAP", "IRI", "IGG"]:
+                col_index = export_df.columns.get_loc(column)
+                worksheet.set_column(col_index, col_index, 12, number_format)
+    return output.getvalue()
+
+
+def _render_export_button(table_df) -> None:
+    if table_df is None or table_df.empty:
+        return
+
+    st.download_button(
+        "Exportar Excel",
+        data=_solution_table_to_excel(table_df),
+        file_name="matriz_priorizacao_paragon.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
+    )
+
+
+def _solution_color(label: str) -> str:
+    normalized = label.lower()
+    if "sem intervenção" in normalized or "monitor" in normalized:
+        return "#9fb9d9"
+    if "reconstrução" in normalized or "reconstrucao" in normalized:
+        return "#d71920"
+    if "fresagem" in normalized and "reforço" in normalized:
+        return "#f2a51a"
+    if "fresagem" in normalized:
+        return "#fff200"
+    if "reparo localizado" in normalized and "reforço" in normalized:
+        return "#f4f1a6"
+    if "microrrevestimento" in normalized and "reparo localizado" in normalized:
+        return "#b6d7a8"
+    if "microrrevestimento" in normalized:
+        return "#b6d7a8"
+    if "reparo localizado" in normalized or normalized.startswith("rl"):
+        return "#00a651"
+    if "reforço" in normalized:
+        return "#f4f1a6"
+    return "#00a651"
+
+
+def _render_solution_distribution(table_df, total_km: float | None = None, plan_cost_mi: float | None = None) -> None:
+    if table_df is None or table_df.empty:
+        return
+
+    grouped = (
+        table_df.groupby("Solução recomendada", as_index=False)["Extensão"]
+        .sum()
+        .sort_values("Extensão", ascending=False)
+    )
+    total_extension = float(total_km or table_df["Extensão"].sum() or 0)
+    if total_extension <= 0:
+        return
+
+    max_percent = max(float(grouped["Extensão"].max()) / total_extension * 100, 1)
+    axis_max = _axis_max_10(max_percent)
+    ticks = _axis_ticks_10(axis_max)
+
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
+        for tick in ticks
+    )
+
+    bars = []
+    labels = []
+    for row in grouped.to_dict("records"):
+        label = str(row["Solução recomendada"])
+        km = float(row["Extensão"])
+        percent = km / total_extension * 100
+        height = max(percent / axis_max * 100, 2)
+        color = _solution_color(label)
+        bars.append(
+            '<div class="solution-bar-item">'
+            f'<div class="solution-bar" style="height:{height:.2f}%;background:{color};">'
+            f'<span class="solution-bar-value">{percent:.1f}%<span>{km:.1f} km</span></span>'
+            '</div>'
+            '</div>'
+        )
+        labels.append(f'<div class="solution-bar-label">{html.escape(label)}</div>')
+
+    cost_markup = (
+        f'<span>Custo <strong class="accent">R$ {plan_cost_mi:.1f} mi</strong></span>'
+        if plan_cost_mi is not None
+        else ""
+    )
+    markup = (
+        '<div class="solution-distribution">'
+        '<div class="solution-distribution-head">'
+        '<div class="solution-distribution-title">'
+        '<div class="solution-distribution-icon">≋</div>'
+        '<div><h3>Distribuição de soluções na rede</h3>'
+        '<p>Engenharia aplicada · catálogo paramétrico Paragon</p></div>'
+        '</div>'
+        '<div class="solution-distribution-meta">'
+        f'<span>Total · <strong>{total_extension:.1f} km</strong></span>'
+        f'{cost_markup}'
+        '</div>'
+        '</div>'
+        '<div class="solution-bars">'
+        f'<div class="solution-y-axis">{tick_markup}</div>'
+        '<div class="solution-chart-area">'
+        '<div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid">{"".join(bars)}</div>'
+        '</div>'
+        f'<div class="solution-label-grid">{"".join(labels)}</div>'
+        '</div>'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(markup, unsafe_allow_html=True)
+
+
+def _render_solutions_table(table_df) -> None:
+    if table_df is None or table_df.empty:
+        st.info("Sem trechos para exibir na matriz.")
+        return
+
+    rows_markup = []
+    for index, row in enumerate(table_df.to_dict("records"), start=1):
+        iap_color = html.escape(str(row.get("_cor_iap", "#fff200")))
+        iap_class = html.escape(str(row.get("_classe_iap", "")))
+        rows_markup.append(
+            "<tr>"
+            f"<td class='muted'>{index}</td>"
+            f"<td class='mono'>{html.escape(str(row['SNV']))}</td>"
+            f"<td>{_format_km(float(row['Km Inicial']))}</td>"
+            f"<td>{_format_km(float(row['Km Final']))}</td>"
+            f"<td>{_format_km(float(row['Extensão']))} km</td>"
+            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{iap_color}'></span>{float(row['IAP']):.2f} <span class='muted'>{iap_class}</span></span></td>"
+            f"<td>{float(row['IRI']):.2f}</td>"
+            f"<td>{float(row['IGG']):.2f}</td>"
+            f"<td>{html.escape(str(row['Solução recomendada']))}</td>"
+            "</tr>"
+        )
+
+    st.markdown(
+        """
+        <section class="solution-card">
+          <div class="solution-card-head">
+            <h3>Matriz de priorização Paragon</h3>
+            <p>""" + str(len(table_df)) + """ trechos encontrados conforme filtros aplicados</p>
+          </div>
+          <div class="solution-table-wrap">
+            <table class="solution-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>SRE</th>
+                  <th>Km Inicial</th>
+                  <th>Km Final</th>
+                  <th>Extensão</th>
+                  <th>IAP</th>
+                  <th>IRI</th>
+                  <th>IGG</th>
+                  <th>Solução recomendada</th>
+                </tr>
+              </thead>
+              <tbody>
+        """
+        + "".join(rows_markup)
+        + """
+              </tbody>
+            </table>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_solution_table_controls(filtered_table):
+    st.markdown('<div class="solution-panel-spacer"></div>', unsafe_allow_html=True)
+    action_col, page_size_col, page_col, summary_col = st.columns([0.72, 0.62, 0.45, 1.35], gap="medium")
+    with action_col:
+        _filter_caption("Exportação")
+        _render_export_button(filtered_table)
+
+    if filtered_table is None or filtered_table.empty:
+        with summary_col:
+            st.markdown(
+                '<div class="pagination-summary">Nenhum registro encontrado para os filtros aplicados.</div>',
+                unsafe_allow_html=True,
+            )
+        return filtered_table, filtered_table
+
+    total_rows = len(filtered_table)
+    page_size_options = [25, 50, 100, "Todos"]
+    with page_size_col:
+        _filter_caption("Registros por página")
+        page_size = st.selectbox(
+            "Registros por página",
+            page_size_options,
+            index=0,
+            label_visibility="collapsed",
+        )
+
+    if page_size == "Todos":
+        with summary_col:
+            st.markdown(
+                f'<div class="pagination-summary">Exibindo todos os {total_rows} registros filtrados.</div>',
+                unsafe_allow_html=True,
+            )
+        return filtered_table, filtered_table.reset_index(drop=True)
+
+    total_pages = max(1, (total_rows + int(page_size) - 1) // int(page_size))
+    with page_col:
+        _filter_caption("Página")
+        page_number = st.number_input(
+            "Página",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            label_visibility="collapsed",
+        )
+
+    start = (int(page_number) - 1) * int(page_size)
+    end = min(start + int(page_size), total_rows)
+    with summary_col:
+        st.markdown(
+            f'<div class="pagination-summary">Exibindo {start + 1}-{end} de {total_rows} registros filtrados.</div>',
+            unsafe_allow_html=True,
+        )
+
+    return filtered_table, filtered_table.iloc[start:end].reset_index(drop=True)
+
+
+_ECONOMIC_SOLUTION_COST_KM = {
+    "OK": 0,
+    "RL": 180_000,
+    "RL+RS": 280_000,
+    "RL+REF": 420_000,
+    "RPS": 680_000,
+    "RPS+REF": 920_000,
+    "REC": 1_250_000,
+    "Sem intervenção": 0,
+}
+
+_ECONOMIC_STRATEGY_ORDER = {
+    "Corretiva": {"REC": 1, "RPS+REF": 2, "RPS": 3, "RL+REF": 4, "RL+RS": 5, "RL": 6, "OK": 7},
+    "Preventiva": {"RL": 1, "RL+RS": 2, "RL+REF": 3, "RPS": 4, "RPS+REF": 5, "REC": 6, "OK": 7},
+    "Balanceada": {"REC": 1, "RPS": 2, "RL+RS": 3, "RPS+REF": 4, "RL+REF": 5, "RL": 6, "OK": 7},
+}
+# Ano-base do cenário econômico: o horizonte cobre [_ECONOMIC_BASE_YEAR, _ECONOMIC_BASE_YEAR + horizonte - 1].
+_ECONOMIC_BASE_YEAR = 2026
+
+
+def _limit_budget_to_horizon(budget_items, horizon: int):
+    """Restringe a programação orçamentária à janela do horizonte selecionado."""
+    if budget_items is None or budget_items.empty or "Ano" not in budget_items:
+        return budget_items
+
+    max_year = _ECONOMIC_BASE_YEAR + int(horizon) - 1
+    years = pd.to_numeric(budget_items["Ano"], errors="coerce")
+    return budget_items[(years >= _ECONOMIC_BASE_YEAR) & (years <= max_year)].copy()
+
+
+def _format_money(value: float) -> str:
+    if value >= 1_000_000:
+        return f"R$ {value / 1_000_000:.1f} mi"
+    if value >= 1_000:
+        return f"R$ {value / 1_000:.0f} mil"
+    return f"R$ {value:.0f}"
+
+
+def _format_money_chart(value: float) -> str:
+    if value >= 1_000_000:
+        return f"R$ {value / 1_000_000:.1f} mi"
+    if value >= 1_000:
+        return f"R$ {value / 1_000:.1f} mil"
+    if value > 0:
+        return f"R$ {value:.0f}"
+    return "R$ 0"
+
+
+def _axis_max_10(value: float) -> int:
+    return max(10, ((int(value) + 9) // 10) * 10)
+
+
+def _axis_ticks_10(axis_max: int) -> list[int]:
+    return list(range(int(axis_max), -1, -10))
+
+
+def _economic_work_table(table_df) -> pd.DataFrame:
+    if table_df is None or table_df.empty:
+        return pd.DataFrame()
+
+    df = table_df.copy()
+    df["_solucao_codigo"] = df.get("_solucao_codigo", "Sem intervenção").fillna("Sem intervenção").astype(str)
+    df["Custo banco"] = pd.to_numeric(df.get("Custo estimado", 0), errors="coerce").fillna(0.0)
+    df["Custo econômico"] = df["Custo banco"]
+
+    missing_cost = df["Custo econômico"] <= 0
+    fallback_cost = df["_solucao_codigo"].map(_ECONOMIC_SOLUTION_COST_KM).fillna(0) * df["Extensão"].astype(float)
+    df.loc[missing_cost, "Custo econômico"] = fallback_cost.loc[missing_cost]
+    df["Custo origem"] = "Banco"
+    df.loc[missing_cost & (df["Custo econômico"] > 0), "Custo origem"] = "Paramétrico"
+    df.loc[df["Custo econômico"] <= 0, "Custo origem"] = "Sem custo"
+    return df
+
+
+def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
+    """Calcula a priorização por SNV (IPT, IPE, PRIORIZAÇÃO) a partir dos segmentos.
+
+    Replica a metodologia da planilha: VMDA/IRI/DEF são médias do SNV; o IP técnico
+    pesa VMDA 40% / IRI 35% / deflexão 25%; o IP econômico normaliza a eficiência
+    (IPT por custo/km); e a priorização final é 0,6·IPT + 0,4·IPE.
+    """
+    if df is None or df.empty:
+        return {}
+
+    segmentos = [
+        {
+            "rodovia": row.get("Rodovia", ""),
+            "snv": str(row.get("SNV")),
+            "extensao_km": row.get("Extensão"),
+            "vmda": row.get("VMDA"),
+            "iri": row.get("IRI"),
+            "deflexao": row.get("DEF"),
+            "custo": row.get("Custo econômico"),
+        }
+        for _, row in df.iterrows()
+    ]
+    return {item["snv"]: item for item in calcular_indice_priorizacao(segmentos)}
+
+
+def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
+    """Anexa IPT/IPE/PRIORIZAÇÃO (calculados por SNV) aos segmentos e ordena."""
+    if df is None or df.empty:
+        return df
+
+    prio = _prioridade_por_snv(df)
+    snv = df["SNV"].astype(str)
+    df["IPT"] = snv.map(lambda s: prio.get(s, {}).get("ip_tecnico", 0.0))
+    df["IPE"] = snv.map(lambda s: prio.get(s, {}).get("ip_economico", 0.0))
+    df["Priorização"] = snv.map(lambda s: prio.get(s, {}).get("priorizacao", 0.0))
+    df["Classe prioridade"] = snv.map(lambda s: prio.get(s, {}).get("classificacao", "Prioridade Baixa"))
+    df["_rank"] = snv.map(lambda s: prio.get(s, {}).get("ranking", len(prio) + 1))
+
+    df = df.sort_values(["_rank", "Km Inicial"]).reset_index(drop=True)
+    df["Prioridade"] = df["_rank"]
+    return df
+
+
+def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, strategy: str) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    df = _economic_work_table(table_df)
+    if df.empty:
+        return {}, df, pd.DataFrame()
+
+    df = _aplicar_indice_priorizacao(df)
+
+    annual_budget = float(annual_budget_mi) * 1_000_000
+    total_budget = annual_budget * int(horizon)
+    remaining_total = total_budget
+    statuses = []
+    execution_years = []
+
+    for _, row in df.iterrows():
+        cost = float(row["Custo econômico"])
+        if cost <= 0:
+            statuses.append("Sem intervenção")
+            execution_years.append("")
+        elif cost <= remaining_total:
+            statuses.append("Executa")
+            execution_year = int((total_budget - remaining_total) // annual_budget) + 2026 if annual_budget else 2026
+            execution_years.append(str(min(execution_year, 2025 + int(horizon))))
+            remaining_total -= cost
+        else:
+            statuses.append("Backlog")
+            execution_years.append("")
+
+    df["Status"] = statuses
+    df["Ano previsto"] = execution_years
+
+    annual_rows = []
+    pending = df[(df["Custo econômico"] > 0)].copy()
+    executed_ids: set[int] = set()
+    cumulative_cost = 0.0
+    current_iap = float((df["IAP"] * df["Extensão"]).sum() / df["Extensão"].sum()) if df["Extensão"].sum() else 0
+
+    for offset in range(int(horizon)):
+        year = 2026 + offset
+        year_budget = annual_budget
+        year_km = 0.0
+        for idx, row in pending.iterrows():
+            if idx in executed_ids:
+                continue
+            cost = float(row["Custo econômico"])
+            if cost <= year_budget:
+                executed_ids.add(idx)
+                year_budget -= cost
+                year_km += float(row["Extensão"])
+                cumulative_cost += cost
+
+        remaining_df = pending.loc[[idx for idx in pending.index if idx not in executed_ids]]
+        executed_df = pending.loc[list(executed_ids)] if executed_ids else pending.iloc[0:0]
+        if not executed_df.empty and df["Extensão"].sum():
+            adjusted_iap = df["IAP"].copy()
+            adjusted_iap.loc[executed_df.index] = adjusted_iap.loc[executed_df.index].clip(lower=4.1)
+            current_iap = float((adjusted_iap * df["Extensão"]).sum() / df["Extensão"].sum())
+
+        annual_rows.append(
+            {
+                "Ano": year,
+                "Km executado": year_km,
+                "Backlog km": float(remaining_df["Extensão"].sum()),
+                "Custo acumulado": cumulative_cost,
+                "IAP médio": current_iap,
+            }
+        )
+
+    need_df = df[df["Custo econômico"] > 0]
+    executed = df[df["Status"] == "Executa"]
+    backlog = df[df["Status"] == "Backlog"]
+    total_need = float(need_df["Custo econômico"].sum())
+    executed_cost = float(executed["Custo econômico"].sum())
+    metrics = {
+        "total_need": total_need,
+        "total_budget": total_budget,
+        "deficit": max(total_need - total_budget, 0.0),
+        "executed_km": float(executed["Extensão"].sum()),
+        "backlog_km": float(backlog["Extensão"].sum()),
+        "iap_final": float(annual_rows[-1]["IAP médio"]) if annual_rows else 0,
+        "cost_avoided": executed_cost * 0.35,
+        "uses_parametric_cost": bool((df["Custo origem"] == "Paramétrico").any()),
+    }
+    return metrics, df, pd.DataFrame(annual_rows)
+
+
+def _necessidade_total(table_df, budget_items, horizon: int) -> float:
+    """Custo total para tratar a rede (necessidade), respeitando o horizonte.
+
+    Usa o orçamento do banco quando disponível; senão, o custo econômico dos
+    segmentos. Independe do orçamento anual — serve de valor padrão do slider.
+    """
+    bi = _limit_budget_to_horizon(budget_items, horizon)
+    if bi is not None and not bi.empty:
+        return float(bi["Custo"].sum())
+    work = _economic_work_table(table_df)
+    return float(work["Custo econômico"].sum()) if not work.empty else 0.0
+
+
+def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_key: str) -> tuple[int, int, int]:
+    st.markdown(
+        """
+        <section class="economic-panel">
+          <div class="economic-head">
+            <div class="economic-title">
+              <div class="economic-icon">≋</div>
+              <div><h3>Cenários orçamentários</h3><p>Orçamento anual × horizonte × trechos prioritários</p></div>
+            </div>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    budget_col, horizon_col, prio_col = st.columns([1, 1, 1], gap="medium")
+
+    # Horizonte primeiro: a necessidade total (default do orçamento) depende dele.
+    with horizon_col:
+        _filter_caption("Horizonte")
+        horizon = st.slider(
+            "Horizonte", 1, 20, 8, 1,
+            key=f"horizon_{scenario_key}",
+            label_visibility="collapsed",
+        )
+        st.markdown(f'<div class="economic-control-value">{horizon} anos</div>', unsafe_allow_html=True)
+
+    # Default do orçamento = necessidade total (garante cobrir tudo). O máximo é
+    # estável (necessidade sem limite de horizonte) para o estado do slider não
+    # estourar ao mudar o horizonte.
+    # teto (ceil) em milhões — garante que o default cobre 100% da necessidade
+    need_mi = max(1, int(-(-_necessidade_total(table_df, budget_items, horizon) // 1_000_000)))
+    budget_max = max(50, int(-(-_necessidade_total(table_df, budget_items, 9999) // 1_000_000)))
+    with budget_col:
+        _filter_caption("Orçamento anual")
+        annual_budget = st.slider(
+            "Orçamento anual", 1, budget_max, need_mi, 1,
+            key=f"budget_{scenario_key}",
+            label_visibility="collapsed",
+        )
+        st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
+
+    # Filtro de trechos prioritários: mantém apenas os N SNVs de maior priorização.
+    snv_max = max(total_snv, 1)
+    with prio_col:
+        _filter_caption("Trechos prioritários")
+        top_n = st.slider(
+            "Trechos prioritários", 1, snv_max, snv_max, 1,
+            key=f"prio_{scenario_key}",
+            label_visibility="collapsed",
+        )
+        rotulo = "Todos" if top_n >= snv_max else f"Top {top_n}"
+        st.markdown(f'<div class="economic-control-value">{rotulo} de {snv_max}</div>', unsafe_allow_html=True)
+
+    return annual_budget, horizon, top_n
+
+
+def _render_economic_backlog_chart(annual_df: pd.DataFrame) -> None:
+    if annual_df is None or annual_df.empty:
+        return
+
+    max_backlog = max(float(annual_df["Backlog km"].max()), 1)
+    axis_max = _axis_max_10(max_backlog)
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="economic-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
+        for tick in ticks
+    )
+
+    bars = []
+    labels = []
+    for row in annual_df.to_dict("records"):
+        backlog = float(row["Backlog km"])
+        height = max(backlog / axis_max * 100, 1 if backlog > 0 else 0)
+        bars.append(
+            '<div class="economic-bar-item">'
+            f'<div class="economic-bar" style="height:{height:.2f}%"><span>{backlog:.1f} km</span></div>'
+            '</div>'
+        )
+        labels.append(f'<div>{int(row["Ano"])}</div>')
+
+    last_iap = float(annual_df["IAP médio"].iloc[-1])
+    last_cost = float(annual_df["Custo acumulado"].iloc[-1])
+    st.markdown(
+        '<section class="economic-panel">'
+        '<div class="economic-head">'
+        '<div class="economic-title"><div class="economic-icon">↗</div>'
+        '<div><h3>Backlog projetado</h3><p>Quanto fica pendente a cada ano, após aplicar o orçamento</p></div></div>'
+        f'<div class="solution-distribution-meta"><span>Custo acumulado · <strong>{_format_money(last_cost)}</strong></span><span>IAP final · <strong class="accent">{last_iap:.2f}</strong></span></div>'
+        '</div>'
+        '<div class="economic-chart">'
+        f'<div class="economic-y-axis">{tick_markup}</div>'
+        '<div>'
+        '<div class="economic-plot">'
+        f'<div class="economic-bars">{"".join(bars)}</div>'
+        '</div>'
+        f'<div class="economic-labels">{"".join(labels)}</div>'
+        '</div>'
+        '</div>'
+        '<div class="economic-legend"><span><i style="background:#ff7a00"></i>Backlog km</span><span><i style="background:#00c2e8"></i>Custo acumulado e IAP nos cards</span></div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_cost_by_solution(table_df: pd.DataFrame) -> None:
+    if table_df is None or table_df.empty:
+        return
+
+    cost_df = table_df[table_df["Custo econômico"] > 0].copy()
+    if cost_df.empty:
+        return
+
+    grouped = (
+        cost_df.groupby("Solução recomendada", as_index=False)
+        .agg({"Custo econômico": "sum", "Extensão": "sum"})
+        .sort_values("Custo econômico", ascending=False)
+    )
+    total_cost = float(grouped["Custo econômico"].sum())
+    total_km = float(grouped["Extensão"].sum())
+    max_percent = max(float(grouped["Custo econômico"].max()) / total_cost * 100, 1)
+    axis_max = _axis_max_10(max_percent)
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
+        for tick in ticks
+    )
+    bars = []
+    labels = []
+    for row in grouped.to_dict("records"):
+        label = str(row["Solução recomendada"])
+        cost = float(row["Custo econômico"])
+        km = float(row["Extensão"])
+        percent = cost / total_cost * 100
+        height = max(percent / axis_max * 100, 2)
+        bars.append(
+            '<div class="solution-bar-item">'
+            f'<div class="solution-bar" style="height:{height:.2f}%;background:{_solution_color(label)};">'
+            f'<span class="solution-bar-value">{percent:.1f}%<span>{_format_money(cost)} · {km:.1f} km</span></span>'
+            '</div></div>'
+        )
+        labels.append(f'<div class="solution-bar-label">{html.escape(label)}</div>')
+
+    st.markdown(
+        '<div class="solution-distribution">'
+        '<div class="solution-distribution-head">'
+        '<div class="solution-distribution-title"><div class="solution-distribution-icon">$</div>'
+        '<div><h3>Custos por solução</h3><p>Onde o orçamento é consumido por tipo de intervenção</p></div></div>'
+        f'<div class="solution-distribution-meta"><span>Total · <strong>{_format_money(total_cost)}</strong></span><span>Trecho · <strong>{total_km:.1f} km</strong></span></div>'
+        '</div>'
+        '<div class="solution-bars">'
+        f'<div class="solution-y-axis">{tick_markup}</div>'
+        '<div class="solution-chart-area"><div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid">{"".join(bars)}</div></div>'
+        f'<div class="solution-label-grid">{"".join(labels)}</div></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_budget_cost_by_year(budget_items: pd.DataFrame) -> None:
+    if budget_items is None or budget_items.empty:
+        return
+
+    grouped = budget_items.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano")
+    total_cost = float(grouped["Custo"].sum())
+    max_cost = max(float(grouped["Custo"].max()), 1)
+    axis_max = _axis_max_10(max_cost / 1_000_000)
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="economic-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
+        for tick in ticks
+    )
+    bars = []
+    labels = []
+    for row in grouped.to_dict("records"):
+        cost_mi = float(row["Custo"]) / 1_000_000
+        height = max(cost_mi / axis_max * 100, 2 if cost_mi > 0 else 0)
+        value_label = _format_money_chart(float(row["Custo"]))
+        bars.append(
+            '<div class="economic-bar-item">'
+            f'<div class="economic-bar" style="height:{height:.2f}%;background:#9aa0a6;opacity:.95;"><span>{value_label}</span></div>'
+            '</div>'
+        )
+        labels.append(f'<div>{int(row["Ano"])}</div>')
+
+    st.markdown(
+        '<section class="economic-panel">'
+        '<div class="economic-head">'
+        '<div class="economic-title"><div class="economic-icon">$</div>'
+        '<div><h3>Custo por ano</h3><p>Programação orçamentária cadastrada no banco</p></div></div>'
+        f'<div class="solution-distribution-meta"><span>Total · <strong>{_format_money(total_cost)}</strong></span></div>'
+        '</div>'
+        '<div class="economic-chart">'
+        f'<div class="economic-y-axis">{tick_markup}</div>'
+        '<div>'
+        '<div class="economic-plot">'
+        f'<div class="economic-bars">{"".join(bars)}</div>'
+        '</div>'
+        f'<div class="economic-labels">{"".join(labels)}</div>'
+        '</div>'
+        '</div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_budget_cost_by_solution(budget_items: pd.DataFrame) -> None:
+    if budget_items is None or budget_items.empty:
+        return
+
+    grouped = (
+        budget_items.groupby("Solução", as_index=False)
+        .agg({"Custo": "sum", "Extensão": "sum"})
+        .sort_values("Custo", ascending=False)
+    )
+    total_cost = float(grouped["Custo"].sum())
+    total_km = float(budget_items.drop_duplicates(["_budget_id", "_segment_id"])["Extensão"].sum())
+    max_percent = max(float(grouped["Custo"].max()) / total_cost * 100, 1)
+    axis_max = _axis_max_10(max_percent)
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
+        for tick in ticks
+    )
+
+    bars = []
+    labels = []
+    for row in grouped.to_dict("records"):
+        label = str(row["Solução"])
+        cost = float(row["Custo"])
+        km = float(row["Extensão"])
+        percent = cost / total_cost * 100
+        height = max(percent / axis_max * 100, 2)
+        color = _solution_color(label)
+        bars.append(
+            '<div class="solution-bar-item">'
+            f'<div class="solution-bar" style="height:{height:.2f}%;background:{color};">'
+            f'<span class="solution-bar-value">{percent:.1f}%<span>{_format_money(cost)} · {km:.1f} km</span></span>'
+            '</div></div>'
+        )
+        labels.append(f'<div class="solution-bar-label">{html.escape(label)}</div>')
+
+    st.markdown(
+        '<div class="solution-distribution">'
+        '<div class="solution-distribution-head">'
+        '<div class="solution-distribution-title"><div class="solution-distribution-icon">$</div>'
+        '<div><h3>Custos por solução</h3><p>Itens detalhados do orçamento, não apenas a solução final do IAP</p></div></div>'
+        f'<div class="solution-distribution-meta"><span>Total · <strong>{_format_money(total_cost)}</strong></span><span>Trecho · <strong>{total_km:.1f} km</strong></span></div>'
+        '</div>'
+        '<div class="solution-bars">'
+        f'<div class="solution-y-axis">{tick_markup}</div>'
+        '<div class="solution-chart-area"><div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid">{"".join(bars)}</div></div>'
+        f'<div class="solution-label-grid">{"".join(labels)}</div></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _group_priority_by_snv(table_df: pd.DataFrame) -> pd.DataFrame:
+    if table_df is None or table_df.empty:
+        return pd.DataFrame()
+
+    agg = {
+        "Prioridade": "min",
+        "Km Inicial": "min",
+        "Km Final": "max",
+        "Extensão": "sum",
+        "IAP": "mean",
+        "Custo econômico": "sum",
+        "Solução recomendada": lambda values: " + ".join(dict.fromkeys(str(value) for value in values if str(value).strip())),
+    }
+    for col in ("IPT", "IPE", "Priorização"):
+        if col in table_df.columns:
+            agg[col] = "max"  # constantes por SNV — "max" só extrai o valor
+
+    grouped = (
+        table_df.groupby("SNV", as_index=False)
+        .agg(agg)
+        .sort_values(["Prioridade", "IAP", "Km Inicial"], ascending=[True, True, True])
+        .reset_index(drop=True)
+    )
+    for col in ("IPT", "IPE", "Priorização"):
+        if col not in grouped.columns:
+            grouped[col] = 0.0
+        grouped[col] = grouped[col].fillna(0.0)
+    grouped["Classe prioridade"] = grouped["Priorização"].map(classificar_prioridade)
+    grouped["Prioridade"] = range(1, len(grouped) + 1)
+    return grouped
+
+
+def _group_budget_by_snv(budget_items: pd.DataFrame, priority_table: pd.DataFrame) -> pd.DataFrame:
+    if budget_items is None or budget_items.empty:
+        return _group_priority_by_snv(priority_table)
+
+    cost_by_snv = (
+        budget_items.groupby("SNV", as_index=False)
+        .agg(
+            {
+                "Custo": "sum",
+                "Km Inicial": "min",
+                "Km Final": "max",
+                "Solução": lambda values: " + ".join(dict.fromkeys(str(value) for value in values if str(value).strip())),
+            }
+        )
+        .rename(columns={"Custo": "Custo econômico", "Solução": "Solução recomendada"})
+    )
+    extension_by_snv = (
+        budget_items.drop_duplicates(["SNV", "_segment_id"])
+        .groupby("SNV", as_index=False)["Extensão"]
+        .sum()
+    )
+    grouped = cost_by_snv.merge(extension_by_snv, on="SNV", how="left")
+
+    priority = _group_priority_by_snv(priority_table)
+    if not priority.empty:
+        grouped = grouped.merge(
+            priority[["SNV", "Prioridade", "IAP", "IPT", "IPE", "Priorização"]],
+            on="SNV",
+            how="left",
+        )
+    else:
+        grouped["Prioridade"] = range(1, len(grouped) + 1)
+        grouped["IAP"] = 0
+        grouped["IPT"] = 0.0
+        grouped["IPE"] = 0.0
+        grouped["Priorização"] = 0.0
+
+    grouped["Prioridade"] = grouped["Prioridade"].fillna(len(grouped) + 1).astype(int)
+    grouped["IAP"] = grouped["IAP"].fillna(0)
+    for col in ("IPT", "IPE", "Priorização"):
+        grouped[col] = grouped[col].fillna(0.0)
+    grouped["Classe prioridade"] = grouped["Priorização"].map(classificar_prioridade)
+    grouped = grouped.sort_values(["Prioridade", "IAP", "Km Inicial"], ascending=[True, True, True]).reset_index(drop=True)
+    grouped["Prioridade"] = range(1, len(grouped) + 1)
+    return grouped
+
+
+def _select_snv_attended_by_budget(snv_table: pd.DataFrame, annual_budget_mi: int) -> pd.DataFrame:
+    if snv_table is None or snv_table.empty:
+        return pd.DataFrame()
+
+    remaining = float(annual_budget_mi) * 1_000_000
+    attended_rows = []
+    # Atende em ordem ESTRITA de prioridade: percorre do mais prioritário ao
+    # menos e para no primeiro trecho que não couber — assim nada abaixo do
+    # corte de prioridade é atendido na frente de um trecho mais prioritário.
+    for row in snv_table.to_dict("records"):
+        cost = float(row.get("Custo econômico", 0) or 0)
+        if cost > remaining:
+            break
+        row["Orçamento restante"] = remaining - cost
+        attended_rows.append(row)
+        remaining -= cost
+
+    return pd.DataFrame(attended_rows)
+
+
+def _solution_text_color(color: str) -> str:
+    return "#f4f7fb" if color.lower() in {"#d71920", "#00a651", "#f2a51a"} else "#061018"
+
+
+def _consolidar_trechos_por_solucao(segments: pd.DataFrame) -> pd.DataFrame:
+    """Funde segmentos contíguos de mesma solução e ano numa única linha.
+
+    Evita repetir a mesma solução km a km com o mesmo custo (ex.: fresagem a
+    R$ 677 mil/km): soma extensão e custo e estende o intervalo de km. Trechos
+    com lacuna ou de solução/ano diferentes permanecem separados.
+    """
+    if segments is None or segments.empty:
+        return segments
+
+    ordenado = segments.sort_values(
+        ["Solução recomendada", "Ano", "Km Inicial"]
+    ).reset_index(drop=True)
+
+    grupos: list[dict] = []
+    atual: dict | None = None
+    for row in ordenado.to_dict("records"):
+        contiguo = (
+            atual is not None
+            and str(row.get("Solução recomendada")) == str(atual["Solução recomendada"])
+            and str(row.get("Ano", "")) == str(atual["Ano"])
+            and abs(float(row["Km Inicial"]) - float(atual["Km Final"])) < 0.011
+        )
+        if contiguo:
+            atual["Km Final"] = float(row["Km Final"])
+            atual["Extensão"] += float(row.get("Extensão", 0) or 0)
+            atual["Custo econômico"] += float(row.get("Custo econômico", 0) or 0)
+            atual["Segmentos"] += 1
+        else:
+            atual = {
+                "Km Inicial": float(row["Km Inicial"]),
+                "Km Final": float(row["Km Final"]),
+                "Extensão": float(row.get("Extensão", 0) or 0),
+                "Solução recomendada": row.get("Solução recomendada"),
+                "Custo econômico": float(row.get("Custo econômico", 0) or 0),
+                "Ano": row.get("Ano", ""),
+                "Segmentos": 1,
+            }
+            grupos.append(atual)
+
+    return pd.DataFrame(grupos).sort_values(["Ano", "Km Inicial"]).reset_index(drop=True)
+
+
+def _snv_segments_table(snv: str, budget_items: pd.DataFrame | None, priority_table: pd.DataFrame | None) -> pd.DataFrame:
+    segments = pd.DataFrame()
+    if budget_items is not None and not budget_items.empty:
+        source = budget_items[budget_items["SNV"].astype(str) == str(snv)].copy()
+        if not source.empty:
+            segments = (
+                source.groupby(["_segment_id", "Km Inicial", "Km Final", "Extensão", "Solução"], as_index=False)
+                .agg({"Custo": "sum", "Ano": "min"})
+                .sort_values(["Ano", "Km Inicial", "Solução"])
+                .rename(columns={"Solução": "Solução recomendada", "Custo": "Custo econômico"})
+            )
+
+    if segments.empty and priority_table is not None and not priority_table.empty:
+        source = priority_table[priority_table["SNV"].astype(str) == str(snv)].copy()
+        if not source.empty:
+            segments = (
+                source.groupby(["Km Inicial", "Km Final", "Extensão", "Solução recomendada"], as_index=False)
+                .agg({"Custo econômico": "sum"})
+                .sort_values(["Km Inicial", "Solução recomendada"])
+            )
+            segments["Ano"] = ""
+
+    # Consolida trechos contíguos da mesma solução/ano para não repetir custo por km.
+    return _consolidar_trechos_por_solucao(segments)
+
+
+def _segment_details_markup(segments: pd.DataFrame) -> str:
+    if segments is None or segments.empty:
+        return '<span class="muted">Sem trechos</span>'
+
+    detail_rows = []
+    for item in segments.to_dict("records"):
+        solution = str(item.get("Solução recomendada", ""))
+        color = _solution_color(solution)
+        text_color = _solution_text_color(color)
+        year = item.get("Ano", "")
+        detail_rows.append(
+            "<tr>"
+            f"<td>{_format_km(float(item['Km Inicial']))}</td>"
+            f"<td>{_format_km(float(item['Km Final']))}</td>"
+            f"<td>{_format_km(float(item['Extensão']))} km</td>"
+            f"<td class='solution-chip-cell' style='background:{color};color:{text_color};'>{html.escape(solution)}</td>"
+            f"<td>{_format_money(float(item.get('Custo econômico', 0) or 0))}</td>"
+            f"<td>{html.escape(str(year)) if year else '-'}</td>"
+            "</tr>"
+        )
+
+    return (
+        '<div class="segment-popover">'
+        '<table class="segment-table">'
+        '<thead><tr><th>Km Inicial</th><th>Km Final</th><th>Extensão</th><th>Solução</th><th>Custo</th><th>Ano</th></tr></thead>'
+        f'<tbody>{"".join(detail_rows)}</tbody>'
+        '</table>'
+        '</div>'
+    )
+
+
+def _snv_strip_and_costs(snv: str, budget_items, priority_table):
+    """Dados do detalhe do trecho: faixa por km (solução dominante) + custo/solução.
+
+    Retorna (faixa, custos, total_km, total_cost), onde:
+      - faixa: blocos contíguos {km_ini, km_fim, ext, solucao, custo} ao longo do km
+        (em cada km, a solução de maior custo — a intervenção principal);
+      - custos: {solucao, custo, km} somados por solução (todos os itens do orçamento).
+    """
+    # FAIXA: solução final (IAP) por km, da tabela priorizada (uma por segmento),
+    # consolidando trechos contíguos de mesma solução -> blocos limpos, igual ao mapa.
+    faixa: list[dict] = []
+    if priority_table is not None and not priority_table.empty:
+        seg = priority_table[priority_table["SNV"].astype(str) == str(snv)]
+        if not seg.empty:
+            seg_df = (
+                seg.groupby(["Km Inicial", "Km Final", "Extensão", "Solução recomendada"], as_index=False)
+                ["Custo econômico"].sum()
+            )
+            seg_df["Ano"] = ""
+            consol = _consolidar_trechos_por_solucao(seg_df)
+            faixa = [
+                {
+                    "km_ini": float(r["Km Inicial"]),
+                    "km_fim": float(r["Km Final"]),
+                    "ext": float(r["Extensão"]),
+                    "solucao": str(r["Solução recomendada"]),
+                    "custo": float(r.get("Custo econômico", 0) or 0),
+                }
+                for r in consol.to_dict("records")
+            ]
+
+    # CUSTOS: por solução, do orçamento (todos os itens, multi-ano).
+    custos: list[dict] = []
+    if budget_items is not None and not budget_items.empty:
+        src = budget_items[budget_items["SNV"].astype(str) == str(snv)]
+        if not src.empty:
+            by_sol = src.groupby("Solução", as_index=False)["Custo"].sum()
+            km_sol = (
+                src.drop_duplicates(["_segment_id", "Solução"])
+                .groupby("Solução", as_index=False)["Extensão"].sum()
+            )
+            cdf = by_sol.merge(km_sol, on="Solução", how="left").sort_values("Custo", ascending=False)
+            custos = [
+                {"solucao": str(r["Solução"]), "custo": float(r["Custo"]), "km": float(r.get("Extensão") or 0)}
+                for r in cdf.to_dict("records")
+            ]
+    # Sem orçamento detalhado: usa o custo da solução final por km (da faixa).
+    if not custos and faixa:
+        agreg: dict[str, dict] = {}
+        for b in faixa:
+            item = agreg.setdefault(b["solucao"], {"solucao": b["solucao"], "custo": 0.0, "km": 0.0})
+            item["custo"] += b["custo"]
+            item["km"] += b["ext"]
+        custos = sorted(agreg.values(), key=lambda c: c["custo"], reverse=True)
+
+    if not faixa and not custos:
+        return [], [], 0.0, 0.0
+
+    total_km = sum(b["ext"] for b in faixa)
+    total_cost = sum(c["custo"] for c in custos) if custos else sum(b["custo"] for b in faixa)
+    return faixa, custos, total_km, total_cost
+
+
+def _snv_detail_chart_markup(snv: str, budget_items, priority_table) -> str:
+    """Detalhe do trecho: barras de custo por solução (com valor e km)."""
+    _faixa, custos, total_km, total_cost = _snv_strip_and_costs(snv, budget_items, priority_table)
+    if not custos:
+        return '<span class="muted">Sem trechos</span>'
+
+    max_cost = max((c["custo"] for c in custos), default=1.0) or 1.0
+    barras = "".join(
+        f'<div class="snv-cost-row">'
+        f'<span class="snv-cost-lbl">{html.escape(c["solucao"])}</span>'
+        f'<span class="snv-cost-track"><span class="snv-cost-bar" style="width:{c["custo"] / max_cost * 100:.2f}%;'
+        f'background:{_solution_color(c["solucao"])}"></span></span>'
+        f'<span class="snv-cost-val">{_format_money(c["custo"])} · Extensão: {_format_km(c["km"])} km</span>'
+        f'</div>'
+        for c in custos
+    )
+
+    return f'<div class="snv-cost-bars">{barras}</div>'
+
+
+def _render_solution_segments_map(segments_df, budget_items: pd.DataFrame, selected_snv: str) -> None:
+    if segments_df is None or segments_df.empty:
+        st.info("Sem geometria para exibir no mapa.")
+        return
+
+    map_segments = segments_df[segments_df["sre"].astype(str) == str(selected_snv)].copy()
+    if map_segments.empty:
+        st.info("Sem trechos georreferenciados para este SRE.")
+        return
+
+    if budget_items is not None and not budget_items.empty:
+        dominant = (
+            budget_items[budget_items["SNV"].astype(str) == str(selected_snv)]
+            .groupby(["_segment_id", "Solução"], as_index=False)["Custo"]
+            .sum()
+            .sort_values(["_segment_id", "Custo"], ascending=[True, False])
+            .drop_duplicates("_segment_id")
+            .rename(columns={"_segment_id": "segment_id"})
+        )
+        map_segments = map_segments.merge(dominant[["segment_id", "Solução"]], on="segment_id", how="left")
+    else:
+        map_segments["Solução"] = map_segments.get("classe_iap", "")
+
+    payload = []
+    for row in map_segments.to_dict("records"):
+        solution = str(row.get("Solução") or row.get("classe_iap") or "")
+        payload.append(
+            {
+                "segment_id": int(row["segment_id"]),
+                "sre": str(row.get("sre", selected_snv)),
+                "km_inicial": float(row["km_inicial"]),
+                "km_final": float(row["km_final"]),
+                "solution": solution,
+                "color": _solution_color(solution),
+                "paths": row["paths"],
+            }
+        )
+
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    map_html = f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <style>
+          html, body {{ margin:0; padding:0; background:#061018; }}
+          #map {{ height: 360px; width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid #1d3848; }}
+          .leaflet-control-container .leaflet-top, .leaflet-control-container .leaflet-bottom {{ display:none; }}
+        </style>
+      </head>
+      <body>
+        <div id="map"></div>
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <script>
+          const segments = {payload_json};
+          const map = L.map('map', {{ zoomControl:false, attributionControl:false, scrollWheelZoom:true }});
+          L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{ maxZoom: 19 }}).addTo(map);
+          const points = [];
+          const fmt = (value) => Number(value).toFixed(2);
+          segments.forEach((segment) => {{
+            segment.paths.forEach((path) => {{
+              const coords = path.map((coord) => [Number(coord[0]), Number(coord[1])]);
+              coords.forEach((coord) => points.push(coord));
+              L.polyline(coords, {{
+                color: segment.color,
+                weight: 7,
+                opacity: .96,
+                lineCap: 'round',
+                lineJoin: 'round'
+              }}).addTo(map).bindTooltip(
+                'SRE ' + segment.sre + ' · km ' + fmt(segment.km_inicial) + ' - ' + fmt(segment.km_final) + ' · ' + segment.solution
+              );
+            }});
+          }});
+          if (points.length) map.fitBounds(L.latLngBounds(points), {{ padding: [24, 24] }});
+        </script>
+      </body>
+    </html>
+    """
+    components.html(map_html, height=372, scrolling=False)
+
+
+_PRIORITY_CLASS_COLORS = {
+    "Prioridade Crítica": "#d71920",
+    "Prioridade Alta": "#f2a51a",
+    "Prioridade Média": "#fff200",
+    "Prioridade Baixa": "#7f909c",
+}
+
+
+def _priority_class_color(classe: str) -> str:
+    return _PRIORITY_CLASS_COLORS.get(str(classe or ""), "#7f909c")
+
+
+def _render_economic_priority_table(
+    snv_table: pd.DataFrame,
+    attended_snv_table: pd.DataFrame | None = None,
+    annual_budget_mi: int | None = None,
+    budget_items: pd.DataFrame | None = None,
+    priority_table: pd.DataFrame | None = None,
+    segments_df=None,
+) -> None:
+    if snv_table is None or snv_table.empty:
+        return
+
+    mode_col, summary_col = st.columns([0.55, 1.45], gap="medium")
+    with mode_col:
+        _filter_caption("Visualização")
+        view_mode = st.selectbox(
+            "Visualização da tabela",
+            ["SNVs atendidos pelo orçamento", "Todos os SNVs"],
+            label_visibility="collapsed",
+        )
+
+    if view_mode == "SNVs atendidos pelo orçamento":
+        view = attended_snv_table.copy() if attended_snv_table is not None else pd.DataFrame()
+        title = "SNVs atendidos pelo orçamento anual"
+        subtitle = f"Carteira inicial considerando {_format_money((annual_budget_mi or 0) * 1_000_000)} disponíveis no ano"
+    else:
+        view = snv_table.copy()
+        title = "Fila executiva de aplicação do orçamento"
+        subtitle = "SNVs consolidados conforme o cenário selecionado"
+
+    with summary_col:
+        if view.empty:
+            st.markdown('<div class="pagination-summary">Nenhum SNV inteiro cabe no orçamento anual selecionado.</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div class="pagination-summary">Exibindo {len(view)} SNVs · {_format_km(float(view["Extensão"].sum()))} km · {_format_money(float(view["Custo econômico"].sum()))}</div>',
+                unsafe_allow_html=True,
+            )
+
+    if view.empty:
+        return
+
+    view = view.head(25).copy()
+    rows_markup = []
+    for index, row in enumerate(view.to_dict("records"), start=1):
+        snv = str(row["SNV"])
+        toggle_id = f"snv-detail-{index}"
+        detail_chart = _snv_detail_chart_markup(snv, budget_items, priority_table)
+        rows_markup.append(
+            "<tr class='snv-row'>"
+            f"<td class='muted'>{int(row['Prioridade'])}</td>"
+            f"<td class='mono'>{html.escape(snv)}</td>"
+            f"<td>{_format_km(float(row['Km Inicial']))}</td>"
+            f"<td>{_format_km(float(row['Km Final']))}</td>"
+            f"<td>{_format_km(float(row['Extensão']))} km</td>"
+            f"<td>{float(row['IAP']):.2f}</td>"
+            f"<td>{float(row.get('IPT', 0) or 0):.2f}</td>"
+            f"<td>{float(row.get('IPE', 0) or 0):.2f}</td>"
+            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{float(row.get('Priorização', 0) or 0):.2f}</span></td>"
+            f"<td>{html.escape(str(row['Solução recomendada']))}</td>"
+            f"<td>{_format_money(float(row['Custo econômico']))}</td>"
+            "<td class='detail-toggle-cell'>"
+            f"<label class='detail-toggle' for='{toggle_id}'><span class='caret'>▸</span>Ver detalhes</label>"
+            "</td>"
+            "</tr>"
+            "<tr class='detail-row'>"
+            "<td class='detail-cell' colspan='12'>"
+            f"<input type='checkbox' id='{toggle_id}' class='detail-checkbox'>"
+            f"<div class='detail-content'>{detail_chart}</div>"
+            "</td>"
+            "</tr>"
+        )
+
+    st.markdown(
+        """
+        <section class="solution-card">
+          <div class="solution-card-head">
+            <h3>""" + title + """</h3>
+            <p>""" + subtitle + """</p>
+          </div>
+          <div class="solution-table-wrap">
+            <table class="solution-table">
+              <thead>
+                <tr>
+                  <th>Prior.</th>
+                  <th>SRE</th>
+                  <th>Km Inicial</th>
+                  <th>Km Final</th>
+                  <th>Extensão</th>
+                  <th>IAP</th>
+                  <th>IPT</th>
+                  <th>IPE</th>
+                  <th>Priorização</th>
+                  <th>Solução recomendada</th>
+                  <th>Custo</th>
+                  <th>Detalhes</th>
+                </tr>
+              </thead>
+              <tbody>
+        """
+        + "".join(rows_markup)
+        + """
+              </tbody>
+            </table>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _attended_segment_ids(segments_df, attended_snv_table) -> set:
+    """IDs dos segmentos pertencentes aos SNVs atendidos (casados pelo código SRE)."""
+    if segments_df is None or segments_df.empty or "sre" not in segments_df:
+        return set()
+    attended_snvs = (
+        set(attended_snv_table["SNV"].astype(str))
+        if attended_snv_table is not None and not attended_snv_table.empty
+        else set()
+    )
+    if not attended_snvs:
+        return set()
+    return set(segments_df[segments_df["sre"].astype(str).isin(attended_snvs)]["segment_id"].astype(int))
+
+
+def _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget: int, attended_km: float) -> None:
+    """Mostra no mapa quais trechos o orçamento anual consegue atender (cinza = fora)."""
+    if segments_df is None or segments_df.empty or "sre" not in segments_df:
+        return
+
+    attended_ids = _attended_segment_ids(segments_df, attended_snv_table)
+    total_km = float((segments_df["km_final"] - segments_df["km_inicial"]).clip(lower=0).sum())
+
+    st.markdown(
+        '<section class="solution-distribution" style="padding-bottom:16px">'
+        '<div class="solution-distribution-head" style="margin-bottom:0">'
+        '<div class="solution-distribution-title"><div class="solution-distribution-icon">◎</div>'
+        '<div><h3>Cenário no mapa</h3><p>Trechos atendidos pelo orçamento anual · cinza = fora do orçamento</p></div></div>'
+        f'<div class="solution-distribution-meta"><span>Atendido · <strong>{attended_km:.1f} km</strong></span>'
+        f'<span>Orçamento · <strong class="accent">{_format_money(annual_budget * 1_000_000)}/ano</strong></span></div>'
+        '</div></section>',
+        unsafe_allow_html=True,
+    )
+    render_overview_map(
+        segments_df,
+        total_km,
+        attended_ids=attended_ids,
+        legend_foot='<span class="legend-line" style="background:#46586a"></span>Cinza · trecho fora do orçamento anual',
+    )
+
+
+def _render_economic_page(
+    table_df,
+    budget_items=None,
+    segments_df=None,
+    scenario_key: str = "",
+    road: str = "",
+    scenario_label: str = "",
+) -> None:
+    total_snv = 0
+    if table_df is not None and not table_df.empty:
+        total_snv = int(table_df["SNV"].dropna().astype(str).nunique()) if "SNV" in table_df else int(len(table_df))
+
+    annual_budget, horizon, top_n = _render_economic_controls(table_df, budget_items, total_snv, scenario_key)
+    budget_items = _limit_budget_to_horizon(budget_items, horizon)
+    metrics, prioritized_table, annual_df = _simulate_economic_scenario(table_df, annual_budget, horizon, "Balanceada")
+    if not metrics:
+        st.info("Sem dados de intervenção para montar o cenário econômico.")
+        return
+
+    # Tabela de SNVs ordenada por priorização e recortada aos trechos prioritários.
+    snv_budget_table = _group_budget_by_snv(budget_items, prioritized_table)
+    if top_n < len(snv_budget_table):
+        snv_budget_table = snv_budget_table.head(top_n).reset_index(drop=True)
+    top_snvs = set(snv_budget_table["SNV"].astype(str))
+
+    # Restringe todo o restante (orçamento, gráficos, mapa) ao escopo prioritário.
+    if budget_items is not None and not budget_items.empty:
+        budget_items = budget_items[budget_items["SNV"].astype(str).isin(top_snvs)].copy()
+    if prioritized_table is not None and not prioritized_table.empty:
+        prioritized_table = prioritized_table[prioritized_table["SNV"].astype(str).isin(top_snvs)].copy()
+
+    if budget_items is not None and not budget_items.empty:
+        total_need = float(budget_items["Custo"].sum())
+    else:
+        total_need = float(snv_budget_table["Custo econômico"].sum()) if not snv_budget_table.empty else 0.0
+    metrics["total_need"] = total_need
+    metrics["deficit"] = max(total_need - metrics["total_budget"], 0.0)
+
+    scope_snv = int(len(snv_budget_table))
+    annual_coverage = min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0
+    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget)
+    attended_snv_count = int(len(attended_snv_table))
+    attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
+
+    render_metric_cards(
+        [
+            {
+                "title": "NECESSIDADE TOTAL",
+                "value": _format_money(metrics["total_need"]),
+                "subtitle": "Custo estimado para tratar a rede",
+                "tone": "cyan",
+                "icon": "$",
+            },
+            {
+                "title": "COBERTURA ANUAL",
+                "value": f"{annual_coverage:.1f}%",
+                "subtitle": f"{_format_money(annual_budget * 1_000_000)} cobre da necessidade",
+                "tone": "green",
+                "icon": "↗",
+            },
+            {
+                "title": "SNV ATENDIDOS",
+                "value": f"{attended_snv_count}/{scope_snv}",
+                "subtitle": "Trechos prioritários no orçamento",
+                "tone": "orange",
+                "icon": "#",
+            },
+            {
+                "title": "EXTENSÃO ATENDIDA",
+                "value": f"{attended_km:.1f} km",
+                "subtitle": "SNVs cobertos no ano",
+                "tone": "yellow",
+                "icon": "⌁",
+            },
+        ]
+    )
+    _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget, attended_km)
+    if budget_items is not None and not budget_items.empty:
+        _render_budget_cost_by_year(budget_items)
+        _render_budget_cost_by_solution(budget_items)
+    else:
+        _render_economic_backlog_chart(annual_df)
+        _render_cost_by_solution(prioritized_table)
+    _render_economic_priority_table(
+        snv_budget_table,
+        attended_snv_table,
+        annual_budget,
+        budget_items,
+        prioritized_table,
+    )
+
+    if metrics["uses_parametric_cost"] and (budget_items is None or budget_items.empty):
+        st.markdown(
+            '<div class="economic-note">Observação: este cenário usa custo do banco quando disponível. Para trechos sem orçamento no JSON de soluções, foi aplicado custo paramétrico provisório por km para permitir simulação gerencial.</div>',
+            unsafe_allow_html=True,
+        )
+
+    _render_work_plan_button(
+        scenario_key=scenario_key,
+        road=road,
+        scenario_label=scenario_label,
+        annual_budget=annual_budget,
+        horizon=horizon,
+        top_label="Todos" if top_n >= total_snv else f"Top {top_n}",
+        metrics=metrics,
+        annual_coverage=annual_coverage,
+        attended_snv_table=attended_snv_table,
+        scope_snv=scope_snv,
+        attended_km=attended_km,
+        budget_items=budget_items,
+        segments_df=segments_df,
+        priority_table=prioritized_table,
+    )
+
+
+def _build_service_order_detail(attended_snv_table, priority_table) -> pd.DataFrame:
+    """Detalhamento por segmento p/ ordem de serviço: trechos contíguos que precisam
+    de intervenção (solução final do IAP), por SNV atendido, em ordem de prioridade."""
+    if (
+        attended_snv_table is None
+        or attended_snv_table.empty
+        or priority_table is None
+        or priority_table.empty
+    ):
+        return pd.DataFrame()
+
+    rows = []
+    for snv in attended_snv_table["SNV"].astype(str).tolist():
+        seg = priority_table[priority_table["SNV"].astype(str) == snv]
+        if seg.empty:
+            continue
+        base = seg.groupby(
+            ["Km Inicial", "Km Final", "Extensão", "Solução recomendada"], as_index=False
+        )["Custo econômico"].sum()
+        base["Ano"] = ""
+        for r in _consolidar_trechos_por_solucao(base).to_dict("records"):
+            solucao = str(r["Solução recomendada"]).strip()
+            if solucao.lower() in {"sem intervenção", "sem intervencao", ""}:
+                continue  # ordem de serviço só onde precisa de intervenção
+            rows.append(
+                {
+                    "SNV": snv,
+                    "Km Inicial": float(r["Km Inicial"]),
+                    "Km Final": float(r["Km Final"]),
+                    "Extensão": float(r["Extensão"]),
+                    "Intervenção": solucao,
+                    "Custo": float(r.get("Custo econômico", 0) or 0),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _render_work_plan_button(
+    *,
+    scenario_key: str,
+    road: str,
+    scenario_label: str,
+    annual_budget: int,
+    horizon: int,
+    top_label: str,
+    metrics: dict,
+    annual_coverage: float,
+    attended_snv_table,
+    scope_snv: int,
+    attended_km: float,
+    budget_items,
+    segments_df,
+    priority_table=None,
+) -> None:
+    """Botão no fim da tela: gera o PDF do plano de trabalho do cenário atual."""
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    state_key = f"wp_pdf_{scenario_key}"
+
+    if st.button("📄 Gerar plano de trabalho (PDF)", key=f"genpdf_{scenario_key}"):
+        seg_records = (
+            segments_df[["segment_id", "classe_iap", "paths"]].to_dict("records")
+            if segments_df is not None and not segments_df.empty
+            else []
+        )
+        # Gráficos do plano refletem só os trechos atendidos pelo orçamento.
+        attended_snvs = (
+            set(attended_snv_table["SNV"].astype(str))
+            if attended_snv_table is not None and not attended_snv_table.empty
+            else set()
+        )
+        plan_budget = budget_items
+        if budget_items is not None and not budget_items.empty and attended_snvs:
+            plan_budget = budget_items[budget_items["SNV"].astype(str).isin(attended_snvs)].copy()
+        with st.spinner("Gerando plano de trabalho..."):
+            st.session_state[state_key] = build_work_plan_pdf(
+                road=road or "Rodovia",
+                scenario_label=scenario_label or "Paragon",
+                generated_at=date.today().strftime("%d/%m/%Y"),
+                annual_budget_mi=annual_budget,
+                horizon=horizon,
+                top_label=top_label,
+                metrics=metrics,
+                annual_coverage=annual_coverage,
+                attended_snv_table=attended_snv_table,
+                scope_snv=scope_snv,
+                attended_km=attended_km,
+                budget_items=plan_budget,
+                segments=seg_records,
+                attended_ids=_attended_segment_ids(segments_df, attended_snv_table),
+                class_colors=_MAP_CLASS_COLORS,
+                solution_color=_solution_color,
+                segments_detail=_build_service_order_detail(attended_snv_table, priority_table),
+            )
+
+    if st.session_state.get(state_key):
+        st.download_button(
+            "⬇ Baixar plano de trabalho",
+            data=st.session_state[state_key],
+            file_name=f"plano_trabalho_{road.replace('/', '-') or 'cenario'}.pdf",
+            mime="application/pdf",
+            key=f"dlpdf_{scenario_key}",
+        )
+
+
+_SOLUTION_SEVERITY = [
+    ("reconstru", "Reconstrução"),
+    ("fresagem", "Fresagem e recomposição"),
+    ("reforç", "Reforço"),
+    ("microrrev", "Microrrevestimento"),
+    ("reparo", "Reparo localizado"),
+]
+
+
+def _solution_severity(nome: str) -> int:
+    """Ranqueia a gravidade da solução (0 = mais severa: Reconstrução)."""
+    n = str(nome).lower()
+    for i, (chave, _) in enumerate(_SOLUTION_SEVERITY):
+        if chave in n:
+            return i
+    return len(_SOLUTION_SEVERITY)
+
+
+def _render_intervention_table(sre_history: dict) -> None:
+    """Lista cada SNV e em quais anos terá intervenção (chips de ano coloridos pela solução mais severa)."""
+    if not sre_history:
+        return
+
+    present_ranks: set[int] = set()
+    rows = []
+    for sre in sorted(sre_history):
+        chips = []
+        for h in sre_history[sre]:
+            if h.get("km", 0) > 0 and h.get("solucoes"):
+                # cor do chip = solução mais severa do ano (ex.: Reconstrução vence Fresagem)
+                severa = min(h["solucoes"], key=_solution_severity)
+                present_ranks.add(_solution_severity(severa))
+                cor = _solution_color(severa)
+                tip = html.escape(f"{h['year']} · {h['label']} · {_format_km(h['km'])} km", quote=True)
+                chips.append(
+                    f'<span class="sol-chip" style="background:{cor};color:{_chip_text_color(cor)}" title="{tip}">{h["year"]}</span>'
+                )
+        anos = "".join(chips) if chips else "<span class='muted'>Sem intervenção</span>"
+        rows.append(
+            "<tr>"
+            f"<td class='mono'>{html.escape(sre)}</td>"
+            f"<td>{anos}</td>"
+            "</tr>"
+        )
+
+    legend = "".join(
+        f'<span class="cp-leg"><span class="cp-sw" style="background:{_solution_color(rotulo)}"></span>{html.escape(rotulo)}</span>'
+        for i, (_, rotulo) in enumerate(_SOLUTION_SEVERITY)
+        if i in present_ranks
+    )
+
+    st.markdown(
+        '<section class="solution-card">'
+        '<div class="solution-card-head">'
+        '<h3>Pontos de intervenção por trecho (SNV)</h3>'
+        '<p>Em quais anos cada trecho da rodovia receberá obra · cor = solução mais relevante do ano</p>'
+        '</div>'
+        '<div class="solution-table-wrap"><table class="solution-table">'
+        '<thead><tr><th>SNV</th><th>Anos com intervenção</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></div>'
+        f'<div class="cp-legend" style="padding:0 20px 18px">{legend}</div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_projection_chart(series: dict, bands: list, ymax: float, meta: float, sre: str) -> None:
+    years = series.get("years", [])
+    iap = series.get("iap", [])
+    interv = series.get("interv", [])
+    n = len(years)
+    if n == 0:
+        return
+
+    W, H = 1080, 380
+    L, R, T, B = 44, 118, 18, 40   # R largo p/ rótulos das faixas de conceito
+    pw, ph = W - L - R, H - T - B
+
+    def X(i: int) -> float:
+        return L + (i / (n - 1) if n > 1 else 0) * pw
+
+    def Y(v: float) -> float:
+        return T + (1 - min(float(v), ymax) / ymax) * ph
+
+    p: list[str] = []
+    # faixas de conceito (fundo)
+    for b in bands:
+        y_hi, y_lo = Y(b["high"]), Y(b["low"])
+        p.append(f'<rect x="{L}" y="{y_hi:.1f}" width="{pw}" height="{(y_lo - y_hi):.1f}" fill="{b["color"]}" opacity="0.18"/>')
+        if (y_lo - y_hi) >= 13:
+            p.append(f'<text x="{L + pw + 8}" y="{(y_hi + y_lo) / 2 + 3:.1f}" fill="{b["color"]}" font-size="10" font-weight="700">{html.escape(str(b["conceito"]))}</text>')
+    # grade + eixo Y
+    for t in range(0, int(ymax) + 1):
+        gy = Y(t)
+        p.append(f'<line x1="{L}" y1="{gy:.1f}" x2="{L + pw}" y2="{gy:.1f}" stroke="rgba(148,163,184,.12)" stroke-width="1"/>')
+        p.append(f'<text x="{L - 8}" y="{gy + 3:.1f}" fill="#8f9eaa" font-size="10" text-anchor="end">{t}</text>')
+    # linha da meta
+    my = Y(meta)
+    p.append(f'<line x1="{L}" y1="{my:.1f}" x2="{L + pw}" y2="{my:.1f}" stroke="#ff314a" stroke-width="1.6" stroke-dasharray="6 4"/>')
+    p.append(f'<text x="{L + 6}" y="{my - 5:.1f}" fill="#ff6b7e" font-size="10" font-weight="700">Meta 2,5</text>')
+    # linha do trecho
+    pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(iap))
+    p.append(f'<polyline points="{pts}" fill="none" stroke="#f4f7fb" stroke-width="2.6"/>')
+    # marcadores (azul = ano com intervenção) + área transparente p/ hover (tooltip JS)
+    solucoes = series.get("solucoes") or [[] for _ in years]
+    for i, v in enumerate(iap):
+        tip = f"{years[i]} · IAP {v:.2f}"
+        if interv[i] and i < len(solucoes) and solucoes[i]:
+            tip += " · " + " + ".join(solucoes[i])
+        tip = html.escape(tip, quote=True)
+        if interv[i]:
+            p.append(f'<circle cx="{X(i):.1f}" cy="{Y(v):.1f}" r="5" fill="#00c2e8" stroke="#06222b" stroke-width="1.5"/>')
+        else:
+            p.append(f'<circle cx="{X(i):.1f}" cy="{Y(v):.1f}" r="2.6" fill="#f4f7fb"/>')
+        p.append(f'<circle class="pt" data-tip="{tip}" cx="{X(i):.1f}" cy="{Y(v):.1f}" r="13" fill="transparent" pointer-events="all"/>')
+    # eixo X
+    step = max(1, n // 12)
+    for i, yr in enumerate(years):
+        if i % step == 0 or i == n - 1:
+            p.append(f'<text x="{X(i):.1f}" y="{T + ph + 16}" fill="#8f9eaa" font-size="10" text-anchor="middle">{yr}</text>')
+
+    svg = (
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet" '
+        f'style="display:block;width:100%;height:auto">{"".join(p)}</svg>'
+    )
+
+    css = (
+        'html,body{margin:0;padding:0;background:#0b1d28;'
+        'font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;}'
+        '.card{padding:18px 20px 16px;color:#f4f7fb;}'
+        '.h3{margin:0;font-size:15px;font-weight:850;}'
+        '.sub{margin:3px 0 0;font-size:12px;color:#92a1ad;}'
+        '.chart{margin-top:14px;}'
+        '.legend{display:flex;gap:20px;flex-wrap:wrap;margin-top:12px;padding-top:12px;'
+        'border-top:1px solid rgba(148,163,184,.12);}'
+        '.leg{display:inline-flex;align-items:center;gap:8px;color:#cbd5dd;font-size:12px;font-weight:700;}'
+        '.leg .sw{width:16px;height:4px;border-radius:2px;display:inline-block;}'
+        '.leg .sw-dot{width:11px;height:11px;border-radius:999px;}'
+        '.leg .sw-dash{width:16px;border-top:2px dashed #ff314a;}'
+        '.pt{cursor:pointer;}'
+        '#tip{position:fixed;pointer-events:none;background:rgba(7,17,25,.97);'
+        'border:1px solid #244257;color:#f4f7fb;font-size:12px;font-weight:600;'
+        'padding:7px 10px;border-radius:8px;opacity:0;transition:opacity .08s;'
+        'white-space:nowrap;z-index:99;box-shadow:0 10px 30px rgba(0,0,0,.45);}'
+    )
+    js = (
+        "var tip=document.getElementById('tip');"
+        "document.querySelectorAll('.pt').forEach(function(el){"
+        "el.addEventListener('mousemove',function(e){"
+        "tip.textContent=el.getAttribute('data-tip');tip.style.opacity='1';"
+        "tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-6)+'px';});"
+        "el.addEventListener('mouseleave',function(){tip.style.opacity='0';});});"
+    )
+    legend_inner = (
+        '<span class="leg"><span class="sw" style="background:#f4f7fb"></span>Condição do trecho (IAP)</span>'
+        '<span class="leg"><span class="sw sw-dot" style="background:#00c2e8"></span>Ano com intervenção</span>'
+        '<span class="leg"><span class="sw sw-dash"></span>Meta mínima (2,5)</span>'
+    )
+    doc = (
+        "<!doctype html><html><head><meta charset='utf-8'><style>" + css + "</style></head><body>"
+        "<div class='card'>"
+        f"<div class='h3'>Projeção do trecho {html.escape(str(sre))}</div>"
+        "<div class='sub'>Qualidade do pavimento (IAP) ano a ano · faixas = conceito · marcador azul = ano com intervenção</div>"
+        f"<div class='chart'>{svg}</div>"
+        f"<div class='legend'>{legend_inner}</div>"
+        "</div><div id='tip'></div>"
+        "<script>" + js + "</script></body></html>"
+    )
+    components.html(doc, height=540, scrolling=False)
+
+
+def _chip_text_color(hex_color: str) -> str:
+    """Texto escuro ou claro conforme a luminância da cor de fundo (legibilidade)."""
+    h = str(hex_color).lstrip("#")
+    if len(h) != 6:
+        return "#061018"
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return "#061018" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#f4f7fb"
+
+
+def _solution_chips(solucoes: list) -> str:
+    chips = []
+    for nome in solucoes:
+        cor = _solution_color(str(nome))
+        chips.append(
+            f'<span class="sol-chip" style="background:{cor};color:{_chip_text_color(cor)}">{html.escape(str(nome))}</span>'
+        )
+    return "".join(chips)
+
+
+def _render_projection_history(history: list, sre: str) -> None:
+    """Histórico de intervenções do trecho ano a ano (o que foi feito em cada ano)."""
+    if not history:
+        return
+
+    rows = [
+        "<tr>"
+        f"<td class='muted'>{h['year']}</td>"
+        f"<td>{_solution_chips(h['solucoes'])}</td>"
+        f"<td>{_format_km(float(h['km']))} km</td>"
+        "</tr>"
+        for h in history
+        if h.get("km", 0) > 0 and h.get("solucoes")
+    ]
+    if not rows:
+        rows = ["<tr><td class='muted' colspan='3'>Sem intervenções no horizonte.</td></tr>"]
+
+    st.markdown(
+        '<section class="solution-card">'
+        '<div class="solution-card-head">'
+        f'<h3>Histórico de intervenções — trecho {html.escape(str(sre))}</h3>'
+        '<p>O que foi executado em cada ano do horizonte</p>'
+        '</div>'
+        '<div class="solution-table-wrap"><table class="solution-table">'
+        '<thead><tr><th>Ano</th><th>Intervenção</th><th>Extensão</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody>'
+        '</table></div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_projection_page(road: str, scenario_key: str | None) -> None:
+    data = get_projection_data(road, scenario_key=scenario_key)
+    if not data or not data.get("years"):
+        st.info("Sem dados de projeção para este cenário.")
+        return
+
+    meta = float(data["meta"])
+    render_metric_cards(
+        [
+            {
+                "title": "IAP MÉDIO ATUAL",
+                "value": f"{data['base_avg']:.2f}",
+                "subtitle": f"Ano base {data['base_year']}",
+                "tone": "red" if data["base_avg"] < meta else "green",
+                "icon": "●",
+            },
+            {
+                "title": "IAP PROJETADO",
+                "value": f"{data['final_avg']:.2f}",
+                "subtitle": f"Condição em {data['years'][-1]}",
+                "tone": "green",
+                "icon": "↗",
+            },
+            {
+                "title": "KM ABAIXO DA META",
+                "value": f"{data['base_below_km']:.1f} km",
+                "subtitle": "IAP < 2,5 hoje",
+                "tone": "red",
+                "icon": "△",
+            },
+            {
+                "title": "PIOR IAP PROJETADO",
+                "value": f"{data['worst_future_val']:.2f}",
+                "subtitle": f"Pior trecho em {data['worst_future_year']}",
+                "tone": "orange",
+                "icon": "◎",
+            },
+        ]
+    )
+    st.markdown("<div style='height: 14px'></div>", unsafe_allow_html=True)
+    _render_intervention_table(data.get("sre_history", {}))
+
+    sre_list = data.get("sre_list") or []
+    if sre_list:
+        sel_col, _ = st.columns([1, 2], gap="medium")
+        with sel_col:
+            _filter_caption("Trecho (SRE)")
+            default = data.get("default_sre")
+            index = sre_list.index(default) if default in sre_list else 0
+            selected_sre = st.selectbox("Trecho", sre_list, index=index, label_visibility="collapsed")
+        _render_projection_chart(
+            data["sre_series"][selected_sre],
+            data["bands"],
+            float(data["iap_axis_max"]),
+            float(data["meta"]),
+            selected_sre,
+        )
+        _render_projection_history(data.get("sre_history", {}).get(selected_sre, []), selected_sre)
+
+
+def _gray_shade(t: float) -> str:
+    """Tom de cinza para a deflexão: 0 = claro (baixa), 1 = escuro (alta)."""
+    t = max(0.0, min(1.0, t))
+    a, b = (207, 216, 223), (46, 59, 69)
+    r = int(a[0] + (b[0] - a[0]) * t)
+    g = int(a[1] + (b[1] - a[1]) * t)
+    bl = int(a[2] + (b[2] - a[2]) * t)
+    return f"#{r:02x}{g:02x}{bl:02x}"
+
+
+def _render_dnit_linear(segments_df) -> None:
+    """Diagrama linear DNIT: faixas de IRI, IGG e deflexão (Dc) por km."""
+    if segments_df is None or segments_df.empty:
+        return
+
+    df = segments_df.sort_values("km_inicial")
+    min_km = float(df["km_inicial"].min())
+    max_km = float(df["km_final"].max())
+    total = max(max_km - min_km, 1.0)
+
+    dcs = [float(v) for v in df["dc"].dropna().tolist()]
+    d_min, d_max = (min(dcs), max(dcs)) if dcs else (0.0, 1.0)
+    d_rng = (d_max - d_min) or 1.0
+
+    def row(label: str, sub: str, color_fn) -> str:
+        spans = []
+        for r in df.to_dict("records"):
+            ext = max(float(r["km_final"]) - float(r["km_inicial"]), 0.001)
+            width = ext / total * 100
+            color, tip = color_fn(r)
+            spans.append(
+                f'<span class="linear-segment" style="width:{width:.4f}%;background:{color};" title="{html.escape(tip)}"></span>'
+            )
+        return (
+            '<div class="linear-row">'
+            f'<div class="linear-row-label">{label}<br><span style="font-size:9px;color:#7f909c">{sub}</span></div>'
+            f'<div class="linear-track">{"".join(spans)}</div>'
+            '</div>'
+        )
+
+    def iri_fn(r):
+        return r["iri_color"], f"km {r['km_inicial']:.1f}-{r['km_final']:.1f} · IRI {float(r['iri']):.2f} · {r['iri_classe']}"
+
+    def igg_fn(r):
+        return r["igg_color"], f"km {r['km_inicial']:.1f}-{r['km_final']:.1f} · IGG {float(r['igg']):.0f} · {r['igg_classe']}"
+
+    def defl_fn(r):
+        dc = r.get("dc")
+        if dc is None:
+            return "#46586a", f"km {r['km_inicial']:.1f}-{r['km_final']:.1f} · sem deflexão"
+        t = (float(dc) - d_min) / d_rng
+        status = "Dc > Dadm" if (r.get("dadm") is not None and dc > r["dadm"]) else "Dc ≤ Dadm"
+        return _gray_shade(t), f"km {r['km_inicial']:.1f}-{r['km_final']:.1f} · Dc {float(dc):.2f} mm · {status}"
+
+    ticks = "".join(
+        f'<span class="linear-tick" style="left:{i / 8 * 100:.2f}%;">{min_km + total * i / 8:.0f}</span>'
+        for i in range(9)
+    )
+    axis = f'<div class="linear-axis"><span class="linear-axis-title">Km da rodovia</span>{ticks}</div>'
+
+    st.markdown(
+        '<section class="chart-card linear-card">'
+        '<div class="chart-heading"><h3>Diagrama linear — IRI · IGG · deflexão</h3>'
+        '<p>Comportamento dos parâmetros DNIT ao longo do km</p></div>'
+        '<div class="linear-diagram">'
+        + row("IRI", "m/km", iri_fn)
+        + row("IGG", "0–200", igg_fn)
+        + row("Defl.", "Dc mm", defl_fn)
+        + axis
+        + "</div></section>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_dnit_overview(road: str, scenario_key: str | None) -> None:
+    """Visão geral DNIT: KPIs + mapa colorido pela matriz + diagrama linear (IRI/IGG/deflexão)."""
+    data = get_dnit_overview_data(road, scenario_key=scenario_key)
+    if not data or data.get("segments") is None or data["segments"].empty:
+        st.info("Sem dados de IRI/IGG para esta rodovia/cenário.")
+        return
+
+    render_metric_cards(
+        [
+            {
+                "title": "IRI MÉDIO",
+                "value": f"{data['iri_avg']:.2f}",
+                "subtitle": "Irregularidade (m/km)",
+                "tone": "cyan",
+                "icon": "≈",
+            },
+            {
+                "title": "IGG MÉDIO",
+                "value": f"{data['igg_avg']:.0f}",
+                "subtitle": "Gravidade global (defeitos)",
+                "tone": "cyan",
+                "icon": "▦",
+            },
+            {
+                "title": "% DC > DADM",
+                "value": f"{data['defl_bad_pct']:.1f}%",
+                "subtitle": "Estrutura deficiente (reforço)",
+                "tone": "red",
+                "icon": "△",
+            },
+            {
+                "title": "% IRI CRÍTICO (> 4)",
+                "value": f"{data['critico_pct']:.1f}%",
+                "subtitle": "Faixa laranja/vermelha da matriz",
+                "tone": "orange",
+                "icon": "◎",
+            },
+        ]
+    )
+    st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
+    render_dnit_map(data["segments"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
+    _render_dnit_linear(data["segments"])
+
+
+def _filter_map_segments(segments_df, filtered_table):
+    if segments_df is None or segments_df.empty:
+        return segments_df
+    if filtered_table is None or filtered_table.empty or "_segment_id" not in filtered_table:
+        return segments_df.iloc[0:0]
+
+    selected_ids = set(filtered_table["_segment_id"].astype(int).tolist())
+    return segments_df[segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
+
+
 def main() -> None:
     inject_css()
-    render_sidebar(active_key="overview")
+    page = st.query_params.get("page", "overview")
+    if page not in {"overview", "solucoes", "projecao", "cenario", "risco"}:
+        page = "overview"
+    render_sidebar(active_key=page)
 
     default_road = get_available_roads()[0]
+    if page == "solucoes":
+        _, selected_road, scenario_key = render_top_bar(
+            default_road,
+            page_title="Soluções",
+            show_diagnosis=False,
+        )
+        data = get_solutions_data(selected_road, scenario_key=scenario_key)
+        st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
+        filtered_table = _render_solution_filter_panel(data["table"])
+        filtered_segments = _filter_map_segments(data["segments"], filtered_table)
+        filtered_extension = float(filtered_table["Extensão"].sum()) if filtered_table is not None and not filtered_table.empty else 0
+        render_overview_map(filtered_segments, filtered_extension)
+        _render_solution_distribution(filtered_table)
+        _, paginated_table = _render_solution_table_controls(filtered_table)
+        _render_solutions_table(paginated_table)
+        return
+
+    if page == "cenario":
+        _, selected_road, scenario_key = render_top_bar(
+            default_road,
+            page_title="Cenário econômico",
+            show_diagnosis=False,
+        )
+        data = get_solutions_data(selected_road, scenario_key=scenario_key)
+        scenario_label = next(
+            (s["label"] for s in get_available_scenarios(selected_road) if s["key"] == scenario_key),
+            "Paragon",
+        )
+        _render_economic_page(
+            data["table"],
+            data.get("budget_items"),
+            data.get("segments"),
+            scenario_key=f"{selected_road}:{scenario_key}",
+            road=selected_road,
+            scenario_label=scenario_label,
+        )
+        return
+
+    if page == "projecao":
+        _, selected_road, scenario_key = render_top_bar(
+            default_road,
+            page_title="Projeção",
+            show_diagnosis=False,
+        )
+        _render_projection_page(selected_road, scenario_key)
+        return
+
+    if page != "overview":
+        _, _, _ = render_top_bar(default_road, page_title="Risco & alertas", show_diagnosis=False)
+        st.info("Este módulo será montado na próxima etapa.")
+        return
+
     diagnosis, selected_road, scenario_key = render_top_bar(default_road)
 
     if diagnosis == "Diagnóstico DNIT":
-        st.info("Diagnóstico DNIT será montado na próxima etapa com os indicadores próprios do DNIT.")
+        _render_dnit_overview(selected_road, scenario_key)
         return
 
     data = get_overview_data(selected_road, scenario_key=scenario_key)

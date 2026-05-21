@@ -16,28 +16,22 @@ MENU_ITEMS = [
         "icon": "grid",
     },
     {
-        "key": "diagnostico",
-        "label": "Diagnóstico",
-        "description": "Onde estão os problemas?",
-        "icon": "activity",
-    },
-    {
         "key": "solucoes",
-        "label": "Soluções Paragon",
+        "label": "Soluções",
         "description": "O que fazer e onde?",
         "icon": "tool",
-    },
-    {
-        "key": "projecao",
-        "label": "Projeção",
-        "description": "Como evoluirá no tempo?",
-        "icon": "trend",
     },
     {
         "key": "cenario",
         "label": "Cenário econômico",
         "description": "Quanto custa e o que evita?",
         "icon": "scale",
+    },
+    {
+        "key": "projecao",
+        "label": "Projeção",
+        "description": "Como evoluirá no tempo?",
+        "icon": "trend",
     },
     {
         "key": "risco",

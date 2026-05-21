@@ -18,13 +18,20 @@ _CLASS_COLORS = {
 }
 
 
-def render_overview_map(segments_df, extent_km: int | float) -> None:
+def render_overview_map(
+    segments_df,
+    extent_km: int | float,
+    *,
+    attended_ids=None,
+    legend_foot: str | None = None,
+) -> None:
     if segments_df is None or segments_df.empty:
         st.info("Sem segmentos para exibir no mapa.")
         return
 
     required_columns = {
         "segment_id",
+        "sre",
         "km_inicial",
         "km_final",
         "iap",
@@ -35,18 +42,27 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
         st.info("Sem geometria real para exibir no mapa.")
         return
 
-    segments = segments_df[
+    records = segments_df[
         [
             "segment_id",
+            "sre",
             "km_inicial",
             "km_final",
             "iap",
             "classe_iap",
             "paths",
         ]
-    ].to_dict("records")
+    ].copy()
+    if attended_ids is not None:
+        attended = {int(value) for value in attended_ids}
+        records["attended"] = records["segment_id"].astype(int).isin(attended)
+    else:
+        records["attended"] = True
+
+    segments = records.to_dict("records")
     segments_json = json.dumps(segments, ensure_ascii=False)
     colors_json = json.dumps(_CLASS_COLORS, ensure_ascii=False)
+    legend_foot_html = legend_foot or '<span class="legend-line"></span>Trechos coloridos por conceito IAP'
 
     html_template = Template(
         """
@@ -59,13 +75,11 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
           <style>
             html, body { margin: 0; padding: 0; background: #061018; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
             .map-card { position: relative; height: 456px; border-radius: 14px; overflow: hidden; background: #0b1d28; border: 1px solid #1d3848; }
+            .map-card:fullscreen { width: 100vw; height: 100vh; border-radius: 0; border: 0; }
+            .map-card:fullscreen #map { height: 100vh; }
             #map { height: 100%; width: 100%; }
             .map-card:after { content: ""; position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,.03), inset 0 -60px 80px rgba(6,16,24,.12); }
-            .map-counter { position: absolute; z-index: 700; top: 14px; left: 14px; background: rgba(7, 17, 25, .92); border: 1px solid rgba(148,163,184,.22); color: #e5edf3; border-radius: 9px; padding: 12px 14px; min-width: 174px; box-shadow: 0 18px 40px rgba(0,0,0,.32); }
-            .map-counter strong { display: block; font-size: 10px; letter-spacing: .12em; color: #9aa8b3; font-weight: 700; }
-            .map-counter span { display: block; margin-top: 2px; font-size: 12px; color: #cfd8df; }
             .map-zoom { position: absolute; z-index: 710; top: 14px; left: 14px; transform: translateY(0); display: grid; overflow: hidden; border-radius: 6px; border: 1px solid rgba(148,163,184,.22); }
-            .map-zoom + .map-counter { left: 54px; }
             .map-zoom button { width: 32px; height: 32px; border: 0; background: rgba(7,17,25,.96); color: #f4f7fb; font-size: 22px; line-height: 1; font-weight: 700; cursor: pointer; }
             .map-zoom button:hover { background: rgba(14,31,44,.98); }
             .map-zoom button + button { border-top: 1px solid rgba(148,163,184,.22); }
@@ -76,6 +90,37 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
             .legend-dot { width: 14px; height: 14px; border-radius: 999px; display: inline-block; }
             .legend-line { width: 15px; height: 4px; border-radius: 999px; background: #82929d; display: inline-block; }
             .legend-foot { margin-top: 13px; padding-top: 10px; border-top: 1px solid rgba(148,163,184,.16); display: flex; align-items: center; gap: 8px; font-size: 11px; color: #7f909c; }
+            .map-actions { position: absolute; z-index: 710; top: 14px; right: 14px; display: flex; align-items: stretch; gap: 8px; }
+            .map-button,
+            .map-layer-select {
+              height: 36px;
+              border: 1px solid rgba(148,163,184,.24);
+              background: rgba(7,17,25,.94);
+              color: #f4f7fb;
+              border-radius: 8px;
+              box-shadow: 0 14px 32px rgba(0,0,0,.28);
+            }
+            .map-button { width: 38px; display: grid; place-items: center; padding: 0; cursor: pointer; }
+            .map-button:hover,
+            .map-layer-select:hover { background: rgba(14,31,44,.98); }
+            .map-button svg { width: 18px; height: 18px; stroke: currentColor; }
+            .map-layer-select {
+              width: 152px;
+              padding: 0 32px 0 12px;
+              font-size: 12px;
+              font-weight: 700;
+              outline: none;
+              cursor: pointer;
+              appearance: none;
+              background-image:
+                linear-gradient(45deg, transparent 50%, #cbd5df 50%),
+                linear-gradient(135deg, #cbd5df 50%, transparent 50%);
+              background-position:
+                calc(100% - 17px) 15px,
+                calc(100% - 12px) 15px;
+              background-size: 5px 5px, 5px 5px;
+              background-repeat: no-repeat;
+            }
             .leaflet-control-container .leaflet-top, .leaflet-control-container .leaflet-bottom { display: none; }
           </style>
         </head>
@@ -86,7 +131,23 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
               <button type="button" data-zoom="in" aria-label="Aproximar mapa">+</button>
               <button type="button" data-zoom="out" aria-label="Afastar mapa">−</button>
             </div>
-            <div class="map-counter"><strong>PONTOS DE INTERVENÇÃO</strong><span>de $extent_km km</span></div>
+            <div class="map-actions">
+              <button class="map-button" type="button" data-fullscreen aria-label="Expandir mapa">
+                <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3"></path>
+                  <path d="M16 3h3a2 2 0 0 1 2 2v3"></path>
+                  <path d="M8 21H5a2 2 0 0 1-2-2v-3"></path>
+                  <path d="M16 21h3a2 2 0 0 0 2-2v-3"></path>
+                </svg>
+              </button>
+              <select class="map-layer-select" data-layer aria-label="Camada base do mapa">
+                <option value="osm">Padrão</option>
+                <option value="light">Claro</option>
+                <option value="dark">Escuro</option>
+                <option value="satellite">Satélite</option>
+                <option value="topographic">Topográfico</option>
+              </select>
+            </div>
             <div class="map-legend">
               <div class="legend-title">CONCEITO IAP</div>
               <div class="legend-grid">
@@ -98,7 +159,7 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
                 <div class="legend-item"><span class="legend-dot" style="background:#f2a51a"></span>Mau</div>
                 <div class="legend-item"><span class="legend-dot" style="background:#d71920"></span>Péssimo</div>
               </div>
-              <div class="legend-foot"><span class="legend-line"></span>Trechos coloridos por conceito IAP</div>
+              <div class="legend-foot">$legend_foot_html</div>
             </div>
           </div>
           <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -115,18 +176,39 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
               wheelDebounceTime: 40,
               wheelPxPerZoomLevel: 90
             });
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-              maxZoom: 19,
-              attribution: '&copy; OpenStreetMap'
-            }).addTo(map);
+            const baseLayers = {
+              osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap'
+              }),
+              light: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+                maxZoom: 20,
+                attribution: '&copy; OpenStreetMap &copy; CARTO'
+              }),
+              dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                maxZoom: 20,
+                attribution: '&copy; OpenStreetMap &copy; CARTO'
+              }),
+              satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 19,
+                attribution: 'Tiles &copy; Esri'
+              }),
+              topographic: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+                maxZoom: 17,
+                attribution: '&copy; OpenTopoMap &copy; OpenStreetMap'
+              })
+            };
+            let currentBaseLayer = baseLayers.osm.addTo(map);
 
             const latLngs = [];
             const formatKm = (value) => Number(value).toFixed(2);
 
             segments.forEach((segment) => {
-              const color = colors[segment.classe_iap] || '#fff200';
-              const opacity = 0.96;
-              const weight = 5;
+              const attended = segment.attended !== false;
+              const color = attended ? (colors[segment.classe_iap] || '#fff200') : '#46586a';
+              const opacity = attended ? 0.96 : 0.45;
+              const weight = attended ? 5 : 3;
+              const dashArray = attended ? null : '4 7';
 
               segment.paths.forEach((path) => {
                 const coordinates = path.map((coord) => [Number(coord[0]), Number(coord[1])]);
@@ -137,14 +219,17 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
                   color,
                   weight,
                   opacity,
+                  dashArray,
                   lineCap: 'round',
                   lineJoin: 'round'
                 }).addTo(map).bindTooltip(
-                  'Segmento ' + segment.segment_id +
+                  'SRE ' + (segment.sre || '-') +
+                  ' · Segmento ' + segment.segment_id +
                   ' · km ' + formatKm(segment.km_inicial) +
                   ' - ' + formatKm(segment.km_final) +
                   ' · IAP ' + Number(segment.iap).toFixed(2) +
-                  ' · ' + segment.classe_iap
+                  ' · ' + segment.classe_iap +
+                  (attended ? '' : ' · Fora do orçamento')
                 );
               });
             });
@@ -154,6 +239,27 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
 
             document.querySelector('[data-zoom="in"]').addEventListener('click', () => map.zoomIn());
             document.querySelector('[data-zoom="out"]').addEventListener('click', () => map.zoomOut());
+
+            document.querySelector('[data-layer]').addEventListener('change', (event) => {
+              const nextLayer = baseLayers[event.target.value] || baseLayers.osm;
+              if (nextLayer === currentBaseLayer) return;
+              map.removeLayer(currentBaseLayer);
+              currentBaseLayer = nextLayer.addTo(map);
+            });
+
+            document.querySelector('[data-fullscreen]').addEventListener('click', async () => {
+              const card = document.querySelector('.map-card');
+              if (!document.fullscreenElement) {
+                await card.requestFullscreen();
+              } else {
+                await document.exitFullscreen();
+              }
+              setTimeout(() => map.invalidateSize(), 120);
+            });
+
+            document.addEventListener('fullscreenchange', () => {
+              setTimeout(() => map.invalidateSize(), 120);
+            });
           </script>
         </body>
         </html>
@@ -164,7 +270,7 @@ def render_overview_map(segments_df, extent_km: int | float) -> None:
         html_template.substitute(
             segments_json=segments_json,
             colors_json=colors_json,
-            extent_km=extent_km,
+            legend_foot_html=legend_foot_html,
         ),
         height=456,
         scrolling=False,

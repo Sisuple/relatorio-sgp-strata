@@ -31,13 +31,13 @@ def render_sidebar(active_key: str = "overview") -> None:
     for item in MENU_ITEMS:
         active_class = " active" if item["key"] == active_key else ""
         items_html.append(
-            f'<div class="side-item{active_class}">'
+            f'<a class="side-item{active_class}" href="?page={html.escape(item["key"])}" target="_self">'
             f'<div class="side-icon">{_menu_icon(item["icon"])}</div>'
             '<div class="side-copy">'
             f'<div class="side-label">{html.escape(item["label"])}</div>'
             f'<div class="side-description">{html.escape(item["description"])}</div>'
             '</div>'
-            '</div>'
+            '</a>'
         )
 
     sidebar_html = (

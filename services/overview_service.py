@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import json
+import math
 from functools import lru_cache
 from typing import Any
 
@@ -73,6 +75,15 @@ _LINEAR_IAP_CLASS_COLORS = {
     **_IAP_CLASS_COLORS,
     "Excelente": "#26c6f9",
 }
+_SOLUTION_LABELS = {
+    "OK": "Sem intervenção",
+    "RL": "Reparo localizado",
+    "RL+RS": "Reparo localizado + microrrevestimento",
+    "RL+REF": "Reparo localizado + reforço",
+    "RPS": "Fresagem e recomposição",
+    "RPS+REF": "Fresagem e recomposição + reforço",
+    "REC": "Reconstrução",
+}
 
 
 def _road_sort_key(label: str) -> tuple[int, str]:
@@ -141,15 +152,48 @@ def _classify_iap_for_map(value: Any, intervention: str | None) -> str:
 
 def _classify_condition(value: Any) -> str:
     index = _to_float(value)
-    if index >= 4.01:
+    if index >= 4.5:
         return "Excelente"
-    if index >= 3.01:
+    if index >= 3.5:
         return "Bom"
-    if index >= 2.01:
+    if index >= 2.5:
         return "Regular"
-    if index >= 1.01:
+    if index >= 1.5:
         return "Mau"
     return "Péssimo"
+
+
+def _solution_name(solution_code: str | None, solutions_json: Any = None) -> str:
+    if solutions_json:
+        try:
+            solutions = json.loads(solutions_json) if isinstance(solutions_json, str) else solutions_json
+            names = [
+                str(item.get("tipoNome", "")).strip()
+                for item in solutions
+                if isinstance(item, dict) and item.get("tipoNome")
+            ]
+            if names:
+                return " + ".join(dict.fromkeys(names))
+        except (TypeError, ValueError):
+            pass
+
+    return _SOLUTION_LABELS.get(str(solution_code or ""), str(solution_code or "Sem intervenção"))
+
+
+def _solution_cost(solutions_json: Any = None) -> float:
+    if not solutions_json:
+        return 0.0
+
+    try:
+        solutions = json.loads(solutions_json) if isinstance(solutions_json, str) else solutions_json
+    except (TypeError, ValueError):
+        return 0.0
+
+    total = 0.0
+    for item in solutions or []:
+        if isinstance(item, dict):
+            total += _to_float(item.get("orcamento"))
+    return total
 
 
 def _parse_linestring_latlon(wkt: str | None) -> list[list[float]]:
@@ -373,14 +417,35 @@ def _get_iap_map_segments_from_database(
 
     geometry_rows = db.execute_query(
         """
-        SELECT id_segmento, km_inicial_segmento, km_final_segmento,
-               km_inicial_ponto, wkt
-        FROM segmento_view_mapa_base
-        WHERE analise_gerencial_id = %s
-          AND gerencial_ciclo_id = %s
-        ORDER BY id_segmento, km_inicial_ponto
+        SELECT
+          seg.id AS id_segmento,
+          (
+            SELECT ps.codigo
+            FROM pista_shape ps
+            WHERE ps.rodovia = seg.rodovia
+              AND ps.km_inicial <= seg.km_inicial
+              AND ps.km_final >= seg.km_final
+            ORDER BY ps.km_inicial DESC
+            LIMIT 1
+          ) AS codigo,
+          seg.km_inicial AS km_inicial_segmento,
+          seg.km_final AS km_final_segmento,
+          pt.km_inicial AS km_inicial_ponto,
+          ST_AsText(pt.geometria) AS wkt
+        FROM analise_gerencial_segmento_pistas seg
+        JOIN principal_levantamentos pt FORCE INDEX (idx_lev_importacao_km)
+          ON pt.levantamento_importacao_id = (
+            SELECT MIN(li.id)
+            FROM levantamento_importacoes li
+            WHERE li.nome_arquivo LIKE CONCAT('IRI_BR', seg.rodovia, '%%')
+          )
+         AND pt.rodovia = seg.rodovia
+         AND pt.km_inicial >= seg.km_inicial
+         AND pt.km_inicial <= seg.km_final
+        WHERE seg.analise_gerencial_id = %s
+        ORDER BY seg.id, pt.km_inicial
         """,
-        (analise_id, ciclo_id),
+        (analise_id,),
     ) or []
 
     segments: dict[int, dict[str, Any]] = {}
@@ -394,6 +459,7 @@ def _get_iap_map_segments_from_database(
             segment_id,
             {
                 "segment_id": segment_id,
+                "sre": row.get("codigo") or f"Segmento {segment_id}",
                 "km_inicial": _to_float(row.get("km_inicial_segmento")),
                 "km_final": _to_float(row.get("km_final_segmento")),
                 "iap": iap_data["iap"] / 100,
@@ -434,12 +500,21 @@ def _get_linear_diagram_segments_from_database(
         """
         SELECT
           sp.id AS segment_id,
+          (
+            SELECT ps.codigo
+            FROM pista_shape ps
+            WHERE ps.rodovia = sp.rodovia
+              AND ps.km_inicial <= sp.km_inicial
+              AND ps.km_final >= sp.km_final
+            ORDER BY ps.km_inicial DESC
+            LIMIT 1
+          ) AS codigo,
           sp.km_inicial,
           sp.km_final,
           sp.extensao,
-          i.icdsa,
-          i.icdpa,
-          i.icdea,
+          i.icdsb,
+          i.icdpb,
+          i.icdeb,
           i.iapa,
           i.solucao_corretiva_final
         FROM analise_gerencial_intervencoes_iap i
@@ -456,9 +531,9 @@ def _get_linear_diagram_segments_from_database(
     for row in rows:
         intervention = row.get("solucao_corretiva_final")
         condition_classes = {
-            "ICDS": _classify_condition(row.get("icdsa")),
-            "ICDP": _classify_condition(row.get("icdpa")),
-            "ICDE": _classify_condition(row.get("icdea")),
+            "ICDS": _classify_condition(row.get("icdsb")),
+            "ICDP": _classify_condition(row.get("icdpb")),
+            "ICDE": _classify_condition(row.get("icdeb")),
         }
         iap_class = _classify_iap_for_map(row.get("iapa"), intervention)
         records.append(
@@ -467,9 +542,9 @@ def _get_linear_diagram_segments_from_database(
                 "km_inicial": _to_float(row.get("km_inicial")),
                 "km_final": _to_float(row.get("km_final")),
                 "extensao": _to_float(row.get("extensao")),
-                "icds": _to_float(row.get("icdsa")),
-                "icdp": _to_float(row.get("icdpa")),
-                "icde": _to_float(row.get("icdea")),
+                "icds": _to_float(row.get("icdsb")),
+                "icdp": _to_float(row.get("icdpb")),
+                "icde": _to_float(row.get("icdeb")),
                 "iap": _to_float(row.get("iapa")) / 100,
                 "classe_icds": condition_classes["ICDS"],
                 "classe_icdp": condition_classes["ICDP"],
@@ -481,6 +556,175 @@ def _get_linear_diagram_segments_from_database(
                 "cor_iap": _LINEAR_IAP_CLASS_COLORS.get(iap_class, "#fff200"),
             }
         )
+
+    return pd.DataFrame(records)
+
+
+def _get_solution_table_from_database(
+    analise_id: int,
+    ciclo_id: int,
+    year: int,
+) -> pd.DataFrame:
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT
+          sp.id AS segment_id,
+          (
+            SELECT ps.codigo
+            FROM pista_shape ps
+            WHERE ps.rodovia = sp.rodovia
+              AND ps.km_inicial <= sp.km_inicial
+              AND ps.km_final >= sp.km_final
+            ORDER BY ps.km_inicial DESC
+            LIMIT 1
+          ) AS codigo,
+          sp.km_inicial,
+          sp.km_final,
+          sp.extensao,
+          i.iapa,
+          i.solucao_corretiva_final,
+          i.solucoes,
+          i.d0b,
+          r.iria,
+          g.igga,
+          (
+            SELECT dp.vmda
+            FROM analise_gerencial_desempenho_pavimento dp
+            WHERE dp.segmento_pista_id = sp.id
+              AND dp.gerencial_ciclo_id = i.gerencial_ciclo_id
+              AND dp.ano = i.ano
+              AND dp.deleted_at IS NULL
+            ORDER BY dp.id DESC
+            LIMIT 1
+          ) AS vmda
+        FROM analise_gerencial_intervencoes_iap i
+        JOIN analise_gerencial_segmento_pistas sp ON sp.id = i.segmento_pista_id
+        LEFT JOIN analise_gerencial_roughness r
+          ON r.segmento_pista_id = sp.id
+         AND r.gerencial_ciclo_id = i.gerencial_ciclo_id
+         AND r.ano = i.ano
+        LEFT JOIN analise_gerencial_igg g
+          ON g.segmento_pista_id = sp.id
+         AND g.gerencial_ciclo_id = i.gerencial_ciclo_id
+         AND g.ano = i.ano
+        WHERE sp.analise_gerencial_id = %s
+          AND i.gerencial_ciclo_id = %s
+          AND i.ano = %s
+        ORDER BY
+          CASE
+            WHEN i.solucao_corretiva_final = 'REC' THEN 1
+            WHEN i.solucao_corretiva_final = 'RPS+REF' THEN 2
+            WHEN i.solucao_corretiva_final = 'RPS' THEN 3
+            WHEN i.solucao_corretiva_final = 'RL+REF' THEN 4
+            WHEN i.solucao_corretiva_final = 'RL+RS' THEN 5
+            WHEN i.solucao_corretiva_final = 'RL' THEN 6
+            WHEN i.solucao_corretiva_final = 'OK' THEN 7
+            WHEN i.solucao_corretiva_final IS NULL THEN 8
+            ELSE 7
+          END,
+          i.iapa ASC,
+          sp.km_inicial ASC
+        """,
+        (analise_id, ciclo_id, year),
+    ) or []
+
+    records = []
+    for row in rows:
+        iap = _to_float(row.get("iapa")) / 100
+        solution_code = row.get("solucao_corretiva_final")
+        segment_id = int(row["segment_id"])
+        records.append(
+            {
+                "SNV": row.get("codigo") or f"Segmento {segment_id}",
+                "Km Inicial": _to_float(row.get("km_inicial")),
+                "Km Final": _to_float(row.get("km_final")),
+                "Extensão": _to_float(row.get("extensao")),
+                "IAP": iap,
+                "IRI": _to_float(row.get("iria")),
+                "IGG": _to_float(row.get("igga")),
+                "VMDA": _to_float(row.get("vmda")),
+                "DEF": _to_float(row.get("d0b")),
+                "Solução recomendada": _solution_name(solution_code, row.get("solucoes")),
+                "Custo estimado": _solution_cost(row.get("solucoes")),
+                "_classe_iap": _classify_iap_for_map(row.get("iapa"), solution_code),
+                "_solucao_codigo": solution_code or "Sem intervenção",
+                "_cor_iap": _LINEAR_IAP_CLASS_COLORS.get(
+                    _classify_iap_for_map(row.get("iapa"), solution_code),
+                    "#fff200",
+                ),
+                "_segment_id": segment_id,
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
+def _get_budget_solution_items_from_database(
+    analise_id: int,
+    ciclo_id: int,
+) -> pd.DataFrame:
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT
+          o.id AS budget_id,
+          o.ano,
+          o.solucoes,
+          sp.id AS segment_id,
+          (
+            SELECT ps.codigo
+            FROM pista_shape ps
+            WHERE ps.rodovia = sp.rodovia
+              AND ps.km_inicial <= sp.km_inicial
+              AND ps.km_final >= sp.km_final
+            ORDER BY ps.km_inicial DESC
+            LIMIT 1
+          ) AS codigo,
+          sp.km_inicial,
+          sp.km_final,
+          sp.extensao
+        FROM analise_gerencial_orcamentos o
+        JOIN analise_gerencial_segmento_pistas sp ON sp.id = o.segmento_pista_id
+        WHERE sp.analise_gerencial_id = %s
+          AND o.gerencial_ciclo_id = %s
+          AND o.solucoes IS NOT NULL
+        ORDER BY o.ano, sp.km_inicial
+        """,
+        (analise_id, ciclo_id),
+    ) or []
+
+    records = []
+    for row in rows:
+        try:
+            solutions = json.loads(row["solucoes"]) if isinstance(row.get("solucoes"), str) else row.get("solucoes")
+        except (TypeError, ValueError):
+            solutions = []
+
+        segment_id = int(row["segment_id"])
+        for item in solutions or []:
+            if not isinstance(item, dict):
+                continue
+
+            budget = _to_float(item.get("orcamento"))
+            if budget <= 0:
+                continue
+
+            records.append(
+                {
+                    "Ano": int(row["ano"]),
+                    "SNV": row.get("codigo") or f"Segmento {segment_id}",
+                    "Km Inicial": _to_float(row.get("km_inicial")),
+                    "Km Final": _to_float(row.get("km_final")),
+                    "Extensão": _to_float(row.get("extensao")),
+                    "Solução": str(item.get("tipoNome") or item.get("sigla") or "Sem nome").strip(),
+                    "Custo": budget,
+                    "Quantidade": _to_float(item.get("quantidades")),
+                    "Unidade": str(item.get("quantidades_formatada") or "").split(" ")[-1] if item.get("quantidades_formatada") else "",
+                    "_segment_id": segment_id,
+                    "_budget_id": int(row["budget_id"]),
+                }
+            )
 
     return pd.DataFrame(records)
 
@@ -694,4 +938,592 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
         "distribution": distribution,
         "linear_diagram": linear_diagram,
         "iap_extraction": iap_extraction,
+    }
+
+
+def get_solutions_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    road = selected_road or get_available_roads()[0]
+    iap_extraction = get_iap_extraction(road, scenario_key=scenario_key)
+
+    if iap_extraction:
+        segments = _get_iap_map_segments_from_database(
+            iap_extraction["analise_id"],
+            iap_extraction["ciclo_id"],
+            iap_extraction["ano"],
+        )
+        table = _get_solution_table_from_database(
+            iap_extraction["analise_id"],
+            iap_extraction["ciclo_id"],
+            iap_extraction["ano"],
+        )
+        budget_items = _get_budget_solution_items_from_database(
+            iap_extraction["analise_id"],
+            iap_extraction["ciclo_id"],
+        )
+        extension_km = iap_extraction["total_km"]
+    else:
+        segments = pd.DataFrame()
+        table = pd.DataFrame()
+        budget_items = pd.DataFrame()
+        extension_km = 0
+
+    return {
+        "road": road,
+        "segments": segments,
+        "table": table,
+        "budget_items": budget_items,
+        "extension_km": extension_km,
+        "iap_extraction": iap_extraction,
+    }
+
+
+# Meta mínima de IAP: abaixo disso o trecho está em situação de problema.
+IAP_META = 2.5
+# Margem de atenção: trechos cujo IAP projetado fica abaixo disso entram na lista de alerta.
+IAP_ATENCAO = 3.5
+
+
+# --- Diagnóstico DNIT (IRI / IGG) ---
+_DNIT_COLORS = {
+    "Ótimo": "#00a651",
+    "Bom": "#8bd95a",
+    "Regular": "#fff200",
+    "Ruim": "#f2a51a",
+    "Péssimo": "#d71920",
+}
+_DNIT_ORDER = ["Ótimo", "Bom", "Regular", "Ruim", "Péssimo"]
+_DNIT_SEV = {"Ótimo": 0, "Bom": 1, "Regular": 2, "Ruim": 3, "Péssimo": 4}
+# Penalidade de condição quando a estrutura está deficiente (Dc > Dadm).
+_DNIT_DEFL_PENALIDADE = "Ruim"
+_DNIT_SITUACAO = {
+    "ótimo": "Ótimo", "otimo": "Ótimo", "bom": "Bom", "regular": "Regular",
+    "ruim": "Ruim", "péssimo": "Péssimo", "pessimo": "Péssimo",
+}
+
+
+def _classify_iri_dnit(value: float) -> str:
+    """Conceito DNIT a partir do IRI (m/km)."""
+    if value <= 2.0:
+        return "Ótimo"
+    if value <= 2.7:
+        return "Bom"
+    if value <= 3.5:
+        return "Regular"
+    if value <= 4.6:
+        return "Ruim"
+    return "Péssimo"
+
+
+def _classify_igg_dnit(value: float) -> str:
+    """Conceito DNIT a partir do IGG (DNIT 006/2003)."""
+    if value <= 20:
+        return "Ótimo"
+    if value <= 40:
+        return "Bom"
+    if value <= 80:
+        return "Regular"
+    if value <= 160:
+        return "Ruim"
+    return "Péssimo"
+
+
+def _dnit_situacao(value: Any) -> str | None:
+    if not value:
+        return None
+    return _DNIT_SITUACAO.get(str(value).strip().lower())
+
+
+# --- Avaliação da matriz DNIT "Matriz Revitaliza DNIT/RO" (id 5) ---
+_DNIT_MATRIZ_ID = 5
+# Cor da matriz DNIT (imagem CBUQ): faixa de IRI define a cor da célula.
+_DNIT_ZONA_ORDER = ["IRI ≤ 3", "3 < IRI ≤ 4", "4 < IRI ≤ 5,5", "IRI > 5,5"]
+_DNIT_ZONA_COLORS = {
+    "IRI ≤ 3": "#8bd95a",
+    "3 < IRI ≤ 4": "#fff200",
+    "4 < IRI ≤ 5,5": "#f2a51a",
+    "IRI > 5,5": "#d71920",
+}
+
+
+def _dnit_matriz_zona(iri: float) -> tuple[str, str]:
+    """(zona, cor) da matriz DNIT pela faixa de IRI, igual à imagem do DNIT."""
+    if iri <= 3:
+        zona = "IRI ≤ 3"
+    elif iri <= 4:
+        zona = "3 < IRI ≤ 4"
+    elif iri <= 5.5:
+        zona = "4 < IRI ≤ 5,5"
+    else:
+        zona = "IRI > 5,5"
+    return zona, _DNIT_ZONA_COLORS[zona]
+
+
+@lru_cache(maxsize=1)
+def _load_dnit_matrix() -> dict:
+    """Carrega e estrutura a matriz de decisão DNIT (linhas=Número N, colunas=IRI×IGG×Dc/Dadm)."""
+    db = MySQLConnection()
+    limites = db.execute_query(
+        "SELECT id, config_table, logica_intervencao, tipo FROM matriz_limites WHERE matriz_id = %s AND deleted_at IS NULL",
+        (_DNIT_MATRIZ_ID,),
+    ) or []
+    interv_rows = db.execute_query(
+        """
+        SELECT mli.matriz_limite_id AS ml, i.nome
+        FROM matriz_limite_intervencao mli
+        JOIN intervencoes i ON i.id = mli.intervencao_id
+        WHERE mli.deleted_at IS NULL
+        """,
+    ) or []
+    interv_by_limite: dict[int, list[str]] = {}
+    for r in interv_rows:
+        interv_by_limite.setdefault(int(r["ml"]), []).append(r["nome"])
+
+    n_rows: list[tuple[int, list]] = []
+    col_iri: dict[int, list] = {}
+    col_igg: dict[int, list] = {}
+    col_dc: dict[int, list] = {}
+    cells: dict[tuple[int, int], list[str]] = {}
+
+    for lim in limites:
+        cfg = json.loads(lim["config_table"]) if isinstance(lim["config_table"], str) else (lim["config_table"] or {})
+        raw_logic = lim["logica_intervencao"]
+        logic = json.loads(raw_logic) if isinstance(raw_logic, str) and raw_logic else raw_logic
+        linha = cfg.get("linha")
+        coluna = cfg.get("coluna")
+        merged = cfg.get("colunasMescladas") or ([coluna] if coluna else [])
+
+        if lim["tipo"] == "intervencao":
+            cells[(linha, coluna)] = interv_by_limite.get(int(lim["id"]), [])
+        elif lim["tipo"] == "condicao" and logic:
+            cond = logic.get("condicoes", [])
+            if linha == 1:
+                for c in merged:
+                    col_iri[c] = cond
+            elif linha == 2:
+                col_igg[coluna] = cond
+            elif linha == 3:
+                for c in merged:
+                    col_dc[c] = cond
+            elif coluna == 1 and linha and linha >= 4:
+                n_rows.append((linha, cond))
+
+    n_rows.sort(key=lambda t: t[0])
+    return {"n_rows": n_rows, "col_iri": col_iri, "col_igg": col_igg, "col_dc": col_dc, "cells": cells}
+
+
+def _dnit_cond_ok(condicoes: list, p: dict) -> bool:
+    for c in condicoes:
+        op = c.get("operador")
+        if c.get("tipoValor") == "select" and c.get("valor") == "dadm":
+            left, right = p.get("dc"), p.get("dadm")
+        else:
+            left = p.get(c.get("parametro"))
+            try:
+                right = float(c.get("valor"))
+            except (TypeError, ValueError):
+                return False
+        if left is None or right is None:
+            return False
+        if op == "<=" and not left <= right:
+            return False
+        if op == "<" and not left < right:
+            return False
+        if op == ">" and not left > right:
+            return False
+        if op == ">=" and not left >= right:
+            return False
+    return True
+
+
+def _eval_dnit_matrix(matrix: dict, iri: float, igg: float, numero_n: float, dc: float | None, dadm: float | None) -> list[str]:
+    """Retorna as intervenções da célula da matriz para o segmento."""
+    # Dc ausente -> assume estrutura OK (Dc <= Dadm).
+    if dc is None or dadm is None:
+        dc, dadm = 0.0, 1e9
+    p = {"iri": iri, "igg": igg, "numero_n": numero_n, "dc": dc, "dadm": dadm}
+
+    linha = next((ln for ln, cond in matrix["n_rows"] if _dnit_cond_ok(cond, p)), None)
+    if linha is None and matrix["n_rows"]:
+        linha = matrix["n_rows"][-1][0]
+
+    for col in sorted({k[1] for k in matrix["cells"] if k[0] == linha}):
+        if (
+            _dnit_cond_ok(matrix["col_iri"].get(col, []), p)
+            and _dnit_cond_ok(matrix["col_igg"].get(col, []), p)
+            and _dnit_cond_ok(matrix["col_dc"].get(col, []), p)
+        ):
+            return matrix["cells"].get((linha, col), [])
+    return []
+
+
+def get_dnit_overview_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    """Dados da visão geral DNIT: segmentos com IRI e IGG classificados (faixas DNIT)."""
+    road = selected_road or get_available_roads()[0]
+    extraction = get_iap_extraction(road, scenario_key=scenario_key)
+    if not extraction:
+        return {}
+
+    data = _get_dnit_overview_from_database(extraction["analise_id"], extraction["ciclo_id"], extraction["ano"])
+    if data:
+        data["road"] = road
+    return data
+
+
+@lru_cache(maxsize=32)
+def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) -> dict:
+    geo = _get_iap_map_segments_from_database(analise_id, ciclo_id, year)
+    if geo is None or geo.empty:
+        return {}
+
+    db = MySQLConnection()
+    iri_rows = db.execute_query(
+        "SELECT segmento_pista_id AS seg, iria FROM analise_gerencial_roughness WHERE gerencial_ciclo_id = %s AND ano = %s",
+        (ciclo_id, year),
+    ) or []
+    igg_rows = db.execute_query(
+        "SELECT segmento_pista_id AS seg, igga, situacao_igga FROM analise_gerencial_igg WHERE gerencial_ciclo_id = %s AND ano = %s",
+        (ciclo_id, year),
+    ) or []
+    iri_by = {int(r["seg"]): _to_float(r["iria"]) for r in iri_rows}
+    igg_by = {int(r["seg"]): (_to_float(r["igga"]), r.get("situacao_igga")) for r in igg_rows}
+
+    # Deflexão: Dc = parametros_iniciais.d0 (mm); Dadm = desempenho.dadm (0,01 mm -> /100).
+    d0_rows = db.execute_query(
+        "SELECT fk_segmento_id AS seg, MAX(d0) AS d0 FROM analise_gerencial_parametros_iniciais WHERE fk_ciclo_id = %s GROUP BY fk_segmento_id",
+        (ciclo_id,),
+    ) or []
+    dadm_rows = db.execute_query(
+        "SELECT segmento_pista_id AS seg, MAX(dadm) AS dadm FROM analise_gerencial_desempenho_pavimento WHERE gerencial_ciclo_id = %s AND ano = %s GROUP BY segmento_pista_id",
+        (ciclo_id, year),
+    ) or []
+    d0_by = {int(r["seg"]): _to_float(r["d0"]) for r in d0_rows if r["d0"] is not None}
+    dadm_by = {int(r["seg"]): _to_float(r["dadm"]) for r in dadm_rows if r["dadm"] is not None}
+
+    records = []
+    for row in geo.to_dict("records"):
+        seg = int(row["segment_id"])
+        iri = iri_by.get(seg)
+        igg_val, situacao = igg_by.get(seg, (None, None))
+        if iri is None and igg_val is None:
+            continue
+        iri = iri or 0.0
+        igg_val = igg_val or 0.0
+        iri_classe = _classify_iri_dnit(iri)
+        igg_classe = _dnit_situacao(situacao) or _classify_igg_dnit(igg_val)
+
+        # Critério estrutural Dc vs Dadm (mesma unidade: mm).
+        dc = d0_by.get(seg)
+        dadm_raw = dadm_by.get(seg)
+        dadm_mm = dadm_raw / 100 if dadm_raw else None
+        if dc is not None and dadm_mm:
+            defl_ok = dc <= dadm_mm
+            defl_classe = "Estrutura OK" if defl_ok else "Reforço (Dc>Dadm)"
+            defl_color = "#7f909c" if defl_ok else "#d71920"
+            defl_contrib = "Ótimo" if defl_ok else _DNIT_DEFL_PENALIDADE
+        else:
+            defl_ok = None
+            defl_classe = "Sem deflexão"
+            defl_color = "#46586a"
+            defl_contrib = None
+
+        # Cor da matriz DNIT pela faixa de IRI (sem intervenção nesta tela).
+        zona, zona_color = _dnit_matriz_zona(iri)
+
+        records.append(
+            {
+                "segment_id": seg,
+                "sre": row.get("sre"),
+                "km_inicial": _to_float(row.get("km_inicial")),
+                "km_final": _to_float(row.get("km_final")),
+                "paths": row["paths"],
+                "iri": round(iri, 2),
+                "iri_classe": iri_classe,
+                "iri_color": _DNIT_COLORS[iri_classe],
+                "igg": round(igg_val, 1),
+                "igg_classe": igg_classe,
+                "igg_color": _DNIT_COLORS.get(igg_classe, "#fff200"),
+                "dc": round(dc, 3) if dc is not None else None,
+                "dadm": round(dadm_mm, 3) if dadm_mm else None,
+                "matriz_categoria": zona,
+                "matriz_color": zona_color,
+            }
+        )
+
+    segments = pd.DataFrame(records)
+    if segments.empty:
+        return {}
+
+    ext = (segments["km_final"] - segments["km_inicial"]).clip(lower=0)
+    total = float(ext.sum()) or 1.0
+    dc_gt = segments["dc"].notna() & segments["dadm"].notna() & (segments["dc"] > segments["dadm"])
+    defl_bad = float(ext[dc_gt].sum()) / total * 100
+    critico_pct = float(ext[segments["matriz_categoria"].isin(["4 < IRI ≤ 5,5", "IRI > 5,5"])].sum()) / total * 100
+    return {
+        "segments": segments,
+        "iri_avg": round(float((segments["iri"] * ext).sum() / total), 2),
+        "igg_avg": round(float((segments["igg"] * ext).sum() / total), 1),
+        "defl_bad_pct": round(defl_bad, 1),
+        "critico_pct": round(critico_pct, 1),
+        "total_km": round(total, 1),
+        "colors": _DNIT_COLORS,
+        "order": _DNIT_ORDER,
+        "zona_order": _DNIT_ZONA_ORDER,
+        "zona_colors": _DNIT_ZONA_COLORS,
+    }
+
+
+def get_projection_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    """Série de projeção do IAP ao longo dos anos para a rodovia/cenário."""
+    road = selected_road or get_available_roads()[0]
+    code = _normalize_road_code(road)
+    if not code:
+        return {}
+
+    scenarios = _get_iap_scenarios_from_database(code, "Paragon")
+    scenario = next((s for s in scenarios if s["key"] == scenario_key), scenarios[0] if scenarios else None)
+    if not scenario:
+        return {}
+
+    data = _get_projection_from_database(scenario["analise_id"], scenario["ciclo_id"])
+    if data:
+        data["road"] = road
+        data["scenario"] = scenario
+    return data
+
+
+@lru_cache(maxsize=32)
+def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
+    db = MySQLConnection()
+
+    seg_rows = db.execute_query(
+        """
+        SELECT
+          sp.id AS seg,
+          sp.extensao,
+          (
+            SELECT ps.codigo
+            FROM pista_shape ps
+            WHERE ps.rodovia = sp.rodovia
+              AND ps.km_inicial <= sp.km_inicial
+              AND ps.km_final >= sp.km_final
+            ORDER BY ps.km_inicial DESC
+            LIMIT 1
+          ) AS sre
+        FROM analise_gerencial_segmento_pistas sp
+        WHERE sp.analise_gerencial_id = %s
+        """,
+        (analise_id,),
+    ) or []
+    seg_info = {
+        int(r["seg"]): {"ext": _to_float(r["extensao"]), "sre": r.get("sre") or f"Segmento {r['seg']}"}
+        for r in seg_rows
+    }
+
+    rows = db.execute_query(
+        """
+        SELECT ano, segmento_pista_id AS seg, iapa, iapb, conceito_iapa, solucao_corretiva_final
+        FROM analise_gerencial_intervencoes_iap
+        WHERE gerencial_ciclo_id = %s
+        ORDER BY ano
+        """,
+        (ciclo_id,),
+    ) or []
+    if not rows:
+        return {}
+
+    per_year: dict[int, dict[str, float]] = {}
+    per_seg: dict[int, list[tuple[int, float]]] = {}
+    per_sre: dict[str, dict[int, dict[str, float]]] = {}
+    conceito_min: dict[str, float] = {}
+    max_iap = 0.0
+    for row in rows:
+        seg = int(row["seg"])
+        info = seg_info.get(seg)
+        if info is None:
+            continue
+        ext = info["ext"]
+        ano = int(row["ano"])
+        iap_after = _to_float(row.get("iapa")) / 100
+        iap_before = _to_float(row.get("iapb")) / 100
+        solution = row.get("solucao_corretiva_final")
+
+        bucket = per_year.setdefault(
+            ano,
+            {"ext": 0.0, "w_after": 0.0, "w_before": 0.0, "min_after": iap_after, "below_km": 0.0, "interv_km": 0.0, "conceitos": {}},
+        )
+        bucket["ext"] += ext
+        bucket["w_after"] += ext * iap_after
+        bucket["w_before"] += ext * iap_before
+        bucket["min_after"] = min(bucket["min_after"], iap_after)
+        if iap_after < IAP_META:
+            bucket["below_km"] += ext
+        has_interv = bool(solution and str(solution).upper() != "OK")
+        if has_interv:
+            bucket["interv_km"] += ext
+
+        per_seg.setdefault(seg, []).append((ano, iap_after))
+
+        # série por trecho (SRE), ponderada por extensão
+        sre = info["sre"]
+        sd = per_sre.setdefault(sre, {}).setdefault(ano, {"ext": 0.0, "w": 0.0, "interv": 0.0, "solucoes": {}})
+        sd["ext"] += ext
+        sd["w"] += ext * iap_after
+        if has_interv:
+            sd["interv"] = 1.0
+            code = str(solution)
+            sd["solucoes"][code] = sd["solucoes"].get(code, 0.0) + ext
+
+        # limiar de cada conceito = menor IAP observado naquele conceito
+        conceito = row.get("conceito_iapa")
+        if conceito:
+            cur = conceito_min.get(conceito)
+            if cur is None or iap_after < cur:
+                conceito_min[conceito] = iap_after
+            bucket["conceitos"][conceito] = bucket["conceitos"].get(conceito, 0.0) + ext
+        max_iap = max(max_iap, iap_after)
+
+    years = sorted(per_year)
+    base_year = years[0]
+    iap_axis_max = max(6.0, math.ceil(max_iap))
+
+    def col(key: str) -> list[float]:
+        return [round(per_year[y][key], 3) for y in years]
+
+    avg_after = [round(per_year[y]["w_after"] / per_year[y]["ext"], 3) if per_year[y]["ext"] else 0.0 for y in years]
+    avg_before = [round(per_year[y]["w_before"] / per_year[y]["ext"], 3) if per_year[y]["ext"] else 0.0 for y in years]
+    min_after = col("min_after")
+    below_km = col("below_km")
+    interv_km = col("interv_km")
+
+    # Alertas por SRE: menor IAP projetado (anos > ano base) e quando ocorre.
+    sre_min: dict[str, tuple[float, int]] = {}
+    for seg, series in per_seg.items():
+        sre = seg_info[seg]["sre"]
+        future = [(ano, iap) for ano, iap in series if ano > base_year]
+        if not future:
+            continue
+        min_iap = min(iap for _, iap in future)
+        min_year = min(ano for ano, iap in future if iap == min_iap)
+        current = sre_min.get(sre)
+        if current is None or min_iap < current[0]:
+            sre_min[sre] = (min_iap, min_year)
+
+    ranked = sorted((m, y, s) for s, (m, y) in sre_min.items())
+    alerts = [
+        {
+            "sre": s,
+            "year": y,
+            "iap": round(m, 2),
+            "tipo": "critico" if m < IAP_META else ("atencao" if m < IAP_ATENCAO else "ok"),
+        }
+        for m, y, s in ranked
+        if m < IAP_ATENCAO
+    ][:15]
+    critical_count = sum(1 for m, _, _ in ranked if m < IAP_META)
+
+    future_idx = [i for i, y in enumerate(years) if y > base_year] or [len(years) - 1]
+    worst_future_val = min(min_after[i] for i in future_idx)
+    worst_future_year = years[min(future_idx, key=lambda i: min_after[i])]
+
+    # Composição da rodovia por conceito (% de km) em cada ano — visão executiva.
+    composition = []
+    for y in years:
+        total = per_year[y]["ext"] or 1.0
+        conc = per_year[y].get("conceitos", {})
+        segments = [
+            {
+                "conceito": c,
+                "pct": round(conc[c] / total * 100, 1),
+                "color": _IAP_CLASS_COLORS.get(c, "#fff200"),
+            }
+            for c in _IAP_CLASS_ORDER
+            if conc.get(c, 0) > 0
+        ]
+        composition.append({"year": y, "segments": segments})
+    pct_above_meta = [
+        round((per_year[y]["ext"] - per_year[y]["below_km"]) / (per_year[y]["ext"] or 1.0) * 100, 1)
+        for y in years
+    ]
+
+    # Séries por trecho (SRE) para o gráfico individual.
+    sre_series: dict[str, dict] = {}
+    for sre, year_data in per_sre.items():
+        yrs = sorted(year_data)
+        sre_series[sre] = {
+            "years": yrs,
+            "iap": [round(year_data[y]["w"] / year_data[y]["ext"], 3) if year_data[y]["ext"] else 0.0 for y in yrs],
+            "interv": [bool(year_data[y]["interv"]) for y in yrs],
+            "solucoes": [
+                list(dict.fromkeys(
+                    _solution_name(code)
+                    for code, _ in sorted((year_data[y].get("solucoes") or {}).items(), key=lambda kv: -kv[1])
+                ))
+                for y in yrs
+            ],
+        }
+    sre_list = sorted(sre_series)
+
+    # Histórico de intervenções por ano, por trecho (o que foi feito em cada ano).
+    sre_history: dict[str, list[dict]] = {}
+    for sre, year_data in per_sre.items():
+        hist = []
+        for y in sorted(year_data):
+            solucoes = year_data[y].get("solucoes") or {}
+            if solucoes:
+                names = list(dict.fromkeys(_solution_name(code) for code, _ in sorted(solucoes.items(), key=lambda kv: -kv[1])))
+                label = " + ".join(names)
+                km = round(sum(solucoes.values()), 2)
+            else:
+                names = []
+                label = ""
+                km = 0.0
+            hist.append({"year": y, "label": label, "km": km, "solucoes": names})
+        sre_history[sre] = hist
+    # Trecho padrão = o de menor IAP projetado (mais ilustrativo da degradação).
+    default_sre = min(
+        sre_list,
+        key=lambda s: min((v for y, v in zip(sre_series[s]["years"], sre_series[s]["iap"]) if y > base_year), default=9.9),
+    ) if sre_list else None
+
+    # Faixas de conceito: limite inferior = menor IAP observado em cada conceito.
+    ordered = sorted(conceito_min.items(), key=lambda kv: kv[1])
+    bands = []
+    for i, (conceito, low) in enumerate(ordered):
+        band_low = 0.0 if i == 0 else round(low, 3)
+        band_high = round(ordered[i + 1][1], 3) if i + 1 < len(ordered) else iap_axis_max
+        bands.append(
+            {
+                "conceito": conceito,
+                "low": band_low,
+                "high": band_high,
+                "color": _IAP_CLASS_COLORS.get(conceito, "#fff200"),
+            }
+        )
+
+    return {
+        "years": years,
+        "avg_after": avg_after,
+        "avg_before": avg_before,
+        "min_after": min_after,
+        "below_km": below_km,
+        "interv_km": interv_km,
+        "meta": IAP_META,
+        "base_year": base_year,
+        "base_avg": avg_after[0],
+        "base_below_km": below_km[0],
+        "final_avg": avg_after[-1],
+        "worst_future_val": round(worst_future_val, 2),
+        "worst_future_year": worst_future_year,
+        "total_km": round(sum(seg_info[s]["ext"] for s in seg_info), 1),
+        "segment_count": len(seg_info),
+        "alerts": alerts,
+        "critical_count": critical_count,
+        "iap_axis_max": iap_axis_max,
+        "bands": bands,
+        "sre_series": sre_series,
+        "sre_list": sre_list,
+        "default_sre": default_sre,
+        "sre_history": sre_history,
+        "composition": composition,
+        "pct_above_meta": pct_above_meta,
     }
