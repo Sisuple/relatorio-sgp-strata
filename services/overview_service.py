@@ -1272,6 +1272,316 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
     }
 
 
+# --- Soluções DNIT (Matriz Revitaliza DNIT/RO) ---
+# Categoria macro da solução DNIT (para a distribuição/cor da barra). A tabela mostra a solução detalhada.
+_DNIT_GROUP_COLORS = {
+    "Reconstrução": "#d71920",
+    "Fresagem + CBUQ": "#f2a51a",
+    "Recapeamento CBUQ": "#fff200",
+    "Microrrevestimento": "#b6d7a8",
+    "Reparo localizado": "#00a651",
+    "Outras soluções": "#9fb9d9",
+    "A avaliar em campo": "#9fb9d9",
+}
+
+
+def _dnit_solution_group(solucoes: list[str]) -> str:
+    """Agrupa a solução detalhada da matriz numa categoria macro (mais severa vence)."""
+    if not solucoes:
+        return "A avaliar em campo"
+    texto = " ".join(solucoes).lower()
+    tokens = texto.replace("+", " ").split()
+    if any(t.startswith("rec") for t in tokens):
+        return "Reconstrução"
+    if "fr5" in texto or "fresagem" in texto:
+        return "Fresagem + CBUQ"
+    if "cbuq" in texto:
+        return "Recapeamento CBUQ"
+    if "micro" in texto:
+        return "Microrrevestimento"
+    if "rl" in tokens or "reparo" in texto:
+        return "Reparo localizado"
+    return "Outras soluções"
+
+
+# Tipos de intervenção "reparo localizado / conservação" (tabela `intervencao_tipos`): aparecem em
+# quase todo segmento como complemento → entram na solução COMPLETA da tabela, mas saem do NÚCLEO do gráfico.
+# (9 Reparo de bordo · 10 Selagem de trincas · 11 Tapa-buraco · 12 Remendo-trincas · 13 Remendo-desgaste)
+_DNIT_COMPLEMENTARY_TIPOS = {9, 10, 11, 12, 13}
+
+
+def _dnit_is_complementar(nome: str) -> bool:
+    """Fallback por nome quando o tipoId não vier no JSON."""
+    n = (nome or "").strip().lower()
+    return n.startswith("rl") or "selagem de trincas" in n or "tapa-buraco" in n or "reparo localizado" in n
+
+
+def _dnit_parse_solucoes(solucoes_json: Any) -> list[tuple[int | None, str]]:
+    """Lista [(tipo_id, nome)] das soluções gravadas, sem duplicar nome, na ordem do banco."""
+    if not solucoes_json:
+        return []
+    try:
+        items = json.loads(solucoes_json) if isinstance(solucoes_json, str) else solucoes_json
+    except (TypeError, ValueError):
+        return []
+    out: list[tuple[int | None, str]] = []
+    seen: set[str] = set()
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        nome = str(it.get("tipoNome", "")).strip()
+        if not nome or nome in seen:
+            continue
+        seen.add(nome)
+        try:
+            tid = int(it.get("tipoId")) if it.get("tipoId") is not None else None
+        except (TypeError, ValueError):
+            tid = None
+        out.append((tid, nome))
+    return out
+
+
+def _dnit_solution_core_label(parsed: list[tuple[int | None, str]]) -> str:
+    """Núcleo da solução (intervenção de pavimento), sem os complementares — para o gráfico.
+
+    Classifica pelo `tipoId` gravado (= `intervencao_tipo_id`); cai p/ heurística de nome se faltar.
+    """
+    def is_comp(tid: int | None, nome: str) -> bool:
+        return tid in _DNIT_COMPLEMENTARY_TIPOS if tid is not None else _dnit_is_complementar(nome)
+
+    core = [nome for tid, nome in parsed if not is_comp(tid, nome)]
+    if core:
+        return " + ".join(dict.fromkeys(core))
+    return " + ".join(dict.fromkeys(n for _, n in parsed)) if parsed else "—"
+
+
+def get_dnit_available_roads() -> list[str]:
+    """Rodovias (labels) que têm soluções DNIT gravadas (processadas com a Matriz Cadastrada)."""
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT DISTINCT agdt.rodovia
+        FROM analise_gerencial_dados_trechos agdt
+        JOIN analise_gerencial_ciclos agc ON agc.analise_gerencial_id = agdt.id
+        WHERE agdt.deleted_at IS NULL
+          AND agdt.tipo_matriz = 'Matriz Cadastrada'
+          AND EXISTS (SELECT 1 FROM analise_gerencial_intervencoes_dnit d WHERE d.gerencial_ciclo_id = agc.id)
+        """
+    ) or []
+    codes = {_normalize_road_code(r.get("rodovia")) for r in rows}
+    return [road for road in get_available_roads() if _normalize_road_code(road) in codes]
+
+
+def get_dnit_solutions_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    """Soluções DNIT **gravadas no banco** (análise 'Matriz Cadastrada' / Matriz Revitaliza DNIT/RO).
+
+    A matriz de cores (faixa de IRI) define só a COR no mapa; a SOLUÇÃO vem de
+    `analise_gerencial_intervencoes_dnit`. Só rodovias processadas com essa matriz têm dados
+    (hoje, apenas a BR-429); as demais usam Paragon.
+    """
+    road = selected_road or get_available_roads()[0]
+    code = _normalize_road_code(road)
+    analysis = _get_dnit_analysis_for_road(code) if code else None
+    base = {
+        "road": road,
+        "available": False,
+        "segments": pd.DataFrame(),
+        "table": pd.DataFrame(),
+        "zona_order": _DNIT_ZONA_ORDER,
+        "zona_colors": _DNIT_ZONA_COLORS,
+    }
+    if not analysis:
+        return base
+
+    data = _get_dnit_solutions_from_database(analysis["analise_id"], analysis["ciclo_id"], analysis["ano"])
+    if not data:
+        return base
+    data["road"] = road
+    data["available"] = True
+    data["cenario"] = analysis.get("nome")
+    data["ano"] = analysis.get("ano")
+    return data
+
+
+@lru_cache(maxsize=8)
+def _get_dnit_analysis_for_road(road_code: str) -> dict | None:
+    """Análise 'Matriz Cadastrada' da rodovia com soluções DNIT gravadas (ano-base = 1º ano)."""
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT agdt.id AS analise_id, agdt.nome, agc.id AS ciclo_id,
+               (SELECT MIN(d.ano) FROM analise_gerencial_intervencoes_dnit d WHERE d.gerencial_ciclo_id = agc.id) AS ano
+        FROM analise_gerencial_dados_trechos agdt
+        JOIN analise_gerencial_ciclos agc ON agc.analise_gerencial_id = agdt.id
+        WHERE agdt.deleted_at IS NULL
+          AND agdt.rodovia = %s
+          AND agdt.tipo_matriz = 'Matriz Cadastrada'
+          AND EXISTS (SELECT 1 FROM analise_gerencial_intervencoes_dnit d WHERE d.gerencial_ciclo_id = agc.id)
+        ORDER BY agc.id DESC
+        LIMIT 1
+        """,
+        (str(int(road_code)),),
+    ) or []
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "analise_id": int(r["analise_id"]),
+        "ciclo_id": int(r["ciclo_id"]),
+        "ano": int(r["ano"]),
+        "nome": r.get("nome"),
+    }
+
+
+@lru_cache(maxsize=32)
+def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
+    """Geometria/SRE/km de TODOS os segmentos da análise (sem depender de IAP)."""
+    db = MySQLConnection()
+    geometry_rows = db.execute_query(
+        """
+        SELECT
+          seg.id AS id_segmento,
+          (
+            SELECT ps.codigo FROM pista_shape ps
+            WHERE ps.rodovia = seg.rodovia
+              AND ps.km_inicial <= seg.km_inicial
+              AND ps.km_final >= seg.km_final
+            ORDER BY ps.km_inicial DESC LIMIT 1
+          ) AS codigo,
+          seg.km_inicial AS km_inicial_segmento,
+          seg.km_final AS km_final_segmento,
+          ST_AsText(pt.geometria) AS wkt
+        FROM analise_gerencial_segmento_pistas seg
+        JOIN principal_levantamentos pt FORCE INDEX (idx_lev_importacao_km)
+          ON pt.levantamento_importacao_id = (
+            SELECT MIN(li.id) FROM levantamento_importacoes li
+            WHERE li.nome_arquivo LIKE CONCAT('IRI_BR', seg.rodovia, '%%')
+          )
+         AND pt.rodovia = seg.rodovia
+         AND pt.km_inicial >= seg.km_inicial
+         AND pt.km_inicial <= seg.km_final
+        WHERE seg.analise_gerencial_id = %s
+        ORDER BY seg.id, pt.km_inicial
+        """,
+        (analise_id,),
+    ) or []
+
+    segments: dict[int, dict[str, Any]] = {}
+    for row in geometry_rows:
+        segment_id = int(row["id_segmento"])
+        segment = segments.setdefault(
+            segment_id,
+            {
+                "segment_id": segment_id,
+                "sre": row.get("codigo") or f"Segmento {segment_id}",
+                "km_inicial": _to_float(row.get("km_inicial_segmento")),
+                "km_final": _to_float(row.get("km_final_segmento")),
+                "paths": [],
+            },
+        )
+        line_coords = _parse_linestring_latlon(row.get("wkt"))
+        if len(line_coords) >= 2 and not _has_large_coordinate_jump(line_coords):
+            segment["paths"].append(line_coords)
+
+    return pd.DataFrame([s for s in segments.values() if s.get("paths")])
+
+
+@lru_cache(maxsize=32)
+def _get_dnit_solutions_from_database(analise_id: int, ciclo_id: int, year: int) -> dict:
+    geo = _get_dnit_geometry_from_database(analise_id)
+    if geo is None or geo.empty:
+        return {}
+
+    db = MySQLConnection()
+    iri_rows = db.execute_query(
+        "SELECT segmento_pista_id AS seg, iria FROM analise_gerencial_roughness WHERE gerencial_ciclo_id = %s AND ano = %s",
+        (ciclo_id, year),
+    ) or []
+    igg_rows = db.execute_query(
+        "SELECT segmento_pista_id AS seg, igga, situacao_igga FROM analise_gerencial_igg WHERE gerencial_ciclo_id = %s AND ano = %s",
+        (ciclo_id, year),
+    ) or []
+    sol_rows = db.execute_query(
+        "SELECT segmento_pista_id AS seg, solucoes FROM analise_gerencial_intervencoes_dnit WHERE gerencial_ciclo_id = %s AND ano = %s",
+        (ciclo_id, year),
+    ) or []
+
+    iri_by = {int(r["seg"]): _to_float(r["iria"]) for r in iri_rows}
+    igg_by = {int(r["seg"]): (_to_float(r["igga"]), r.get("situacao_igga")) for r in igg_rows}
+    sol_by = {int(r["seg"]): r["solucoes"] for r in sol_rows}
+
+    seg_records = []
+    table_records = []
+    for row in geo.to_dict("records"):
+        seg = int(row["segment_id"])
+        parsed = _dnit_parse_solucoes(sol_by.get(seg))
+        if not parsed:
+            continue  # só segmentos com solução DNIT gravada
+        nomes = [n for _, n in parsed]
+
+        iri = iri_by.get(seg) or 0.0
+        igg_val = igg_by.get(seg, (0.0, None))[0] or 0.0
+        zona, zona_color = _dnit_matriz_zona(iri)
+        solucao_txt = " + ".join(nomes)
+        nucleo = _dnit_solution_core_label(parsed)
+
+        km_i = _to_float(row.get("km_inicial"))
+        km_f = _to_float(row.get("km_final"))
+        ext = max(km_f - km_i, 0.0)
+
+        seg_records.append(
+            {
+                "segment_id": seg,
+                "sre": row.get("sre"),
+                "km_inicial": km_i,
+                "km_final": km_f,
+                "paths": row["paths"],
+                "iri": round(iri, 2),
+                "igg": round(igg_val, 1),
+                "matriz_categoria": zona,
+                "matriz_color": zona_color,
+            }
+        )
+        table_records.append(
+            {
+                "SNV": row.get("sre"),
+                "Km Inicial": km_i,
+                "Km Final": km_f,
+                "Extensão": ext,
+                "IRI": round(iri, 2),
+                "IGG": round(igg_val, 1),
+                "Faixa": zona,
+                "Solução recomendada": solucao_txt,
+                "Solução núcleo": nucleo,
+                "_segment_id": seg,
+                "_zona_color": zona_color,
+            }
+        )
+
+    segments = pd.DataFrame(seg_records)
+    table = pd.DataFrame(table_records)
+    if table.empty:
+        return {}
+
+    # Ordena pela faixa mais severa (pior IRI primeiro), depois km.
+    zona_sev = {z: i for i, z in enumerate(_DNIT_ZONA_ORDER)}
+    table["_sev"] = table["Faixa"].map(lambda z: zona_sev.get(z, 0))
+    table = (
+        table.sort_values(["_sev", "Km Inicial"], ascending=[False, True])
+        .drop(columns="_sev")
+        .reset_index(drop=True)
+    )
+
+    return {
+        "segments": segments,
+        "table": table,
+        "extension_km": round(float(table["Extensão"].sum()), 1),
+        "group_colors": _DNIT_GROUP_COLORS,
+        "zona_order": _DNIT_ZONA_ORDER,
+        "zona_colors": _DNIT_ZONA_COLORS,
+    }
+
+
 def get_projection_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
     """Série de projeção do IAP ao longo dos anos para a rodovia/cenário."""
     road = selected_road or get_available_roads()[0]

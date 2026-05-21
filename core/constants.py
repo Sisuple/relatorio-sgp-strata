@@ -10,10 +10,16 @@ AVAILABLE_ROADS = [
 
 MENU_ITEMS = [
     {
-        "key": "overview",
+        "key": "visaogeral",
         "label": "Visão geral",
-        "description": "Como está minha rede agora?",
+        "description": "Panorama executivo da rede",
         "icon": "grid",
+    },
+    {
+        "key": "overview",
+        "label": "Diagnóstico",
+        "description": "Como está minha rede agora?",
+        "icon": "activity",
     },
     {
         "key": "solucoes",
@@ -35,8 +41,8 @@ MENU_ITEMS = [
     },
     {
         "key": "risco",
-        "label": "Risco & alertas",
-        "description": "Onde vai falhar primeiro?",
-        "icon": "shield",
+        "label": "IAGON",
+        "description": "Pergunte, analise e exporte",
+        "icon": "spark",
     },
 ]

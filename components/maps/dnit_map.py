@@ -47,10 +47,12 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
             .map-zoom button { width: 32px; height: 32px; border: 0; background: rgba(7,17,25,.96); color: #f4f7fb; font-size: 22px; line-height: 1; font-weight: 700; cursor: pointer; }
             .map-zoom button:hover { background: rgba(14,31,44,.98); }
             .map-zoom button + button { border-top: 1px solid rgba(148,163,184,.22); }
-            .map-actions { position: absolute; z-index: 710; top: 14px; right: 14px; }
+            .map-actions { position: absolute; z-index: 710; top: 14px; right: 14px; display: flex; align-items: stretch; gap: 8px; }
             .map-button { height: 36px; width: 38px; display: grid; place-items: center; border: 1px solid rgba(148,163,184,.24); background: rgba(7,17,25,.94); color: #f4f7fb; border-radius: 8px; cursor: pointer; box-shadow: 0 14px 32px rgba(0,0,0,.28); }
             .map-button:hover { background: rgba(14,31,44,.98); }
             .map-button svg { width: 18px; height: 18px; stroke: currentColor; }
+            .map-layer-select { height: 36px; width: 152px; padding: 0 32px 0 12px; font-size: 12px; font-weight: 700; color: #f4f7fb; border: 1px solid rgba(148,163,184,.24); background-color: rgba(7,17,25,.94); border-radius: 8px; box-shadow: 0 14px 32px rgba(0,0,0,.28); outline: none; cursor: pointer; appearance: none; background-image: linear-gradient(45deg, transparent 50%, #cbd5df 50%), linear-gradient(135deg, #cbd5df 50%, transparent 50%); background-position: calc(100% - 17px) 15px, calc(100% - 12px) 15px; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+            .map-layer-select:hover { background-color: rgba(14,31,44,.98); }
             .map-legend { position: absolute; z-index: 700; left: 14px; bottom: 14px; max-width: 280px; background: rgba(7,17,25,.94); color: #e5edf3; border-radius: 12px; padding: 13px 14px 11px; border: 1px solid rgba(148,163,184,.2); box-shadow: 0 18px 40px rgba(0,0,0,.34); }
             .legend-title { font-size: 10px; letter-spacing: .12em; color: #9aa8b3; font-weight: 800; margin-bottom: 10px; }
             .legend-grid { display: grid; gap: 8px; }
@@ -73,6 +75,13 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
                   <path d="M8 21H5a2 2 0 0 1-2-2v-3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path>
                 </svg>
               </button>
+              <select class="map-layer-select" data-layer aria-label="Camada base do mapa">
+                <option value="osm">Padrão</option>
+                <option value="light">Claro</option>
+                <option value="dark">Escuro</option>
+                <option value="satellite">Satélite</option>
+                <option value="topographic">Topográfico</option>
+              </select>
             </div>
             <div class="map-legend">
               <div class="legend-title">INTERVENÇÃO (MATRIZ DNIT)</div>
@@ -83,7 +92,14 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
           <script>
             const segments = $segments_json;
             const map = L.map('map', { zoomControl: false, attributionControl: true, scrollWheelZoom: true });
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+            const baseLayers = {
+              osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }),
+              light: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OpenStreetMap &copy; CARTO' }),
+              dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OpenStreetMap &copy; CARTO' }),
+              satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles &copy; Esri' }),
+              topographic: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { maxZoom: 17, attribution: '&copy; OpenTopoMap &copy; OpenStreetMap' })
+            };
+            let currentBaseLayer = baseLayers.osm.addTo(map);
             const pts = [];
             const fmt = (v) => Number(v).toFixed(2);
             segments.forEach((s) => {
@@ -101,6 +117,12 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
             if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [34, 34] });
             document.querySelector('[data-zoom=in]').addEventListener('click', () => map.zoomIn());
             document.querySelector('[data-zoom=out]').addEventListener('click', () => map.zoomOut());
+            document.querySelector('[data-layer]').addEventListener('change', (event) => {
+              const nextLayer = baseLayers[event.target.value] || baseLayers.osm;
+              if (nextLayer === currentBaseLayer) return;
+              map.removeLayer(currentBaseLayer);
+              currentBaseLayer = nextLayer.addTo(map);
+            });
             document.querySelector('[data-fullscreen]').addEventListener('click', async () => {
               const card = document.querySelector('.map-card');
               if (!document.fullscreenElement) { await card.requestFullscreen(); } else { await document.exitFullscreen(); }

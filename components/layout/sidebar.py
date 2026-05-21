@@ -14,6 +14,7 @@ _ICON_SVGS = {
     "trend": "<path d='M3 7l6 6 4-4 8 8'/>",
     "scale": "<path d='M12 3v18M5 7h14M6 7l-3 7h6zM18 7l-3 7h6z'/>",
     "shield": "<path d='M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6z'/>",
+    "spark": "<path d='M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z'/>",
 }
 
 

@@ -4,6 +4,7 @@ import html
 import json
 import math
 from datetime import date
+from functools import lru_cache
 from io import BytesIO
 
 import pandas as pd
@@ -20,12 +21,19 @@ from services.overview_service import (
     get_available_roads,
     get_available_scenarios,
     get_dnit_overview_data,
+    get_dnit_solutions_data,
+    get_dnit_available_roads,
     get_overview_data,
     get_projection_data,
     get_solutions_data,
+    IAP_META,
+    _DNIT_GROUP_COLORS,
+    _dnit_solution_group,
+    _normalize_road_code,
 )
 from services.prioritization import calcular_indice_priorizacao, classificar_prioridade
 from services.work_plan_pdf import build_work_plan_pdf
+from services import iagon
 
 
 st.set_page_config(
@@ -157,6 +165,14 @@ def inject_css() -> None:
             .solution-table tr:hover td { background: rgba(0,194,232,.04); }
             .solution-table .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; }
             .solution-table .muted { color: #9aa8b3; }
+            .net-road-link { color: #e8f1f8; font-weight: 750; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
+            .net-road-link:hover { color: #00c2e8; text-decoration: underline; }
+            .net-rank-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; flex: none; }
+            .iagon-hero { display: flex; gap: 14px; align-items: center; margin: 4px 0 16px; padding: 18px 20px; border-radius: 16px; border: 1px solid #1d3848; background: linear-gradient(120deg, rgba(0,194,232,.10), rgba(11,29,40,.45)); }
+            .iagon-avatar { width: 46px; height: 46px; flex: none; display: grid; place-items: center; border-radius: 14px; background: linear-gradient(135deg, #00c2e8, #0a6ee0); color: #04121a; font-size: 22px; font-weight: 800; box-shadow: 0 10px 28px rgba(0,194,232,.35); }
+            .iagon-hero h3 { margin: 0; color: var(--text); font-size: 16px; font-weight: 850; }
+            .iagon-hero p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; max-width: 760px; line-height: 1.5; }
+            .iagon-suggest-label { color: #8f9eaa; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 800; margin: 8px 0 8px; }
             .segment-table { min-width: 720px; width: 100%; border-collapse: collapse; background: rgba(6,16,24,.42); border: 1px solid rgba(148,163,184,.16); border-radius: 8px; overflow: hidden; }
             .segment-table th { padding: 8px 10px; background: rgba(6,16,24,.52); color: #8f9eaa; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
             .segment-table td { padding: 8px 10px; border-top: 1px solid rgba(148,163,184,.08); font-size: 11px; }
@@ -308,56 +324,91 @@ def _filter_label(label: str) -> None:
     st.markdown(f'<div class="filter-label">{label}</div>', unsafe_allow_html=True)
 
 
-def render_top_bar(selected_road: str, *, page_title: str = "Diagnóstico Paragon", show_diagnosis: bool = True) -> tuple[str, str, str | None]:
+def _preselect_road_from_url(roads: list[str]) -> None:
+    """Drill-down da Visão geral: aplica ?road=<código> uma vez no seletor (key topbar_road)."""
+    nav = st.query_params.get("road")
+    if not nav:
+        return
+    match = next((r for r in roads if _normalize_road_code(r) == _normalize_road_code(nav)), None)
+    if match and st.session_state.get("_nav_road_applied") != nav:
+        st.session_state["topbar_road"] = match
+        st.session_state["_nav_road_applied"] = nav
+
+
+def render_top_bar(
+    selected_road: str,
+    *,
+    page_title: str = "Diagnóstico Paragon",
+    show_diagnosis: bool = True,
+    keep_title: bool = False,
+    show_filters: bool = True,
+) -> tuple[str, str | None, str | None]:
     left, right = st.columns([0.82, 1.92], gap="large")
+    selected_out: str | None = selected_road
+    scenario_key: str | None = None
+    diagnosis = page_title
+
     with right:
-        if show_diagnosis:
-            diagnosis_col, road_col, scenario_col = st.columns([0.8, 0.8, 1.35], gap="small")
-            with diagnosis_col:
-                _filter_label("Diagnóstico")
-                diagnosis = st.selectbox(
-                    "Diagnóstico",
-                    ["Diagnóstico Paragon", "Diagnóstico DNIT"],
+        if not show_filters:
+            # Modo rede (Visão geral): só o seletor Paragon/DNIT, sem rodovia/cenário.
+            if show_diagnosis:
+                diagnosis_col, _spacer = st.columns([0.8, 2.15], gap="small")
+                with diagnosis_col:
+                    _filter_label("Diagnóstico")
+                    diagnosis = st.selectbox(
+                        "Diagnóstico",
+                        ["Diagnóstico Paragon", "Diagnóstico DNIT"],
+                        label_visibility="collapsed",
+                    )
+            selected_out = None
+        else:
+            if show_diagnosis:
+                diagnosis_col, road_col, scenario_col = st.columns([0.8, 0.8, 1.35], gap="small")
+                with diagnosis_col:
+                    _filter_label("Diagnóstico")
+                    diagnosis = st.selectbox(
+                        "Diagnóstico",
+                        ["Diagnóstico Paragon", "Diagnóstico DNIT"],
+                        label_visibility="collapsed",
+                    )
+            else:
+                road_col, scenario_col = st.columns([0.86, 1.34], gap="small")
+                diagnosis = page_title
+
+            with road_col:
+                _filter_label("Rodovias")
+                roads = get_available_roads()
+                _preselect_road_from_url(roads)
+                selected_out = st.selectbox(
+                    "Rodovia",
+                    roads,
+                    key="topbar_road",
                     label_visibility="collapsed",
                 )
-        else:
-            road_col, scenario_col = st.columns([0.86, 1.34], gap="small")
-            diagnosis = page_title
-
-        with road_col:
-            _filter_label("Rodovias")
-            roads = get_available_roads()
-            selected_road = st.selectbox(
-                "Rodovia",
-                roads,
-                index=roads.index(selected_road) if selected_road in roads else 0,
-                label_visibility="collapsed",
-            )
-
-            scenarios = get_available_scenarios(selected_road)
-        with scenario_col:
-            _filter_label("Cenários")
-            scenario_keys = [scenario["key"] for scenario in scenarios]
-            scenario_labels = {scenario["key"]: scenario["label"] for scenario in scenarios}
-            scenario_key = st.selectbox(
-                "Cenário",
-                scenario_keys,
-                format_func=lambda key: scenario_labels.get(key, key),
-                label_visibility="collapsed",
-            ) if scenario_keys else None
+                scenarios = get_available_scenarios(selected_out)
+            with scenario_col:
+                _filter_label("Cenários")
+                scenario_keys = [scenario["key"] for scenario in scenarios]
+                scenario_labels = {scenario["key"]: scenario["label"] for scenario in scenarios}
+                scenario_key = st.selectbox(
+                    "Cenário",
+                    scenario_keys,
+                    format_func=lambda key: scenario_labels.get(key, key),
+                    label_visibility="collapsed",
+                ) if scenario_keys else None
 
     with left:
         st.markdown(
             f"""
             <div class="top-copy">
                 <p class="eyebrow">RELATÓRIOS</p>
-                <h1 class="page-title">{page_title if not show_diagnosis else diagnosis}</h1>
+                <h1 class="page-title">{page_title if (keep_title or not show_diagnosis) else diagnosis}</h1>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    return diagnosis, selected_road, scenario_key
+    return diagnosis, selected_out, scenario_key
 
 
 def render_metric_cards(cards: list[dict]) -> None:
@@ -497,12 +548,21 @@ def _solution_color(label: str) -> str:
     return "#00a651"
 
 
-def _render_solution_distribution(table_df, total_km: float | None = None, plan_cost_mi: float | None = None) -> None:
+def _render_solution_distribution(
+    table_df,
+    total_km: float | None = None,
+    plan_cost_mi: float | None = None,
+    *,
+    group_col: str = "Solução recomendada",
+    subtitle: str = "Engenharia aplicada · catálogo paramétrico Paragon",
+    color_fn=None,
+) -> None:
     if table_df is None or table_df.empty:
         return
 
+    color_fn = color_fn or _solution_color
     grouped = (
-        table_df.groupby("Solução recomendada", as_index=False)["Extensão"]
+        table_df.groupby(group_col, as_index=False)["Extensão"]
         .sum()
         .sort_values("Extensão", ascending=False)
     )
@@ -522,11 +582,11 @@ def _render_solution_distribution(table_df, total_km: float | None = None, plan_
     bars = []
     labels = []
     for row in grouped.to_dict("records"):
-        label = str(row["Solução recomendada"])
+        label = str(row[group_col])
         km = float(row["Extensão"])
         percent = km / total_extension * 100
         height = max(percent / axis_max * 100, 2)
-        color = _solution_color(label)
+        color = color_fn(label)
         bars.append(
             '<div class="solution-bar-item">'
             f'<div class="solution-bar" style="height:{height:.2f}%;background:{color};">'
@@ -547,7 +607,7 @@ def _render_solution_distribution(table_df, total_km: float | None = None, plan_
         '<div class="solution-distribution-title">'
         '<div class="solution-distribution-icon">≋</div>'
         '<div><h3>Distribuição de soluções na rede</h3>'
-        '<p>Engenharia aplicada · catálogo paramétrico Paragon</p></div>'
+        f'<p>{html.escape(subtitle)}</p></div>'
         '</div>'
         '<div class="solution-distribution-meta">'
         f'<span>Total · <strong>{total_extension:.1f} km</strong></span>'
@@ -626,12 +686,13 @@ def _render_solutions_table(table_df) -> None:
     )
 
 
-def _render_solution_table_controls(filtered_table):
+def _render_solution_table_controls(filtered_table, *, export_fn=None):
+    export_fn = export_fn or _render_export_button
     st.markdown('<div class="solution-panel-spacer"></div>', unsafe_allow_html=True)
     action_col, page_size_col, page_col, summary_col = st.columns([0.72, 0.62, 0.45, 1.35], gap="medium")
     with action_col:
         _filter_caption("Exportação")
-        _render_export_button(filtered_table)
+        export_fn(filtered_table)
 
     if filtered_table is None or filtered_table.empty:
         with summary_col:
@@ -683,6 +744,175 @@ def _render_solution_table_controls(filtered_table):
     return filtered_table, filtered_table.iloc[start:end].reset_index(drop=True)
 
 
+def _dnit_group_color(label: str) -> str:
+    return _DNIT_GROUP_COLORS.get(str(label), "#9fb9d9")
+
+
+def _dnit_core_color(label: str) -> str:
+    """Cor da barra pela severidade do núcleo da solução (Micro=verde, FR5+CBUQ=laranja, REC=vermelho)."""
+    return _DNIT_GROUP_COLORS.get(_dnit_solution_group([str(label)]), "#9fb9d9")
+
+
+def _render_dnit_solution_filters(table_df, zona_order):
+    if table_df is None or table_df.empty:
+        return table_df
+
+    sre_options = sorted(str(v) for v in table_df["SNV"].dropna().unique())
+    faixa_present = set(table_df["Faixa"].dropna().astype(str))
+    faixa_options = [z for z in zona_order if z in faixa_present]
+    solucao_options = sorted(str(v) for v in table_df["Solução núcleo"].dropna().unique())
+
+    first_row = st.columns([1, 1, 1], gap="medium")
+    with first_row[0]:
+        _filter_caption("SRE")
+        selected_sre = st.multiselect(
+            "SRE", sre_options, placeholder="Todos os SREs", label_visibility="collapsed"
+        )
+    with first_row[1]:
+        _filter_caption("Faixa IRI (matriz)")
+        selected_faixa = st.multiselect(
+            "Faixa IRI", faixa_options, placeholder="Todas as faixas", label_visibility="collapsed"
+        )
+    with first_row[2]:
+        _filter_caption("Tipo de solução")
+        selected_solucao = st.multiselect(
+            "Tipo de solução", solucao_options, placeholder="Todas as soluções", label_visibility="collapsed"
+        )
+
+    filtered = table_df.copy()
+    if selected_sre:
+        filtered = filtered[filtered["SNV"].astype(str).isin(selected_sre)]
+    if selected_faixa:
+        filtered = filtered[filtered["Faixa"].astype(str).isin(selected_faixa)]
+    if selected_solucao:
+        filtered = filtered[filtered["Solução núcleo"].astype(str).isin(selected_solucao)]
+    return filtered
+
+
+def _dnit_solution_table_to_excel(table_df) -> bytes:
+    export_columns = [
+        "SNV", "Km Inicial", "Km Final", "Extensão",
+        "IRI", "IGG", "Faixa", "Solução recomendada",
+    ]
+    output = BytesIO()
+    export_df = table_df[export_columns].copy()
+    with st.spinner("Preparando Excel..."):
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            export_df.to_excel(writer, index=False, sheet_name="Soluções DNIT")
+            workbook = writer.book
+            worksheet = writer.sheets["Soluções DNIT"]
+            header_format = workbook.add_format(
+                {"bold": True, "bg_color": "#0b1d28", "font_color": "#ffffff", "border": 1}
+            )
+            number_format = workbook.add_format({"num_format": "0.00"})
+            for col_index, column in enumerate(export_df.columns):
+                worksheet.write(0, col_index, column, header_format)
+                width = max(12, min(48, int(export_df[column].astype(str).str.len().max() or 12) + 2))
+                worksheet.set_column(col_index, col_index, width)
+            for column in ["Km Inicial", "Km Final", "Extensão", "IRI", "IGG"]:
+                col_index = export_df.columns.get_loc(column)
+                worksheet.set_column(col_index, col_index, 12, number_format)
+    return output.getvalue()
+
+
+def _render_dnit_export_button(table_df) -> None:
+    if table_df is None or table_df.empty:
+        return
+    st.download_button(
+        "Exportar Excel",
+        data=_dnit_solution_table_to_excel(table_df),
+        file_name="solucoes_dnit.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
+    )
+
+
+def _render_dnit_solutions_table(table_df) -> None:
+    if table_df is None or table_df.empty:
+        st.info("Sem trechos para exibir na matriz DNIT.")
+        return
+
+    rows_markup = []
+    for index, row in enumerate(table_df.to_dict("records"), start=1):
+        faixa_color = html.escape(str(row.get("_zona_color", "#fff200")))
+        faixa = html.escape(str(row.get("Faixa", "")))
+        rows_markup.append(
+            "<tr>"
+            f"<td class='muted'>{index}</td>"
+            f"<td class='mono'>{html.escape(str(row['SNV']))}</td>"
+            f"<td>{_format_km(float(row['Km Inicial']))}</td>"
+            f"<td>{_format_km(float(row['Km Final']))}</td>"
+            f"<td>{_format_km(float(row['Extensão']))} km</td>"
+            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{faixa_color}'></span>{faixa}</span></td>"
+            f"<td>{float(row['IRI']):.2f}</td>"
+            f"<td>{float(row['IGG']):.2f}</td>"
+            f"<td style='white-space:normal;min-width:260px'>{html.escape(str(row['Solução recomendada']))}</td>"
+            "</tr>"
+        )
+
+    st.markdown(
+        """
+        <section class="solution-card">
+          <div class="solution-card-head">
+            <h3>Matriz Revitaliza DNIT/RO</h3>
+            <p>""" + str(len(table_df)) + """ trechos encontrados conforme filtros aplicados</p>
+          </div>
+          <div class="solution-table-wrap">
+            <table class="solution-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>SRE</th>
+                  <th>Km Inicial</th>
+                  <th>Km Final</th>
+                  <th>Extensão</th>
+                  <th>Faixa IRI</th>
+                  <th>IRI</th>
+                  <th>IGG</th>
+                  <th>Solução recomendada</th>
+                </tr>
+              </thead>
+              <tbody>
+        """
+        + "".join(rows_markup)
+        + """
+              </tbody>
+            </table>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_dnit_solutions_page(road, scenario_key) -> None:
+    data = get_dnit_solutions_data(road, scenario_key=scenario_key)
+    if not data or not data.get("available") or data.get("table") is None or data["table"].empty:
+        disponiveis = get_dnit_available_roads()
+        if disponiveis:
+            quais = ", ".join(f"**{r}**" for r in disponiveis)
+            st.info(
+                f"Esta rodovia não foi processada com a **Matriz Revitaliza DNIT/RO**. "
+                f"No banco, {quais} possui(em) esse cálculo; as demais usam o diagnóstico **Paragon**."
+            )
+        else:
+            st.info("Nenhuma rodovia foi processada com a **Matriz Revitaliza DNIT/RO** ainda.")
+        return
+
+    st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
+    filtered_table = _render_dnit_solution_filters(data["table"], data["zona_order"])
+    filtered_segments = _filter_map_segments(data["segments"], filtered_table)
+    render_dnit_map(filtered_segments, zona_colors=data["zona_colors"], zona_order=data["zona_order"])
+    _render_solution_distribution(
+        filtered_table,
+        group_col="Solução núcleo",
+        subtitle="Soluções aplicadas · Matriz Revitaliza DNIT/RO (gravadas no banco)",
+        color_fn=_dnit_core_color,
+    )
+    _, paginated_table = _render_solution_table_controls(filtered_table, export_fn=_render_dnit_export_button)
+    _render_dnit_solutions_table(paginated_table)
+
+
 _ECONOMIC_SOLUTION_COST_KM = {
     "OK": 0,
     "RL": 180_000,
@@ -701,6 +931,9 @@ _ECONOMIC_STRATEGY_ORDER = {
 }
 # Ano-base do cenário econômico: o horizonte cobre [_ECONOMIC_BASE_YEAR, _ECONOMIC_BASE_YEAR + horizonte - 1].
 _ECONOMIC_BASE_YEAR = 2026
+# Horizonte padrão (anos) — usado no slider do cenário econômico E no custo da Visão geral,
+# pra os dois mostrarem a mesma necessidade por rodovia.
+_ECONOMIC_DEFAULT_HORIZON = 8
 
 
 def _limit_budget_to_horizon(budget_items, horizon: int):
@@ -918,7 +1151,7 @@ def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_k
     with horizon_col:
         _filter_caption("Horizonte")
         horizon = st.slider(
-            "Horizonte", 1, 20, 8, 1,
+            "Horizonte", 1, 20, _ECONOMIC_DEFAULT_HORIZON, 1,
             key=f"horizon_{scenario_key}",
             label_visibility="collapsed",
         )
@@ -2287,13 +2520,6 @@ def _render_dnit_overview(road: str, scenario_key: str | None) -> None:
                 "icon": "▦",
             },
             {
-                "title": "% DC > DADM",
-                "value": f"{data['defl_bad_pct']:.1f}%",
-                "subtitle": "Estrutura deficiente (reforço)",
-                "tone": "red",
-                "icon": "△",
-            },
-            {
                 "title": "% IRI CRÍTICO (> 4)",
                 "value": f"{data['critico_pct']:.1f}%",
                 "subtitle": "Faixa laranja/vermelha da matriz",
@@ -2317,20 +2543,562 @@ def _filter_map_segments(segments_df, filtered_table):
     return segments_df[segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
 
 
+def _build_network_overview(is_dnit: bool) -> dict:
+    """Agrega TODAS as rodovias para o painel executivo (Visão geral)."""
+    roads = get_available_roads()
+    rows = []
+    paragon_segments = []
+    dnit_segments = []
+    zona_colors = None
+    zona_order = None
+
+    for road in roads:
+        sol = get_solutions_data(road)
+        table = sol.get("table")
+        if table is None or table.empty:
+            continue
+        work = _economic_work_table(table)
+        ext = table["Extensão"].astype(float)
+        ext_sum = float(ext.sum()) or 1.0
+        iap_col = table["IAP"].astype(float)
+        iri_col = table["IRI"].astype(float)
+        igg_col = table["IGG"].astype(float)
+
+        iap_bad_km = float(ext[iap_col < IAP_META].sum())
+        iri_bad_km = float(ext[iri_col > 4].sum())
+
+        # Trechos prioritários POR RODOVIA (mesma priorização da tela econômica:
+        # IP técnico + IP econômico/IPE, normalizado dentro da própria rodovia).
+        prio = _prioridade_por_snv(work)
+        prio_alta_crit = sum(
+            1 for v in prio.values()
+            if v.get("classificacao") in ("Prioridade Crítica", "Prioridade Alta")
+        )
+
+        rows.append(
+            {
+                "Rodovia": road,
+                "_code": _normalize_road_code(road),
+                "IAP": float((iap_col * ext).sum() / ext_sum),
+                "IRI": float((iri_col * ext).sum() / ext_sum),
+                "IGG": float((igg_col * ext).sum() / ext_sum),
+                "ext_km": ext_sum,
+                "iap_bad_pct": iap_bad_km / ext_sum * 100,
+                "iri_bad_pct": iri_bad_km / ext_sum * 100,
+                "custo": _necessidade_total(table, sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON),
+                "prio": prio_alta_crit,
+            }
+        )
+
+        if not is_dnit and sol.get("segments") is not None and not sol["segments"].empty:
+            paragon_segments.append(sol["segments"])
+        if is_dnit:
+            dn = get_dnit_overview_data(road)
+            if dn and dn.get("segments") is not None and not dn["segments"].empty:
+                dnit_segments.append(dn["segments"])
+                zona_colors = dn.get("zona_colors")
+                zona_order = dn.get("zona_order")
+
+    if not rows:
+        return {}
+
+    df = pd.DataFrame(rows)
+    prio_total = int(df["prio"].sum())
+    tot_ext = float(df["ext_km"].sum()) or 1.0
+
+    return {
+        "roads_df": df,
+        "prio_total": prio_total,
+        "net_iap": float((df["IAP"] * df["ext_km"]).sum() / tot_ext),
+        "net_iri": float((df["IRI"] * df["ext_km"]).sum() / tot_ext),
+        "net_igg": float((df["IGG"] * df["ext_km"]).sum() / tot_ext),
+        "net_custo": float(df["custo"].sum()),
+        "total_km": tot_ext,
+        "paragon_map": pd.concat(paragon_segments, ignore_index=True) if paragon_segments else pd.DataFrame(),
+        "dnit_map": pd.concat(dnit_segments, ignore_index=True) if dnit_segments else pd.DataFrame(),
+        "zona_colors": zona_colors,
+        "zona_order": zona_order,
+    }
+
+
+def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
+    ordered = df.sort_values("iri_bad_pct", ascending=False) if is_dnit else df.sort_values("IAP", ascending=True)
+    crit_col = "iri_bad_pct" if is_dnit else "iap_bad_pct"
+    crit_label = "% IRI > 4" if is_dnit else "% IAP < 2,5"
+
+    rows_markup = []
+    for i, row in enumerate(ordered.to_dict("records"), start=1):
+        rank_tone = "#d71920" if i == 1 else ("#f2a51a" if i == 2 else "#9aa8b3")
+        rows_markup.append(
+            "<tr>"
+            f"<td class='muted'>{i}</td>"
+            f"<td><a class='net-road-link' href='?page=overview&road={html.escape(str(row['_code']))}' target='_self'>"
+            f"<span class='net-rank-dot' style='background:{rank_tone}'></span>{html.escape(str(row['Rodovia']))}</a></td>"
+            f"<td>{row['IAP']:.2f}</td>"
+            f"<td>{row['IRI']:.2f}</td>"
+            f"<td>{row['IGG']:.0f}</td>"
+            f"<td>{row[crit_col]:.0f}%</td>"
+            f"<td>{int(row['prio'])}</td>"
+            f"<td>{_format_money(float(row['custo']))}</td>"
+            "</tr>"
+        )
+
+    st.markdown(
+        """
+        <section class="solution-card">
+          <div class="solution-card-head">
+            <h3>Ranking das piores rodovias</h3>
+            <p>Pior primeiro · clique na rodovia para abrir o diagnóstico detalhado</p>
+          </div>
+          <div class="solution-table-wrap">
+            <table class="solution-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Rodovia</th><th>IAP</th><th>IRI</th><th>IGG</th>
+                  <th>""" + crit_label + """</th><th>Trechos prio.</th><th>Custo</th>
+                </tr>
+              </thead>
+              <tbody>
+        """
+        + "".join(rows_markup)
+        + """
+              </tbody>
+            </table>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_network_cost(df: pd.DataFrame) -> None:
+    grouped = df.sort_values("custo", ascending=False)
+    total_cost = float(grouped["custo"].sum())
+    max_cost = max(float(grouped["custo"].max()), 1)
+    axis_max = _axis_max_10(max_cost / 1_000_000)
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="economic-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
+        for tick in ticks
+    )
+    bars, labels = [], []
+    for row in grouped.to_dict("records"):
+        cost_mi = float(row["custo"]) / 1_000_000
+        height = max(cost_mi / axis_max * 100, 2 if cost_mi > 0 else 0)
+        bars.append(
+            '<div class="economic-bar-item">'
+            f'<div class="economic-bar" style="height:{height:.2f}%;background:#00c2e8;"><span>{_format_money_chart(float(row["custo"]))}</span></div>'
+            '</div>'
+        )
+        labels.append(f'<div>{html.escape(str(row["Rodovia"]))}</div>')
+
+    st.markdown(
+        '<section class="economic-panel">'
+        '<div class="economic-head">'
+        '<div class="economic-title"><div class="economic-icon">$</div>'
+        '<div><h3>Custo por rodovia</h3><p>Necessidade total para tratar cada rodovia</p></div></div>'
+        f'<div class="solution-distribution-meta"><span>Total · <strong>{_format_money(total_cost)}</strong></span></div>'
+        '</div>'
+        '<div class="economic-chart">'
+        f'<div class="economic-y-axis">{tick_markup}</div>'
+        '<div>'
+        f'<div class="economic-plot"><div class="economic-bars">{"".join(bars)}</div></div>'
+        f'<div class="economic-labels">{"".join(labels)}</div>'
+        '</div>'
+        '</div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_network_overview(diagnosis: str) -> None:
+    """Painel executivo da malha: KPIs + mapa de todas as rodovias + ranking + custo."""
+    is_dnit = diagnosis == "Diagnóstico DNIT"
+    data = _build_network_overview(is_dnit)
+    if not data:
+        st.info("Sem dados para a malha.")
+        return
+
+    df = data["roads_df"]
+    render_metric_cards(
+        [
+            {"title": "IAP MÉDIO", "value": f"{data['net_iap']:.2f}", "subtitle": "Rede · meta ≥ 2,5", "tone": "cyan", "icon": "◍"},
+            {"title": "IRI MÉDIO", "value": f"{data['net_iri']:.2f}", "subtitle": "Irregularidade (m/km)", "tone": "cyan", "icon": "≈"},
+            {"title": "IGG MÉDIO", "value": f"{data['net_igg']:.0f}", "subtitle": "Gravidade global", "tone": "cyan", "icon": "▦"},
+            {"title": "TRECHOS PRIORITÁRIOS", "value": f"{data['prio_total']}", "subtitle": "Prioridade Alta/Crítica (IP)", "tone": "orange", "icon": "▲"},
+            {"title": "CUSTO TOTAL", "value": _format_money(data["net_custo"]), "subtitle": f"Necessidade · {data['total_km']:.0f} km", "tone": "green", "icon": "$"},
+        ]
+    )
+    st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
+
+    if is_dnit:
+        render_dnit_map(data["dnit_map"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
+    else:
+        render_overview_map(data["paragon_map"], data["total_km"])
+
+    st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
+    _render_network_ranking(df, is_dnit)
+    _render_network_cost(df)
+
+
+# ──────────────────────────── IAGON (assistente de IA) ────────────────────────────
+def _iagon_road_detail(road: str) -> tuple[list[tuple[int, float]], list[tuple[str, float]], list[dict]]:
+    """Dados reais do banco de uma rodovia: (custo por ano, distribuição de soluções, trechos SNV priorizados)."""
+    sol = get_solutions_data(road)
+    bi = _limit_budget_to_horizon(sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON)
+    if bi is not None and not bi.empty and "Ano" in bi:
+        grp = bi.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano")
+        cby = [(int(r["Ano"]), float(r["Custo"])) for _, r in grp.iterrows()]
+    else:
+        cby = []
+
+    table = sol.get("table")
+    sdist: list[tuple[str, float]] = []
+    trechos: list[dict] = []
+    if table is not None and not table.empty and "Solução recomendada" in table:
+        gd = table.groupby("Solução recomendada")["Extensão"].sum().sort_values(ascending=False)
+        sdist = [(str(name), round(float(km), 1)) for name, km in gd.items()]
+
+        work = _economic_work_table(table)
+        prio = _prioridade_por_snv(work)
+        ext_by = work.groupby("SNV")["Extensão"].sum()
+        iap_by = work.groupby("SNV")["IAP"].mean()
+        dom = (
+            work.groupby(["SNV", "Solução recomendada"])["Extensão"].sum()
+            .reset_index().sort_values("Extensão", ascending=False)
+            .drop_duplicates("SNV").set_index("SNV")["Solução recomendada"].to_dict()
+        )
+        for snv, p in prio.items():
+            trechos.append(
+                {
+                    "snv": str(snv),
+                    "priorizacao": round(float(p.get("priorizacao", 0) or 0), 2),
+                    "classe": str(p.get("classificacao", "-")).replace("Prioridade ", ""),
+                    "rank": int(p.get("ranking", 999)),
+                    "ext": round(float(ext_by.get(snv, 0) or 0), 1),
+                    "iap": round(float(iap_by.get(snv, 0) or 0), 2),
+                    "solucao": str(dom.get(snv, "-")),
+                }
+            )
+        trechos.sort(key=lambda x: x["rank"])
+    return cby, sdist, trechos
+
+
+@lru_cache(maxsize=1)
+def _build_iagon_context() -> tuple[str, dict]:
+    """Resumo de TODOS os dados do relatório para o IAGON + dados estruturados p/ exportar."""
+    data = _build_network_overview(is_dnit=False)
+    if not data:
+        return "Sem dados disponíveis.", {}
+    df = data["roads_df"]
+
+    roads = {}
+    cost_lines = []
+    sol_lines = []
+    trecho_blocks = []
+    for _, r in df.iterrows():
+        road = r["Rodovia"]
+        cby, sdist, trechos = _iagon_road_detail(road)
+        roads[road] = {
+            "code": r["_code"],
+            "metrics": {
+                "IAP": round(float(r["IAP"]), 2),
+                "IRI": round(float(r["IRI"]), 2),
+                "IGG": round(float(r["IGG"]), 0),
+                "iap_bad_pct": round(float(r["iap_bad_pct"]), 0),
+                "iri_bad_pct": round(float(r["iri_bad_pct"]), 0),
+                "prio": int(r["prio"]),
+                "custo": float(r["custo"]),
+                "ext_km": round(float(r["ext_km"]), 1),
+            },
+            "cost_by_year": cby,
+            "solucoes": sdist,
+            "trechos": trechos,
+        }
+        anos = " · ".join(f"{ano} {_format_money(c)}" for ano, c in cby) or "sem programação anual"
+        cost_lines.append(f"- {road} (total {_format_money(float(r['custo']))}): {anos}")
+        sol_txt = " · ".join(f"{name} {km:.1f} km" for name, km in sdist) or "sem dados"
+        sol_lines.append(f"- {road}: {sol_txt}")
+        if trechos:
+            tl = "\n".join(
+                f"  {t['rank']}. {t['snv']} · {t['classe']} · priorização {t['priorizacao']:.1f} · "
+                f"{t['ext']:.0f} km · IAP {t['iap']:.2f} · {t['solucao']}"
+                for t in trechos
+            )
+            trecho_blocks.append(f"### {road}\n{tl}")
+
+    linhas = "\n".join(
+        f"| {r['Rodovia']} | {r['IAP']:.2f} | {r['IRI']:.2f} | {r['IGG']:.0f} | "
+        f"{r['iap_bad_pct']:.0f}% | {r['iri_bad_pct']:.0f}% | {int(r['prio'])} | {_format_money(float(r['custo']))} |"
+        for _, r in df.sort_values("IAP").iterrows()
+    )
+    dnit_roads = ", ".join(get_dnit_available_roads()) or "nenhuma"
+
+    context = f"""# Malha rodoviária (Rondônia) — diagnóstico Paragon
+Rodovias: {len(df)} · Extensão total: {data['total_km']:.0f} km · Necessidade total (horizonte {_ECONOMIC_DEFAULT_HORIZON} anos): {_format_money(data['net_custo'])} · Trechos prioritários: {data['prio_total']}
+IAP médio: {data['net_iap']:.2f} (meta 2,5) · IRI médio: {data['net_iri']:.2f} · IGG médio: {data['net_igg']:.0f}
+
+## Indicadores por rodovia (pior IAP primeiro)
+| Rodovia | IAP | IRI | IGG | % IAP<2,5 | % IRI>4 | Trechos prio. | Necessidade ({_ECONOMIC_DEFAULT_HORIZON}a) |
+|---|---|---|---|---|---|---|---|
+{linhas}
+
+## Custo por ano (orçamento cadastrado, horizonte {_ECONOMIC_DEFAULT_HORIZON} anos)
+{chr(10).join(cost_lines)}
+
+## Soluções recomendadas por rodovia (Paragon — use EXATAMENTE estes nomes, por extensão)
+{chr(10).join(sol_lines)}
+
+## Trechos (SNV) por rodovia — ordenados por priorização (Crítica ≥ 7,5 · Alta ≥ 5 · Média ≥ 3 · Baixa < 3)
+{chr(10).join(trecho_blocks)}
+
+## Metodologia
+- Diagnóstico padrão = Paragon (IAP, meta 2,5). DNIT (IRI/IGG/matriz) processado só para: {dnit_roads}.
+- IAP < 2,5 = problema. IRI > 4 = crítico. Custo = necessidade no horizonte de {_ECONOMIC_DEFAULT_HORIZON} anos.
+- As soluções acima são a programação corretiva total da rodovia (não há quebra por ano das soluções no contexto;
+  se pedirem "soluções do ano X", explique que o sistema traz a programação total e ofereça o detalhamento por trecho na tela de Soluções).
+"""
+    report_data = {
+        "network_df": df,
+        "roads": roads,
+        "totals": {
+            "iap": data["net_iap"], "iri": data["net_iri"], "igg": data["net_igg"],
+            "custo": data["net_custo"], "prio": data["prio_total"], "km": data["total_km"],
+        },
+    }
+    return context, report_data
+
+
+def _iagon_resolve_scope(report_data: dict, escopo: str):
+    """Resolve 'rede' ou um código/nome de rodovia -> (rótulo, dados | None)."""
+    e = (escopo or "rede").strip().lower()
+    if e in ("rede", "malha", "todas", "geral", "all"):
+        return "rede", None
+    code = _normalize_road_code(escopo)
+    for road, info in report_data.get("roads", {}).items():
+        if info.get("code") == code or road.lower() == e:
+            return road, info
+    return None, None
+
+
+def _iagon_pdf_bytes(title: str, subtitle: str, sections: list[tuple]) -> bytes:
+    """PDF com uma ou mais seções [(heading, headers, rows)]; células quebram linha (Paragraph)."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=16 * mm)
+    usable = A4[0] - 36 * mm
+    styles = getSampleStyleSheet()
+    h = ParagraphStyle("h", parent=styles["Title"], fontSize=18, textColor=colors.HexColor("#0b1d28"))
+    sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, textColor=colors.HexColor("#5b6b78"))
+    sec = ParagraphStyle("sec", parent=styles["Heading2"], fontSize=12, textColor=colors.HexColor("#0b1d28"))
+    cell = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=colors.HexColor("#1f2a33"))
+    hcell = ParagraphStyle("hcell", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=colors.white, fontName="Helvetica-Bold")
+    foot = ParagraphStyle("foot", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#90a0ad"))
+
+    story = [Paragraph(title, h), Spacer(1, 4), Paragraph(subtitle, sub), Spacer(1, 14)]
+    for heading, headers, rows in sections:
+        if heading:
+            story += [Paragraph(heading, sec), Spacer(1, 4)]
+        ncols = max(len(headers), 1)
+        col_w = [usable / ncols] * ncols
+        data = [[Paragraph(str(c), hcell) for c in headers]]
+        data += [[Paragraph(str(c), cell) for c in row] for row in rows]
+        table = Table(data, colWidths=col_w, repeatRows=1, hAlign="LEFT")
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0b1d28")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f1f5f8")]),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d6dee5")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        story += [table, Spacer(1, 14)]
+    story += [Paragraph("Gerado pelo IAGON · Painel de Pavimentos Paragon/DNIT", foot)]
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _iagon_export(report_data: dict, escopo: str, formato: str, titulo: str | None = None):
+    """Gera (filename, bytes, mime) reais a partir dos dados do banco. None se escopo inválido."""
+    label, info = _iagon_resolve_scope(report_data, escopo)
+    if label is None:
+        return None
+    fmt = (formato or "pdf").strip().lower()
+
+    sheets: dict[str, pd.DataFrame] = {}
+    sections: list[tuple] = []
+
+    if label == "rede":
+        df = report_data["network_df"].sort_values("IAP")
+        headers = ["Rodovia", "IAP", "IRI", "IGG", "% IAP<2,5", "Trechos prio.", "Necessidade"]
+        rows = [
+            [r["Rodovia"], f"{r['IAP']:.2f}", f"{r['IRI']:.2f}", f"{r['IGG']:.0f}",
+             f"{r['iap_bad_pct']:.0f}%", str(int(r["prio"])), _format_money(float(r["custo"]))]
+            for _, r in df.iterrows()
+        ]
+        sections = [(None, headers, rows)]
+        sheets["Malha"] = pd.DataFrame(
+            [[r["Rodovia"], round(float(r["IAP"]), 2), round(float(r["IRI"]), 2), round(float(r["IGG"])),
+              round(float(r["iap_bad_pct"])), int(r["prio"]), round(float(r["custo"]), 2)] for _, r in df.iterrows()],
+            columns=["Rodovia", "IAP", "IRI", "IGG", "% IAP<2,5", "Trechos prioritários", "Necessidade (R$)"],
+        )
+        primary = sheets["Malha"]
+        title = titulo or "Relatório executivo da malha — Paragon/DNIT"
+        subtitle = f"Necessidade no horizonte de {_ECONOMIC_DEFAULT_HORIZON} anos · valores do orçamento cadastrado"
+        base = "iagon_relatorio_malha"
+    else:
+        cby = info.get("cost_by_year", [])
+        cby_rows = [[str(ano), _format_money(c)] for ano, c in cby] or [["—", _format_money(info["metrics"]["custo"])]]
+        sections.append(("Necessidade por ano", ["Ano", "Custo"], cby_rows))
+        sheets["Custo por ano"] = pd.DataFrame(cby or [(0, info["metrics"]["custo"])], columns=["Ano", "Custo (R$)"])
+
+        trechos = info.get("trechos", [])
+        if trechos:
+            tr_headers = ["#", "SNV", "Prioridade", "Priorização", "Extensão (km)", "IAP", "Solução"]
+            tr_rows = [
+                [str(t["rank"]), t["snv"], t["classe"], f"{t['priorizacao']:.1f}", f"{t['ext']:.0f}", f"{t['iap']:.2f}", t["solucao"]]
+                for t in trechos
+            ]
+            sections.append(("Trechos prioritários (SNV)", tr_headers, tr_rows))
+            sheets["Trechos"] = pd.DataFrame(
+                [[t["rank"], t["snv"], t["classe"], t["priorizacao"], t["ext"], t["iap"], t["solucao"]] for t in trechos],
+                columns=["Ranking", "SNV", "Prioridade", "Priorização", "Extensão (km)", "IAP", "Solução"],
+            )
+        primary = sheets.get("Trechos", sheets["Custo por ano"])
+        title = titulo or f"Relatório {label}"
+        subtitle = f"Necessidade no horizonte de {_ECONOMIC_DEFAULT_HORIZON} anos · dados do banco"
+        base = f"iagon_relatorio_{info['code']}"
+
+    if fmt == "csv":
+        return f"{base}.csv", primary.to_csv(index=False).encode("utf-8-sig"), "text/csv"
+    if fmt in ("excel", "xlsx"):
+        out = BytesIO()
+        with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+            wb = writer.book
+            hdr = wb.add_format({"bold": True, "bg_color": "#0b1d28", "font_color": "#ffffff", "border": 1})
+            for sheet_name, sdf in sheets.items():
+                sdf.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+                ws = writer.sheets[sheet_name[:31]]
+                for ci, col in enumerate(sdf.columns):
+                    ws.write(0, ci, col, hdr)
+                    ws.set_column(ci, ci, max(12, min(46, int(sdf[col].astype(str).str.len().max() or 12) + 2)))
+        return f"{base}.xlsx", out.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return f"{base}.pdf", _iagon_pdf_bytes(title, subtitle, sections), "application/pdf"
+
+
+_IAGON_SUGGESTIONS = [
+    "Qual o total que tenho que gastar na BR-364?",
+    "Quais as rodovias prioritárias da malha?",
+    "Compare BR-429 e BR-435 (condição e custo).",
+    "Gere um relatório PDF da malha.",
+]
+
+
+def _render_iagon_page() -> None:
+    if not iagon.is_configured():
+        st.info("IAGON indisponível: configure a chave **API_OPENAI_KEY** no arquivo .env.")
+        return
+
+    context_text, report_data = _build_iagon_context()
+    st.session_state.setdefault("iagon_messages", [])
+
+    st.markdown(
+        '<section class="iagon-hero">'
+        '<div class="iagon-avatar">✦</div>'
+        '<div><h3>IAGON · assistente de pavimentos</h3>'
+        '<p>Pergunte sobre condição, custos, prioridades e soluções de toda a malha. '
+        'Eu interpreto os dados, comparo rodovias e gero relatórios (PDF, Excel, CSV).</p></div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+    if not st.session_state.iagon_messages:
+        st.markdown('<div class="iagon-suggest-label">Comece por aqui</div>', unsafe_allow_html=True)
+        cols = st.columns(2, gap="small")
+        for i, sug in enumerate(_IAGON_SUGGESTIONS):
+            if cols[i % 2].button(sug, key=f"iagon_sug_{i}", use_container_width=True):
+                st.session_state.iagon_pending = sug
+                st.rerun()
+
+    for idx, msg in enumerate(st.session_state.iagon_messages):
+        avatar = "🤖" if msg["role"] == "assistant" else "🧑"
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"])
+            for ai, art in enumerate(msg.get("artifacts", [])):
+                st.download_button(
+                    f"⬇️  {art[0]}", data=art[1], file_name=art[0], mime=art[2],
+                    key=f"iagon_dl_{idx}_{ai}",
+                )
+
+    prompt = st.chat_input("Pergunte ao IAGON…") or st.session_state.pop("iagon_pending", None)
+    if not prompt:
+        return
+
+    st.session_state.iagon_messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user", avatar="🧑"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant", avatar="🤖"):
+        artifacts: list[tuple] = []
+
+        def on_tool(name: str, args: dict) -> str:
+            if name == "lembrar":
+                iagon.remember(args.get("fato", ""), args.get("categoria", "geral"))
+                return "Memória de longo prazo atualizada."
+            if name == "exportar_relatorio":
+                out = _iagon_export(report_data, args.get("escopo", "rede"), args.get("formato", "pdf"), args.get("titulo"))
+                if not out:
+                    return "Não encontrei esse escopo. Use 'rede' ou uma rodovia válida (ex.: BR-364)."
+                artifacts.append(out)
+                return f"Arquivo '{out[0]}' gerado com sucesso e disponível para download."
+            return "ok"
+
+        history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.iagon_messages]
+        try:
+            full = st.write_stream(iagon.run_chat(context_text, history, on_tool))
+        except Exception as exc:  # erro de API/rede — mostra sem derrubar a tela
+            full = f"⚠️ Não consegui responder agora ({type(exc).__name__}). Tente novamente."
+            st.markdown(full)
+
+        for ai, art in enumerate(artifacts):
+            st.download_button(
+                f"⬇️  {art[0]}", data=art[1], file_name=art[0], mime=art[2],
+                key=f"iagon_dl_live_{len(st.session_state.iagon_messages)}_{ai}",
+            )
+
+    st.session_state.iagon_messages.append({"role": "assistant", "content": full, "artifacts": artifacts})
+    st.rerun()
+
+
 def main() -> None:
     inject_css()
     page = st.query_params.get("page", "overview")
-    if page not in {"overview", "solucoes", "projecao", "cenario", "risco"}:
+    if page not in {"visaogeral", "overview", "solucoes", "projecao", "cenario", "risco"}:
         page = "overview"
     render_sidebar(active_key=page)
 
     default_road = get_available_roads()[0]
     if page == "solucoes":
-        _, selected_road, scenario_key = render_top_bar(
+        diagnosis, selected_road, scenario_key = render_top_bar(
             default_road,
             page_title="Soluções",
-            show_diagnosis=False,
+            show_diagnosis=True,
+            keep_title=True,
         )
+        if diagnosis == "Diagnóstico DNIT":
+            _render_dnit_solutions_page(selected_road, scenario_key)
+            return
         data = get_solutions_data(selected_road, scenario_key=scenario_key)
         st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
         filtered_table = _render_solution_filter_panel(data["table"])
@@ -2372,8 +3140,24 @@ def main() -> None:
         _render_projection_page(selected_road, scenario_key)
         return
 
+    if page == "visaogeral":
+        diagnosis, _, _ = render_top_bar(
+            default_road,
+            page_title="Visão geral",
+            show_diagnosis=True,
+            keep_title=True,
+            show_filters=False,
+        )
+        _render_network_overview(diagnosis)
+        return
+
+    if page == "risco":
+        render_top_bar(default_road, page_title="IAGON", show_diagnosis=False, show_filters=False)
+        _render_iagon_page()
+        return
+
     if page != "overview":
-        _, _, _ = render_top_bar(default_road, page_title="Risco & alertas", show_diagnosis=False)
+        _, _, _ = render_top_bar(default_road, page_title="DNIT · Pavimentos", show_diagnosis=False)
         st.info("Este módulo será montado na próxima etapa.")
         return
 
