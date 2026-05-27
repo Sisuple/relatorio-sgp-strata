@@ -14,14 +14,14 @@ _IAP_ROWS = [
     ("IAP", "classe_iap", "cor_iap", "iap"),
 ]
 _CONDITION_LEGEND = [
-    ("Excelente", "#26c6f9"),
+    ("Excelente", "#00c2e8"),
     ("Bom", "#00a651"),
     ("Regular", "#fff200"),
     ("Mau", "#f2a51a"),
     ("Péssimo", "#d71920"),
 ]
 _IAP_LEGEND = [
-    ("Excelente", "#26c6f9"),
+    ("Excelente", "#00c2e8"),
     ("Bom", "#00a651"),
     ("++ Regular", "#b6d7a8"),
     ("+ Regular", "#f4f1a6"),
@@ -44,10 +44,51 @@ def _format_km(value: float) -> str:
     return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
 
 
-def _render_segment(row: dict, class_key: str, color_key: str, value_key: str, total_km: float) -> str:
+def apply_km_zoom(diagram_df, *, key: str, label: str = "Zoom (km)"):
+    """Renderiza um slider de range em km e devolve (df_filtrado, km_range_or_None).
+
+    Se o df estiver vazio, não renderiza o slider e devolve (df, None).
+    """
+    if diagram_df is None or diagram_df.empty:
+        return diagram_df, None
+
+    full_min = float(diagram_df["km_inicial"].min())
+    full_max = float(diagram_df["km_final"].max())
+    slider_min = float(int(full_min))
+    slider_max = float(int(full_max) + (1 if full_max > int(full_max) else 0))
+    if slider_max <= slider_min:
+        slider_max = slider_min + 1.0
+
+    zoom_min, zoom_max = st.slider(
+        label,
+        min_value=slider_min,
+        max_value=slider_max,
+        value=(slider_min, slider_max),
+        step=1.0,
+        key=f"{key}_{slider_min:.0f}_{slider_max:.0f}",
+        help="Arraste as alças para ampliar um trecho específico da rodovia.",
+    )
+
+    filtered = diagram_df[
+        (diagram_df["km_final"] >= zoom_min) & (diagram_df["km_inicial"] <= zoom_max)
+    ]
+    return filtered, (zoom_min, zoom_max)
+
+
+def _render_segment(
+    row: dict,
+    class_key: str,
+    color_key: str,
+    value_key: str,
+    total_km: float,
+    min_km: float,
+    max_km: float,
+) -> str:
     km_initial = float(row["km_inicial"])
     km_final = float(row["km_final"])
-    extent = max(float(row["extensao"]), 0.01)
+    seg_start = max(km_initial, min_km)
+    seg_end = min(km_final, max_km)
+    extent = max(seg_end - seg_start, 0.001)
     width = extent / total_km * 100
     color = html.escape(str(row[color_key]))
     klass = html.escape(str(row[class_key]))
@@ -62,9 +103,18 @@ def _render_segment(row: dict, class_key: str, color_key: str, value_key: str, t
     )
 
 
-def _render_row(label: str, class_key: str, color_key: str, value_key: str, rows: list[dict], total_km: float) -> str:
+def _render_row(
+    label: str,
+    class_key: str,
+    color_key: str,
+    value_key: str,
+    rows: list[dict],
+    total_km: float,
+    min_km: float,
+    max_km: float,
+) -> str:
     segments = "".join(
-        _render_segment(row, class_key, color_key, value_key, total_km)
+        _render_segment(row, class_key, color_key, value_key, total_km, min_km, max_km)
         for row in rows
     )
     return (
@@ -115,17 +165,26 @@ def _render_linear_card(
     legend: list[tuple[str, str]],
     solution_legend: list[tuple[str, str]] | None = None,
     compact: bool = False,
+    km_range: tuple[float, float] | None = None,
 ) -> None:
     if diagram_df is None or diagram_df.empty:
-        st.info("Sem dados para exibir o diagrama linear.")
+        message = (
+            "Sem segmentos no intervalo selecionado."
+            if km_range is not None
+            else "Sem dados para exibir o diagrama linear."
+        )
+        st.info(message)
         return
 
     rows = diagram_df.to_dict("records")
-    min_km = float(diagram_df["km_inicial"].min())
-    max_km = float(diagram_df["km_final"].max())
+    if km_range is not None:
+        min_km, max_km = km_range
+    else:
+        min_km = float(diagram_df["km_inicial"].min())
+        max_km = float(diagram_df["km_final"].max())
     total_km = max(max_km - min_km, 1)
     diagram_rows = "".join(
-        _render_row(label, class_key, color_key, value_key, rows, total_km)
+        _render_row(label, class_key, color_key, value_key, rows, total_km, min_km, max_km)
         for label, class_key, color_key, value_key in rows_config
     )
     compact_class = " linear-card-compact" if compact else ""
@@ -149,14 +208,7 @@ def _render_linear_card(
     st.markdown(markup, unsafe_allow_html=True)
 
 
-def render_linear_diagrams(diagram_df) -> None:
-    _render_linear_card(
-        diagram_df,
-        title="Diagrama Linear de Condição",
-        subtitle="ICDS, ICDP e ICDE por segmento",
-        rows_config=_CONDITION_ROWS,
-        legend=_CONDITION_LEGEND,
-    )
+def render_iap_linear(diagram_df, *, km_range: tuple[float, float] | None = None) -> None:
     _render_linear_card(
         diagram_df,
         title="Índice de Aptidão do Pavimento e Soluções Conceptivas",
@@ -165,4 +217,16 @@ def render_linear_diagrams(diagram_df) -> None:
         legend=_IAP_LEGEND,
         solution_legend=_SOLUTION_LEGEND,
         compact=True,
+        km_range=km_range,
+    )
+
+
+def render_condition_linear(diagram_df, *, km_range: tuple[float, float] | None = None) -> None:
+    _render_linear_card(
+        diagram_df,
+        title="Diagrama Linear de Condição",
+        subtitle="ICDS, ICDP e ICDE por segmento",
+        rows_config=_CONDITION_ROWS,
+        legend=_CONDITION_LEGEND,
+        km_range=km_range,
     )

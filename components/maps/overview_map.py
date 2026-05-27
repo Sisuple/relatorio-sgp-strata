@@ -8,13 +8,25 @@ import streamlit.components.v1 as components
 
 
 _CLASS_COLORS = {
-    "Excelente": "#9fb9d9",
+    "Excelente": "#00c2e8",
     "Bom": "#00a651",
     "++ Regular": "#b6d7a8",
     "+ Regular": "#f4f1a6",
     "- Regular": "#fff200",
     "Mau": "#f2a51a",
     "Péssimo": "#d71920",
+}
+
+_SOLUTION_ORDER = ["RL", "RL+RS", "RL+REF", "RPS", "RPS+REF", "REC"]
+_SOLUTION_COLORS = {
+    "OK": "#26c6f9",
+    "RL": "#00a651",
+    "RL+RS": "#b6d7a8",
+    "RL+REF": "#f4f1a6",
+    "RPS": "#fff200",
+    "RPS+REF": "#f2a51a",
+    "REC": "#d71920",
+    "Sem intervenção": "#82929d",
 }
 
 
@@ -24,12 +36,22 @@ def render_overview_map(
     *,
     attended_ids=None,
     legend_foot: str | None = None,
+    color_by: str = "iap",
 ) -> None:
     if segments_df is None or segments_df.empty:
         st.info("Sem segmentos para exibir no mapa.")
         return
 
-    required_columns = {
+    base_columns = {"segment_id", "sre", "km_inicial", "km_final", "iap", "classe_iap", "paths"}
+    if color_by == "solucao":
+        required_columns = base_columns | {"intervencao_iap"}
+    else:
+        required_columns = base_columns
+    if not required_columns.issubset(set(segments_df.columns)):
+        st.info("Sem geometria real para exibir no mapa.")
+        return
+
+    selected_cols = [
         "segment_id",
         "sre",
         "km_inicial",
@@ -37,22 +59,10 @@ def render_overview_map(
         "iap",
         "classe_iap",
         "paths",
-    }
-    if not required_columns.issubset(set(segments_df.columns)):
-        st.info("Sem geometria real para exibir no mapa.")
-        return
-
-    records = segments_df[
-        [
-            "segment_id",
-            "sre",
-            "km_inicial",
-            "km_final",
-            "iap",
-            "classe_iap",
-            "paths",
-        ]
-    ].copy()
+    ]
+    if color_by == "solucao":
+        selected_cols.append("intervencao_iap")
+    records = segments_df[selected_cols].copy()
     if attended_ids is not None:
         attended = {int(value) for value in attended_ids}
         records["attended"] = records["segment_id"].astype(int).isin(attended)
@@ -61,8 +71,33 @@ def render_overview_map(
 
     segments = records.to_dict("records")
     segments_json = json.dumps(segments, ensure_ascii=False)
-    colors_json = json.dumps(_CLASS_COLORS, ensure_ascii=False)
-    legend_foot_html = legend_foot or '<span class="legend-line"></span>Trechos coloridos por conceito IAP'
+
+    if color_by == "solucao":
+        colors_json = json.dumps(_SOLUTION_COLORS, ensure_ascii=False)
+        color_key_js = "intervencao_iap"
+        tooltip_label = "Solução"
+        legend_title = "SOLUÇÃO CORRETIVA"
+        present = {str(v) for v in segments_df["intervencao_iap"].dropna().unique()}
+        legend_labels = [label for label in _SOLUTION_ORDER if label in present]
+        legend_items_html = "".join(
+            f'<div class="legend-item"><span class="legend-dot" style="background:{_SOLUTION_COLORS[label]}"></span>{label}</div>'
+            for label in legend_labels
+        )
+        legend_foot_default = '<span class="legend-line"></span>Trechos coloridos pela solução corretiva'
+    else:
+        colors_json = json.dumps(_CLASS_COLORS, ensure_ascii=False)
+        color_key_js = "classe_iap"
+        tooltip_label = "Conceito"
+        legend_title = "CONCEITO IAP"
+        present = {str(v) for v in segments_df["classe_iap"].dropna().unique()}
+        legend_items_html = "".join(
+            f'<div class="legend-item"><span class="legend-dot" style="background:{color}"></span>{label}</div>'
+            for label, color in _CLASS_COLORS.items()
+            if label in present
+        )
+        legend_foot_default = '<span class="legend-line"></span>Trechos coloridos por conceito IAP'
+
+    legend_foot_html = legend_foot or legend_foot_default
 
     html_template = Template(
         """
@@ -141,24 +176,16 @@ def render_overview_map(
                 </svg>
               </button>
               <select class="map-layer-select" data-layer aria-label="Camada base do mapa">
+                <option value="satellite" selected>Satélite</option>
                 <option value="osm">Padrão</option>
                 <option value="light">Claro</option>
                 <option value="dark">Escuro</option>
-                <option value="satellite">Satélite</option>
                 <option value="topographic">Topográfico</option>
               </select>
             </div>
             <div class="map-legend">
-              <div class="legend-title">CONCEITO IAP</div>
-              <div class="legend-grid">
-                <div class="legend-item"><span class="legend-dot" style="background:#9fb9d9"></span>Excelente</div>
-                <div class="legend-item"><span class="legend-dot" style="background:#00a651"></span>Bom</div>
-                <div class="legend-item"><span class="legend-dot" style="background:#b6d7a8"></span>++ Regular</div>
-                <div class="legend-item"><span class="legend-dot" style="background:#f4f1a6"></span>+ Regular</div>
-                <div class="legend-item"><span class="legend-dot" style="background:#fff200"></span>- Regular</div>
-                <div class="legend-item"><span class="legend-dot" style="background:#f2a51a"></span>Mau</div>
-                <div class="legend-item"><span class="legend-dot" style="background:#d71920"></span>Péssimo</div>
-              </div>
+              <div class="legend-title">$legend_title</div>
+              <div class="legend-grid">$legend_items_html</div>
               <div class="legend-foot">$legend_foot_html</div>
             </div>
           </div>
@@ -189,23 +216,36 @@ def render_overview_map(
                 maxZoom: 20,
                 attribution: '&copy; OpenStreetMap &copy; CARTO'
               }),
-              satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                maxZoom: 19,
-                attribution: 'Tiles &copy; Esri'
-              }),
+              satellite: L.layerGroup([
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                  maxZoom: 22,
+                  maxNativeZoom: 17,
+                  attribution: 'Tiles &copy; Esri'
+                }),
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', {
+                  maxZoom: 22,
+                  maxNativeZoom: 17,
+                  attribution: 'Reference &copy; Esri'
+                }),
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+                  maxZoom: 22,
+                  maxNativeZoom: 17
+                })
+              ]),
               topographic: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
                 maxZoom: 17,
                 attribution: '&copy; OpenTopoMap &copy; OpenStreetMap'
               })
             };
-            let currentBaseLayer = baseLayers.osm.addTo(map);
+            let currentBaseLayer = baseLayers.satellite.addTo(map);
 
             const latLngs = [];
             const formatKm = (value) => Number(value).toFixed(2);
 
             segments.forEach((segment) => {
               const attended = segment.attended !== false;
-              const color = attended ? (colors[segment.classe_iap] || '#fff200') : '#46586a';
+              const colorKey = segment.$color_key_js;
+              const color = attended ? (colors[colorKey] || '#fff200') : '#46586a';
               const opacity = attended ? 0.96 : 0.45;
               const weight = attended ? 5 : 3;
               const dashArray = attended ? null : '4 7';
@@ -228,7 +268,7 @@ def render_overview_map(
                   ' · km ' + formatKm(segment.km_inicial) +
                   ' - ' + formatKm(segment.km_final) +
                   ' · IAP ' + Number(segment.iap).toFixed(2) +
-                  ' · ' + segment.classe_iap +
+                  ' · $tooltip_label ' + colorKey +
                   (attended ? '' : ' · Fora do orçamento')
                 );
               });
@@ -271,6 +311,10 @@ def render_overview_map(
             segments_json=segments_json,
             colors_json=colors_json,
             legend_foot_html=legend_foot_html,
+            legend_title=legend_title,
+            legend_items_html=legend_items_html,
+            color_key_js=color_key_js,
+            tooltip_label=tooltip_label,
         ),
         height=456,
         scrolling=False,

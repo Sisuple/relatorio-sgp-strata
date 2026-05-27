@@ -26,7 +26,7 @@ _IAP_CLASS_ORDER = [
     "Péssimo",
 ]
 _IAP_CLASS_COLORS = {
-    "Excelente": "#9fb9d9",
+    "Excelente": "#00c2e8",
     "Bom": "#00a651",
     "++ Regular": "#b6d7a8",
     "+ Regular": "#f4f1a6",
@@ -65,7 +65,7 @@ _IAP_INTERVENTION_TO_CLASS = {
 }
 _CONDITION_CLASS_ORDER = ["Excelente", "Bom", "Regular", "Mau", "Péssimo"]
 _CONDITION_CLASS_COLORS = {
-    "Excelente": "#26c6f9",
+    "Excelente": "#00c2e8",
     "Bom": "#00a651",
     "Regular": "#fff200",
     "Mau": "#f2a51a",
@@ -73,7 +73,7 @@ _CONDITION_CLASS_COLORS = {
 }
 _LINEAR_IAP_CLASS_COLORS = {
     **_IAP_CLASS_COLORS,
-    "Excelente": "#26c6f9",
+    "Excelente": "#00c2e8",
 }
 _SOLUTION_LABELS = {
     "OK": "Sem intervenção",
@@ -241,7 +241,7 @@ def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") ->
 
 def get_iap_extraction(
     selected_road: str,
-    year: int = 2026,
+    year: int | None = None,
     scenario_key: str | None = None,
 ) -> dict[str, Any] | None:
     """Extrai IAP médio e composição IAP para uso nas telas do relatório.
@@ -259,13 +259,20 @@ def get_iap_extraction(
 @lru_cache(maxsize=64)
 def _get_iap_extraction_from_database(
     road_code: str,
-    year: int,
+    year: int | None,
     scenario_key: str | None = None,
 ) -> dict[str, Any] | None:
     db = MySQLConnection()
     scenario = _get_iap_scenario_by_key(road_code, scenario_key) or _get_default_iap_scenario(db, road_code)
     if not scenario:
         return None
+
+    # Quando o ano não é informado, usa o primeiro ano de projeção disponível
+    # para o ciclo. Evita amarrar o default a um ano fixo no código.
+    if year is None:
+        year = _get_first_projection_year(scenario["ciclo_id"])
+        if year is None:
+            return None
 
     averages = db.execute_query(
         """
@@ -437,7 +444,7 @@ def _get_iap_map_segments_from_database(
           ON pt.levantamento_importacao_id = (
             SELECT MIN(li.id)
             FROM levantamento_importacoes li
-            WHERE li.nome_arquivo LIKE CONCAT('IRI_BR', seg.rodovia, '%%')
+            WHERE li.nome_arquivo LIKE CONCAT('BR-', seg.rodovia, '%%IRI%%')
           )
          AND pt.rodovia = seg.rodovia
          AND pt.km_inicial >= seg.km_inicial
@@ -760,6 +767,18 @@ def _get_default_iap_scenario(db: MySQLConnection, road_code: str) -> dict[str, 
         return scenarios[0]
 
     return None
+
+
+@lru_cache(maxsize=128)
+def _get_first_projection_year(ciclo_id: int) -> int | None:
+    db = MySQLConnection()
+    rows = db.execute_query(
+        "SELECT MIN(ano) AS ano FROM analise_gerencial_intervencoes_iap WHERE gerencial_ciclo_id = %s",
+        (ciclo_id,),
+    ) or []
+    if not rows or rows[0].get("ano") is None:
+        return None
+    return int(rows[0]["ano"])
 
 
 @lru_cache(maxsize=64)
@@ -1455,7 +1474,7 @@ def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
         JOIN principal_levantamentos pt FORCE INDEX (idx_lev_importacao_km)
           ON pt.levantamento_importacao_id = (
             SELECT MIN(li.id) FROM levantamento_importacoes li
-            WHERE li.nome_arquivo LIKE CONCAT('IRI_BR', seg.rodovia, '%%')
+            WHERE li.nome_arquivo LIKE CONCAT('BR-', seg.rodovia, '%%IRI%%')
           )
          AND pt.rodovia = seg.rodovia
          AND pt.km_inicial >= seg.km_inicial
@@ -1524,6 +1543,7 @@ def _get_dnit_solutions_from_database(analise_id: int, ciclo_id: int, year: int)
         zona, zona_color = _dnit_matriz_zona(iri)
         solucao_txt = " + ".join(nomes)
         nucleo = _dnit_solution_core_label(parsed)
+        solucao_grupo = _dnit_solution_group(nomes)
 
         km_i = _to_float(row.get("km_inicial"))
         km_f = _to_float(row.get("km_final"))
@@ -1540,6 +1560,7 @@ def _get_dnit_solutions_from_database(analise_id: int, ciclo_id: int, year: int)
                 "igg": round(igg_val, 1),
                 "matriz_categoria": zona,
                 "matriz_color": zona_color,
+                "solucao_grupo": solucao_grupo,
             }
         )
         table_records.append(

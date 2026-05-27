@@ -13,7 +13,7 @@ import streamlit.components.v1 as components
 
 from components.cards.metric_card import render_metric_card
 from components.charts.iap_distribution import render_iap_distribution
-from components.charts.linear_diagram import render_linear_diagrams
+from components.charts.linear_diagram import apply_km_zoom, render_condition_linear, render_iap_linear
 from components.layout.sidebar import render_sidebar
 from components.maps.overview_map import render_overview_map, _CLASS_COLORS as _MAP_CLASS_COLORS
 from components.maps.dnit_map import render_dnit_map
@@ -389,7 +389,7 @@ def render_top_bar(
             with scenario_col:
                 _filter_label("Cenários")
                 scenario_keys = [scenario["key"] for scenario in scenarios]
-                scenario_labels = {scenario["key"]: scenario["label"] for scenario in scenarios}
+                scenario_labels = {scenario["key"]: scenario["cenario"] for scenario in scenarios}
                 scenario_key = st.selectbox(
                     "Cenário",
                     scenario_keys,
@@ -437,7 +437,11 @@ def _render_solution_filters(table_df):
         for label in iap_class_order
         if label in set(table_df["_classe_iap"].dropna().astype(str))
     ]
-    solution_options = sorted(str(value) for value in table_df["Solução recomendada"].dropna().unique())
+    solution_options = sorted(
+        str(value)
+        for value in table_df["Solução recomendada"].dropna().unique()
+        if str(value) != "Sem intervenção"
+    )
 
     first_row = st.columns([1, 1, 1], gap="medium")
     with first_row[0]:
@@ -903,11 +907,16 @@ def _render_dnit_solutions_page(road, scenario_key) -> None:
     filtered_table = _render_dnit_solution_filters(data["table"], data["zona_order"])
     filtered_segments = _filter_map_segments(data["segments"], filtered_table)
     render_dnit_map(filtered_segments, zona_colors=data["zona_colors"], zona_order=data["zona_order"])
+    nucleo_iri_color = {
+        str(nucleo): sub["_zona_color"].mode().iloc[0]
+        for nucleo, sub in filtered_table.groupby("Solução núcleo")
+        if "_zona_color" in sub.columns and not sub["_zona_color"].mode().empty
+    } if filtered_table is not None and not filtered_table.empty else {}
     _render_solution_distribution(
         filtered_table,
         group_col="Solução núcleo",
         subtitle="Soluções aplicadas · Matriz Revitaliza DNIT/RO (gravadas no banco)",
-        color_fn=_dnit_core_color,
+        color_fn=lambda label: nucleo_iri_color.get(str(label), "#9fb9d9"),
     )
     _, paginated_table = _render_solution_table_controls(filtered_table, export_fn=_render_dnit_export_button)
     _render_dnit_solutions_table(paginated_table)
@@ -991,14 +1000,19 @@ def _economic_work_table(table_df) -> pd.DataFrame:
 
 
 def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
-    """Calcula a priorização por SNV (IPT, IPE, PRIORIZAÇÃO) a partir dos segmentos.
+    """Calcula a priorização por SNV (IPT, IPE, PRIORIZAÇÃO INVERTIDA) por segmento.
 
-    Replica a metodologia da planilha: VMDA/IRI/DEF são médias do SNV; o IP técnico
-    pesa VMDA 40% / IRI 35% / deflexão 25%; o IP econômico normaliza a eficiência
-    (IPT por custo/km); e a priorização final é 0,6·IPT + 0,4·IPE.
+    Segmentos classificados como "Excelente" são excluídos do cálculo — só entram no
+    ranking trechos que precisam de intervenção. Pesos: IRI 50% / DEF 35% / VMDA 15%.
+    A priorização é invertida (0..10, menor = mais crítico).
     """
     if df is None or df.empty:
         return {}
+
+    if "_classe_iap" in df.columns:
+        df = df[df["_classe_iap"].astype(str) != "Excelente"]
+        if df.empty:
+            return {}
 
     segmentos = [
         {
@@ -1024,7 +1038,9 @@ def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
     snv = df["SNV"].astype(str)
     df["IPT"] = snv.map(lambda s: prio.get(s, {}).get("ip_tecnico", 0.0))
     df["IPE"] = snv.map(lambda s: prio.get(s, {}).get("ip_economico", 0.0))
-    df["Priorização"] = snv.map(lambda s: prio.get(s, {}).get("priorizacao", 0.0))
+    # SNVs sem entrada no ranking (ex.: só com segmentos Excelente) ficam com 10.0
+    # — menor prioridade na escala invertida (vai pro fim).
+    df["Priorização"] = snv.map(lambda s: prio.get(s, {}).get("priorizacao", 10.0))
     df["Classe prioridade"] = snv.map(lambda s: prio.get(s, {}).get("classificacao", "Prioridade Baixa"))
     df["_rank"] = snv.map(lambda s: prio.get(s, {}).get("ranking", len(prio) + 1))
 
@@ -1172,67 +1188,20 @@ def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_k
         )
         st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
 
-    # Filtro de trechos prioritários: mantém apenas os N SNVs de maior priorização.
-    snv_max = max(total_snv, 1)
+    # Filtro de nível de prioridade: mantém SNVs com priorização (invertida) ≤ X.
+    # Escala 1..10, default 10 = todos. 1 = só o(s) mais crítico(s).
     with prio_col:
-        _filter_caption("Trechos prioritários")
-        top_n = st.slider(
-            "Trechos prioritários", 1, snv_max, snv_max, 1,
+        _filter_caption("Nível de prioridade")
+        prio_max = st.slider(
+            "Nível de prioridade", 1, 10, 10, 1,
             key=f"prio_{scenario_key}",
             label_visibility="collapsed",
+            help="1 = atender só o mais crítico; 10 = atender todos.",
         )
-        rotulo = "Todos" if top_n >= snv_max else f"Top {top_n}"
-        st.markdown(f'<div class="economic-control-value">{rotulo} de {snv_max}</div>', unsafe_allow_html=True)
+        rotulo = "Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}"
+        st.markdown(f'<div class="economic-control-value">{rotulo}</div>', unsafe_allow_html=True)
 
-    return annual_budget, horizon, top_n
-
-
-def _render_economic_backlog_chart(annual_df: pd.DataFrame) -> None:
-    if annual_df is None or annual_df.empty:
-        return
-
-    max_backlog = max(float(annual_df["Backlog km"].max()), 1)
-    axis_max = _axis_max_10(max_backlog)
-    ticks = _axis_ticks_10(axis_max)
-    tick_markup = "".join(
-        f'<span class="economic-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
-        for tick in ticks
-    )
-
-    bars = []
-    labels = []
-    for row in annual_df.to_dict("records"):
-        backlog = float(row["Backlog km"])
-        height = max(backlog / axis_max * 100, 1 if backlog > 0 else 0)
-        bars.append(
-            '<div class="economic-bar-item">'
-            f'<div class="economic-bar" style="height:{height:.2f}%"><span>{backlog:.1f} km</span></div>'
-            '</div>'
-        )
-        labels.append(f'<div>{int(row["Ano"])}</div>')
-
-    last_iap = float(annual_df["IAP médio"].iloc[-1])
-    last_cost = float(annual_df["Custo acumulado"].iloc[-1])
-    st.markdown(
-        '<section class="economic-panel">'
-        '<div class="economic-head">'
-        '<div class="economic-title"><div class="economic-icon">↗</div>'
-        '<div><h3>Backlog projetado</h3><p>Quanto fica pendente a cada ano, após aplicar o orçamento</p></div></div>'
-        f'<div class="solution-distribution-meta"><span>Custo acumulado · <strong>{_format_money(last_cost)}</strong></span><span>IAP final · <strong class="accent">{last_iap:.2f}</strong></span></div>'
-        '</div>'
-        '<div class="economic-chart">'
-        f'<div class="economic-y-axis">{tick_markup}</div>'
-        '<div>'
-        '<div class="economic-plot">'
-        f'<div class="economic-bars">{"".join(bars)}</div>'
-        '</div>'
-        f'<div class="economic-labels">{"".join(labels)}</div>'
-        '</div>'
-        '</div>'
-        '<div class="economic-legend"><span><i style="background:#ff7a00"></i>Backlog km</span><span><i style="background:#00c2e8"></i>Custo acumulado e IAP nos cards</span></div>'
-        '</section>',
-        unsafe_allow_html=True,
-    )
+    return annual_budget, horizon, prio_max
 
 
 def _render_cost_by_solution(table_df: pd.DataFrame) -> None:
@@ -1733,7 +1702,9 @@ def _render_solution_segments_map(segments_df, budget_items: pd.DataFrame, selec
         <script>
           const segments = {payload_json};
           const map = L.map('map', {{ zoomControl:false, attributionControl:false, scrollWheelZoom:true }});
-          L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{ maxZoom: 19 }}).addTo(map);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 22, maxNativeZoom: 17, attribution: 'Tiles &copy; Esri' }}).addTo(map);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 22, maxNativeZoom: 17 }}).addTo(map);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 22, maxNativeZoom: 17 }}).addTo(map);
           const points = [];
           const fmt = (value) => Number(value).toFixed(2);
           segments.forEach((segment) => {{
@@ -1828,7 +1799,7 @@ def _render_economic_priority_table(
             f"<td>{float(row['IAP']):.2f}</td>"
             f"<td>{float(row.get('IPT', 0) or 0):.2f}</td>"
             f"<td>{float(row.get('IPE', 0) or 0):.2f}</td>"
-            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{float(row.get('Priorização', 0) or 0):.2f}</span></td>"
+            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{int(round(float(row.get('Priorização', 0) or 0)))}</span></td>"
             f"<td>{html.escape(str(row['Solução recomendada']))}</td>"
             f"<td>{_format_money(float(row['Custo econômico']))}</td>"
             "<td class='detail-toggle-cell'>"
@@ -1918,6 +1889,7 @@ def _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget
         total_km,
         attended_ids=attended_ids,
         legend_foot='<span class="legend-line" style="background:#46586a"></span>Cinza · trecho fora do orçamento anual',
+        color_by="solucao",
     )
 
 
@@ -1933,17 +1905,17 @@ def _render_economic_page(
     if table_df is not None and not table_df.empty:
         total_snv = int(table_df["SNV"].dropna().astype(str).nunique()) if "SNV" in table_df else int(len(table_df))
 
-    annual_budget, horizon, top_n = _render_economic_controls(table_df, budget_items, total_snv, scenario_key)
+    annual_budget, horizon, prio_max = _render_economic_controls(table_df, budget_items, total_snv, scenario_key)
     budget_items = _limit_budget_to_horizon(budget_items, horizon)
     metrics, prioritized_table, annual_df = _simulate_economic_scenario(table_df, annual_budget, horizon, "Balanceada")
     if not metrics:
         st.info("Sem dados de intervenção para montar o cenário econômico.")
         return
 
-    # Tabela de SNVs ordenada por priorização e recortada aos trechos prioritários.
+    # SNVs ordenados por priorização (menor = mais crítico), filtrados pelo nível.
     snv_budget_table = _group_budget_by_snv(budget_items, prioritized_table)
-    if top_n < len(snv_budget_table):
-        snv_budget_table = snv_budget_table.head(top_n).reset_index(drop=True)
+    if prio_max < 10 and "Priorização" in snv_budget_table.columns:
+        snv_budget_table = snv_budget_table[snv_budget_table["Priorização"] <= prio_max].reset_index(drop=True)
     top_snvs = set(snv_budget_table["SNV"].astype(str))
 
     # Restringe todo o restante (orçamento, gráficos, mapa) ao escopo prioritário.
@@ -1960,9 +1932,9 @@ def _render_economic_page(
     metrics["deficit"] = max(total_need - metrics["total_budget"], 0.0)
 
     scope_snv = int(len(snv_budget_table))
+    scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
     annual_coverage = min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0
     attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget)
-    attended_snv_count = int(len(attended_snv_table))
     attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
 
     render_metric_cards(
@@ -1982,18 +1954,22 @@ def _render_economic_page(
                 "icon": "↗",
             },
             {
-                "title": "SNV ATENDIDOS",
-                "value": f"{attended_snv_count}/{scope_snv}",
-                "subtitle": "Trechos prioritários no orçamento",
+                "title": "TRECHOS ATENDIDOS",
+                "value": f"{attended_km:.1f} / {scope_km:.1f} km",
+                "subtitle": "Km de segmentos cobertos pelo orçamento",
                 "tone": "orange",
                 "icon": "#",
             },
             {
-                "title": "EXTENSÃO ATENDIDA",
-                "value": f"{attended_km:.1f} km",
-                "subtitle": "SNVs cobertos no ano",
+                "title": "ORÇAMENTO FALTANTE",
+                "value": _format_money(max(total_need - annual_budget * 1_000_000, 0.0)),
+                "subtitle": (
+                    "Necessidade já coberta pelo orçamento"
+                    if annual_budget * 1_000_000 >= total_need
+                    else "Adicional para cobrir 100% da necessidade"
+                ),
                 "tone": "yellow",
-                "icon": "⌁",
+                "icon": "△",
             },
         ]
     )
@@ -2002,7 +1978,6 @@ def _render_economic_page(
         _render_budget_cost_by_year(budget_items)
         _render_budget_cost_by_solution(budget_items)
     else:
-        _render_economic_backlog_chart(annual_df)
         _render_cost_by_solution(prioritized_table)
     _render_economic_priority_table(
         snv_budget_table,
@@ -2024,7 +1999,7 @@ def _render_economic_page(
         scenario_label=scenario_label,
         annual_budget=annual_budget,
         horizon=horizon,
-        top_label="Todos" if top_n >= total_snv else f"Top {top_n}",
+        top_label="Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}",
         metrics=metrics,
         annual_coverage=annual_coverage,
         attended_snv_table=attended_snv_table,
@@ -2423,9 +2398,9 @@ def _render_projection_page(road: str, scenario_key: str | None) -> None:
 
 
 def _gray_shade(t: float) -> str:
-    """Tom de cinza para a deflexão: 0 = claro (baixa), 1 = escuro (alta)."""
+    """Cor da deflexão: 0 = azul (Dc baixa, estrutura boa), 1 = vermelho (Dc alta)."""
     t = max(0.0, min(1.0, t))
-    a, b = (207, 216, 223), (46, 59, 69)
+    a, b = (0, 194, 232), (215, 25, 32)  # #00c2e8 -> #d71920
     r = int(a[0] + (b[0] - a[0]) * t)
     g = int(a[1] + (b[1] - a[1]) * t)
     bl = int(a[2] + (b[2] - a[2]) * t)
@@ -2437,9 +2412,32 @@ def _render_dnit_linear(segments_df) -> None:
     if segments_df is None or segments_df.empty:
         return
 
-    df = segments_df.sort_values("km_inicial")
-    min_km = float(df["km_inicial"].min())
-    max_km = float(df["km_final"].max())
+    df_full = segments_df.sort_values("km_inicial")
+    full_min = float(df_full["km_inicial"].min())
+    full_max = float(df_full["km_final"].max())
+
+    slider_min = float(int(full_min))
+    slider_max = float(int(full_max) + (1 if full_max > int(full_max) else 0))
+    if slider_max <= slider_min:
+        slider_max = slider_min + 1.0
+
+    zoom_min, zoom_max = st.slider(
+        "Zoom (km)",
+        min_value=slider_min,
+        max_value=slider_max,
+        value=(slider_min, slider_max),
+        step=1.0,
+        key=f"dnit_linear_zoom_{slider_min:.0f}_{slider_max:.0f}",
+        help="Arraste as alças para ampliar um trecho específico da rodovia.",
+    )
+
+    df = df_full[(df_full["km_final"] >= zoom_min) & (df_full["km_inicial"] <= zoom_max)]
+    if df.empty:
+        st.info("Sem segmentos no intervalo selecionado.")
+        return
+
+    min_km = zoom_min
+    max_km = zoom_max
     total = max(max_km - min_km, 1.0)
 
     dcs = [float(v) for v in df["dc"].dropna().tolist()]
@@ -2449,7 +2447,9 @@ def _render_dnit_linear(segments_df) -> None:
     def row(label: str, sub: str, color_fn) -> str:
         spans = []
         for r in df.to_dict("records"):
-            ext = max(float(r["km_final"]) - float(r["km_inicial"]), 0.001)
+            seg_start = max(float(r["km_inicial"]), min_km)
+            seg_end = min(float(r["km_final"]), max_km)
+            ext = max(seg_end - seg_start, 0.001)
             width = ext / total * 100
             color, tip = color_fn(r)
             spans.append(
@@ -2488,7 +2488,7 @@ def _render_dnit_linear(segments_df) -> None:
         '<p>Comportamento dos parâmetros DNIT ao longo do km</p></div>'
         '<div class="linear-diagram">'
         + row("IRI", "m/km", iri_fn)
-        + row("IGG", "0–200", igg_fn)
+        + row("IGG", "", igg_fn)
         + row("Defl.", "Dc mm", defl_fn)
         + axis
         + "</div></section>",
@@ -2821,7 +2821,7 @@ def _build_iagon_context() -> tuple[str, dict]:
         sol_lines.append(f"- {road}: {sol_txt}")
         if trechos:
             tl = "\n".join(
-                f"  {t['rank']}. {t['snv']} · {t['classe']} · priorização {t['priorizacao']:.1f} · "
+                f"  {t['rank']}. {t['snv']} · {t['classe']} · priorização {int(round(t['priorizacao']))} · "
                 f"{t['ext']:.0f} km · IAP {t['iap']:.2f} · {t['solucao']}"
                 for t in trechos
             )
@@ -2967,7 +2967,7 @@ def _iagon_export(report_data: dict, escopo: str, formato: str, titulo: str | No
         if trechos:
             tr_headers = ["#", "SNV", "Prioridade", "Priorização", "Extensão (km)", "IAP", "Solução"]
             tr_rows = [
-                [str(t["rank"]), t["snv"], t["classe"], f"{t['priorizacao']:.1f}", f"{t['ext']:.0f}", f"{t['iap']:.2f}", t["solucao"]]
+                [str(t["rank"]), t["snv"], t["classe"], str(int(round(t["priorizacao"]))), f"{t['ext']:.0f}", f"{t['iap']:.2f}", t["solucao"]]
                 for t in trechos
             ]
             sections.append(("Trechos prioritários (SNV)", tr_headers, tr_rows))
@@ -3104,9 +3104,21 @@ def main() -> None:
         filtered_table = _render_solution_filter_panel(data["table"])
         filtered_segments = _filter_map_segments(data["segments"], filtered_table)
         filtered_extension = float(filtered_table["Extensão"].sum()) if filtered_table is not None and not filtered_table.empty else 0
-        render_overview_map(filtered_segments, filtered_extension)
-        _render_solution_distribution(filtered_table)
-        _, paginated_table = _render_solution_table_controls(filtered_table)
+        intervention_segments = (
+            filtered_segments[~filtered_segments["intervencao_iap"].isin(["OK", "Sem intervenção"])]
+            if filtered_segments is not None and not filtered_segments.empty
+            and "intervencao_iap" in filtered_segments.columns
+            else filtered_segments
+        )
+        render_overview_map(intervention_segments, filtered_extension, color_by="solucao")
+        intervention_table = (
+            filtered_table[filtered_table["Solução recomendada"] != "Sem intervenção"]
+            if filtered_table is not None and not filtered_table.empty
+            and "Solução recomendada" in filtered_table.columns
+            else filtered_table
+        )
+        _render_solution_distribution(intervention_table)
+        _, paginated_table = _render_solution_table_controls(intervention_table)
         _render_solutions_table(paginated_table)
         return
 
@@ -3118,7 +3130,7 @@ def main() -> None:
         )
         data = get_solutions_data(selected_road, scenario_key=scenario_key)
         scenario_label = next(
-            (s["label"] for s in get_available_scenarios(selected_road) if s["key"] == scenario_key),
+            (s["cenario"] for s in get_available_scenarios(selected_road) if s["key"] == scenario_key),
             "Paragon",
         )
         _render_economic_page(
@@ -3174,7 +3186,13 @@ def main() -> None:
     st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
     render_overview_map(data["segments"], metrics["extension_km"])
     render_iap_distribution(data["distribution"], metrics["iap_average"])
-    render_linear_diagrams(data["linear_diagram"])
+    st.markdown("<div style='height: 32px'></div>", unsafe_allow_html=True)
+    filtered_diagram, km_range = apply_km_zoom(
+        data["linear_diagram"], key="paragon_linear_zoom"
+    )
+    render_iap_linear(filtered_diagram, km_range=km_range)
+    with st.expander("Mostrar detalhes técnicos (ICDS, ICDP, ICDE)"):
+        render_condition_linear(filtered_diagram, km_range=km_range)
 
 
 if __name__ == "__main__":

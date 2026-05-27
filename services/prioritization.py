@@ -1,34 +1,31 @@
 """
 Módulo de Índice de Priorização de Trechos Rodoviários.
 
-Replica a metodologia da planilha de priorização usada pela engenharia. O
-índice é calculado **por SNV** (trecho), agregando os segmentos do SNV.
+Calcula a criticidade **por segmento** e o SNV herda o valor do segmento mais
+crítico (PIOR segmento define o SNV). Isso evita o efeito de "ilha crítica
+diluída" quando um SNV longo tem alguns segmentos catastróficos misturados
+com muitos trechos em condição regular.
 
-Etapas (para cada SNV):
+Etapas (para cada SEGMENTO):
 
-1) Agrega os segmentos do SNV:
-   - VMDA, IRI, DEF -> média dos segmentos do SNV (MÉDIASE)
-   - custo_km       -> soma dos custos / soma das extensões do SNV
-
-2) Normaliza cada variável usando o mínimo/máximo GLOBAIS (sobre os valores por
-   segmento de toda a rede):
+1) Normaliza VMDA, IRI e DEF usando o mínimo/máximo GLOBAIS dos segmentos:
    - VMDA -> normalização LOGARÍTMICA
-       (LOG(v) - LOG(min)) / (LOG(max) - LOG(min))
-   - IRI  -> normalização LINEAR  (v - min) / (max - min)
-   - DEF  -> normalização LINEAR  (v - min) / (max - min)
+   - IRI  -> normalização LINEAR
+   - DEF  -> normalização LINEAR
 
-3) IP técnico (criticidade técnica, escala 0..10):
-       IPT = 10 * (0.40*VMDA_n + 0.35*IRI_n + 0.25*DEF_n)
+2) IP técnico (escala 0..10):
+       IPT = 10 * (0.15*VMDA_n + 0.50*IRI_n + 0.35*DEF_n)
 
-4) IP econômico (relação prioridade/custo, escala 0..10):
+3) IP econômico (escala 0..10):
        Eficiência = IPT / custo_km * 1000
        IPE = (Eficiência - efic_min) / (efic_max - efic_min) * 10
-   (efic_min/efic_max são o mínimo/máximo da eficiência entre os SNVs)
 
-5) Priorização final (mistura técnica + econômica, escala 0..10):
-       PRIORIZAÇÃO = 0.60*IPT + 0.40*IPE
+4) Priorização invertida (inteiro 0..10, menor = mais crítico):
+       PRIORIZAÇÃO_SEG = round(10 - (0.60*IPT + 0.40*IPE))
 
-Ordena os SNVs pela PRIORIZAÇÃO (maior primeiro) e atribui o ranking.
+5) Por SNV, herda a menor PRIORIZAÇÃO entre seus segmentos (= o pior).
+
+Ordena os SNVs pela PRIORIZAÇÃO (menor primeiro) e atribui o ranking.
 
 Uso típico:
 
@@ -44,27 +41,29 @@ import math
 from typing import Any
 
 # Pesos do IP técnico (somam 1.0).
-PESO_VMDA = 0.40  # tráfego / importância operacional
-PESO_IRI = 0.35   # condição funcional (irregularidade longitudinal)
-PESO_DEF = 0.25   # condição estrutural (deflexão / FWD)
+# Pavimento (IRI + DEF) domina; VMDA modula. Cliente quer condição como fator principal.
+PESO_VMDA = 0.15  # tráfego / importância operacional
+PESO_IRI = 0.50   # condição funcional (irregularidade longitudinal)
+PESO_DEF = 0.35   # condição estrutural (deflexão / FWD)
 
 # Pesos da priorização final (técnico x econômico).
 PESO_TECNICO = 0.60
 PESO_ECONOMICO = 0.40
 
-# Faixas de classificação textual conforme a PRIORIZAÇÃO (0..10).
+# Faixas de classificação textual conforme a PRIORIZAÇÃO INVERTIDA (0..10).
+# Escala invertida: MENOR valor = MAIS crítico (cliente lê "1 a 10 onde 1 é o top").
+# Limites inteiros para casar com o valor arredondado exibido na UI.
 _FAIXAS_PRIORIDADE: tuple[tuple[float, str], ...] = (
-    (7.5, "Prioridade Crítica"),
-    (5.0, "Prioridade Alta"),
-    (3.0, "Prioridade Média"),
-    (0.0, "Prioridade Baixa"),
+    (3, "Prioridade Crítica"),
+    (5, "Prioridade Alta"),
+    (7, "Prioridade Média"),
 )
 
 
 def classificar_prioridade(valor: float) -> str:
-    """Converte o índice de priorização (0..10) na classificação textual."""
+    """Converte o índice de priorização invertida (0..10, menor = pior) na classificação."""
     for limite, rotulo in _FAIXAS_PRIORIDADE:
-        if valor >= limite:
+        if valor <= limite:
             return rotulo
     return "Prioridade Baixa"
 
@@ -114,26 +113,19 @@ def _min_max(valores: list[float]) -> tuple[float, float]:
 
 
 def calcular_indice_priorizacao(segmentos: list[dict]) -> list[dict]:
-    """Calcula a priorização por SNV e devolve a lista ordenada por prioridade.
+    """Calcula a priorização por SEGMENTO e agrega no SNV pelo PIOR segmento.
+
+    Antes a priorização era calculada por SNV usando médias — o que diluía "ilhas
+    críticas" em SNVs longos com condição mista. Agora cada segmento tem seu próprio
+    IPT/IPE/Priorização, e o SNV herda o valor do segmento mais crítico
+    (menor priorização na escala invertida).
 
     Entrada — lista de dicionários, um por SEGMENTO, com as chaves:
 
-        rodovia       (str)
-        snv           (str)            código SNV (agrupador)
-        extensao_km   (float)          extensão do segmento em km
-        vmda          (float)          tráfego do segmento
-        iri           (float)          condição funcional do segmento
-        deflexao      (float)          condição estrutural (FWD); alias "fwd"
-        custo         (float)          custo da intervenção do segmento
+        rodovia, snv, extensao_km, vmda, iri, deflexao (ou "fwd"), custo
 
-    Saída — NOVA lista, um item por SNV, ordenada da maior para a menor
-    priorização, cada item com:
-
-        rodovia, snv, extensao_km (total do SNV),
-        vmda, iri, deflexao (médias do SNV),
-        vmda_normalizado, iri_normalizado, deflexao_normalizada,
-        ip_tecnico, custo_km, eficiencia, ip_economico, priorizacao,
-        classificacao, ranking
+    Saída — uma entrada por SNV, ordenada da maior para a menor criticidade,
+    refletindo o **pior segmento** do SNV.
     """
     if not segmentos:
         return []
@@ -150,91 +142,104 @@ def calcular_indice_priorizacao(segmentos: list[dict]) -> list[dict]:
     iri_min, iri_max = _min_max(iri_seg)
     def_min, def_max = _min_max(def_seg)
 
-    # --- agrega os segmentos por SNV (preservando a ordem de aparição) ---
-    grupos: dict[str, dict] = {}
-    ordem: list[str] = []
+    # --- 1ª passada: IPT e eficiência por SEGMENTO ---
+    seg_records: list[dict] = []
     for s in segmentos:
         snv = str(s.get("snv"))
-        grupo = grupos.get(snv)
-        if grupo is None:
-            grupo = {
-                "rodovia": s.get("rodovia"),
-                "snv": snv,
-                "vmda": [],
-                "iri": [],
-                "deflexao": [],
-                "custo": 0.0,
-                "extensao_km": 0.0,
-            }
-            grupos[snv] = grupo
-            ordem.append(snv)
+        vmda = _valor_valido(s.get("vmda"))
+        iri = _valor_valido(s.get("iri"))
+        defl = _valor_valido(s.get("deflexao", s.get("fwd")))
 
-        for chave, origem in (("vmda", "vmda"), ("iri", "iri")):
-            valor = _valor_valido(s.get(origem))
-            if valor is not None:
-                grupo[chave].append(valor)
-        deflexao = _valor_valido(s.get("deflexao", s.get("fwd")))
-        if deflexao is not None:
-            grupo["deflexao"].append(deflexao)
-
-        grupo["custo"] += _valor_valido(s.get("custo")) or 0.0
-        grupo["extensao_km"] += _valor_valido(s.get("extensao_km")) or 0.0
-
-    # --- IP técnico e eficiência por SNV ---
-    resultado: list[dict] = []
-    for snv in ordem:
-        grupo = grupos[snv]
-        vmda_m = _media(grupo["vmda"])
-        iri_m = _media(grupo["iri"])
-        def_m = _media(grupo["deflexao"])
-
-        vmda_n = _normalizar_log(vmda_m, vmda_min, vmda_max)
-        iri_n = _normalizar_linear(iri_m, iri_min, iri_max)
-        def_n = _normalizar_linear(def_m, def_min, def_max)
-
+        vmda_n = _normalizar_log(vmda, vmda_min, vmda_max)
+        iri_n = _normalizar_linear(iri, iri_min, iri_max)
+        def_n = _normalizar_linear(defl, def_min, def_max)
         ip_tecnico = 10.0 * (PESO_VMDA * vmda_n + PESO_IRI * iri_n + PESO_DEF * def_n)
-        custo_km = grupo["custo"] / grupo["extensao_km"] if grupo["extensao_km"] > 0 else 0.0
-        # Eficiência = criticidade técnica por unidade de custo (trata custo zero).
+
+        ext = _valor_valido(s.get("extensao_km")) or 0.0
+        custo = _valor_valido(s.get("custo")) or 0.0
+        custo_km = custo / ext if ext > 0 else 0.0
         eficiencia = (ip_tecnico / custo_km * 1000) if custo_km > 0 else 0.0
 
+        seg_records.append(
+            {
+                "rodovia": s.get("rodovia"),
+                "snv": snv,
+                "extensao_km": ext,
+                "custo": custo,
+                "vmda": vmda or 0.0,
+                "iri": iri or 0.0,
+                "deflexao": defl or 0.0,
+                "vmda_n": vmda_n,
+                "iri_n": iri_n,
+                "def_n": def_n,
+                "ip_tecnico": ip_tecnico,
+                "custo_km": custo_km,
+                "eficiencia": eficiencia,
+            }
+        )
+
+    # --- IP econômico: normaliza a eficiência entre os SEGMENTOS (0..10) ---
+    eficiencias = [r["eficiencia"] for r in seg_records]
+    efic_min, efic_max = _min_max(eficiencias)
+    for r in seg_records:
+        ipe = (r["eficiencia"] - efic_min) / (efic_max - efic_min) * 10.0 if efic_max > efic_min else 0.0
+        r["ip_economico"] = ipe
+        bruta = PESO_TECNICO * r["ip_tecnico"] + PESO_ECONOMICO * ipe
+        r["priorizacao_segmento"] = int(round(10.0 - bruta))
+
+    # --- agrega no SNV pelo PIOR segmento (menor priorização) ---
+    snvs: dict[str, dict] = {}
+    ordem: list[str] = []
+    for r in seg_records:
+        snv = r["snv"]
+        if snv not in snvs:
+            snvs[snv] = {
+                "rodovia": r["rodovia"],
+                "snv": snv,
+                "extensao_km": 0.0,
+                "custo": 0.0,
+                "pior": r,
+            }
+            ordem.append(snv)
+        snvs[snv]["extensao_km"] += r["extensao_km"]
+        snvs[snv]["custo"] += r["custo"]
+        if r["priorizacao_segmento"] < snvs[snv]["pior"]["priorizacao_segmento"]:
+            snvs[snv]["pior"] = r
+        elif r["priorizacao_segmento"] == snvs[snv]["pior"]["priorizacao_segmento"]:
+            # Empate: prefere o de maior IPT (mais técnico).
+            if r["ip_tecnico"] > snvs[snv]["pior"]["ip_tecnico"]:
+                snvs[snv]["pior"] = r
+
+    # --- monta saída (uma linha por SNV, valores do pior segmento) ---
+    resultado: list[dict] = []
+    for snv in ordem:
+        data = snvs[snv]
+        pior = data["pior"]
+        custo_km_total = data["custo"] / data["extensao_km"] if data["extensao_km"] > 0 else 0.0
         resultado.append(
             {
-                "rodovia": grupo["rodovia"],
+                "rodovia": data["rodovia"],
                 "snv": snv,
-                "extensao_km": round(grupo["extensao_km"], 2),
-                "vmda": round(vmda_m, 2) if vmda_m is not None else 0.0,
-                "iri": round(iri_m, 4) if iri_m is not None else 0.0,
-                "deflexao": round(def_m, 4) if def_m is not None else 0.0,
-                "vmda_normalizado": round(vmda_n, 4),
-                "iri_normalizado": round(iri_n, 4),
-                "deflexao_normalizada": round(def_n, 4),
-                "ip_tecnico": round(ip_tecnico, 4),
-                "custo_km": round(custo_km, 2),
-                "eficiencia": eficiencia,  # mantido sem arredondar p/ normalizar o IPE
-                "ip_economico": 0.0,
-                "priorizacao": 0.0,
-                "classificacao": "",
+                "extensao_km": round(data["extensao_km"], 2),
+                "vmda": round(pior["vmda"], 2),
+                "iri": round(pior["iri"], 4),
+                "deflexao": round(pior["deflexao"], 4),
+                "vmda_normalizado": round(pior["vmda_n"], 4),
+                "iri_normalizado": round(pior["iri_n"], 4),
+                "deflexao_normalizada": round(pior["def_n"], 4),
+                "ip_tecnico": round(pior["ip_tecnico"], 4),
+                "custo_km": round(custo_km_total, 2),
+                "eficiencia": round(pior["eficiencia"], 6),
+                "ip_economico": round(pior["ip_economico"], 4),
+                "priorizacao": pior["priorizacao_segmento"],
+                "classificacao": classificar_prioridade(pior["priorizacao_segmento"]),
                 "ranking": 0,
             }
         )
 
-    # --- IP econômico: normaliza a eficiência entre os SNVs (0..10) ---
-    eficiencias = [r["eficiencia"] for r in resultado]
-    efic_min, efic_max = _min_max(eficiencias)
-    for r in resultado:
-        if efic_max > efic_min:
-            ipe = (r["eficiencia"] - efic_min) / (efic_max - efic_min) * 10.0
-        else:
-            ipe = 0.0
-        r["ip_economico"] = round(ipe, 4)
-        r["priorizacao"] = round(PESO_TECNICO * r["ip_tecnico"] + PESO_ECONOMICO * ipe, 4)
-        r["classificacao"] = classificar_prioridade(r["priorizacao"])
-        r["eficiencia"] = round(r["eficiencia"], 6)
-
-    # --- ordena por priorização (desempate: IPT, depois eficiência) e ranqueia ---
+    # --- ordena por priorização ASC (menor = mais crítico primeiro) ---
     resultado.sort(
-        key=lambda r: (r["priorizacao"], r["ip_tecnico"], r["eficiencia"]),
-        reverse=True,
+        key=lambda r: (r["priorizacao"], -r["ip_tecnico"], -r["eficiencia"]),
     )
     for posicao, item in enumerate(resultado, start=1):
         item["ranking"] = posicao

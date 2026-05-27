@@ -23,11 +23,26 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
 
     segments_json = json.dumps(segments_df[cols].to_dict("records"), ensure_ascii=False, default=str)
 
-    presentes = [z for z in (zona_order or []) if z in set(segments_df["matriz_categoria"])]
-    legend_items = "".join(
-        f'<div class="legend-item"><span class="legend-dot" style="background:{(zona_colors or {}).get(z, "#fff200")}"></span>{z}</div>'
-        for z in presentes
-    )
+    if "solucao_grupo" in segments_df.columns:
+        # Severidade por faixa IRI (pior → melhor) para ordenar a legenda.
+        zona_sev = {z: i for i, z in enumerate(zona_order or [])}
+        grouped = segments_df.dropna(subset=["solucao_grupo"]).groupby("solucao_grupo")
+        legend_pairs = []
+        for grupo, sub in grouped:
+            dominante = sub["matriz_categoria"].mode().iloc[0] if not sub["matriz_categoria"].mode().empty else sub["matriz_categoria"].iloc[0]
+            color = (zona_colors or {}).get(dominante, "#fff200")
+            legend_pairs.append((grupo, color, zona_sev.get(dominante, len(zona_sev))))
+        legend_pairs.sort(key=lambda t: (-t[2], t[0]))
+        legend_items = "".join(
+            f'<div class="legend-item"><span class="legend-dot" style="background:{color}"></span>{grupo}</div>'
+            for grupo, color, _ in legend_pairs
+        )
+    else:
+        presentes = [z for z in (zona_order or []) if z in set(segments_df["matriz_categoria"])]
+        legend_items = "".join(
+            f'<div class="legend-item"><span class="legend-dot" style="background:{(zona_colors or {}).get(z, "#fff200")}"></span>{z}</div>'
+            for z in presentes
+        )
 
     html_template = Template(
         """
@@ -76,10 +91,10 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
                 </svg>
               </button>
               <select class="map-layer-select" data-layer aria-label="Camada base do mapa">
+                <option value="satellite" selected>Satélite</option>
                 <option value="osm">Padrão</option>
                 <option value="light">Claro</option>
                 <option value="dark">Escuro</option>
-                <option value="satellite">Satélite</option>
                 <option value="topographic">Topográfico</option>
               </select>
             </div>
@@ -96,10 +111,14 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
               osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }),
               light: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OpenStreetMap &copy; CARTO' }),
               dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OpenStreetMap &copy; CARTO' }),
-              satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles &copy; Esri' }),
+              satellite: L.layerGroup([
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 22, maxNativeZoom: 17, attribution: 'Tiles &copy; Esri' }),
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', { maxZoom: 22, maxNativeZoom: 17, attribution: 'Reference &copy; Esri' }),
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', { maxZoom: 22, maxNativeZoom: 17 })
+              ]),
               topographic: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { maxZoom: 17, attribution: '&copy; OpenTopoMap &copy; OpenStreetMap' })
             };
-            let currentBaseLayer = baseLayers.osm.addTo(map);
+            let currentBaseLayer = baseLayers.satellite.addTo(map);
             const pts = [];
             const fmt = (v) => Number(v).toFixed(2);
             segments.forEach((s) => {
