@@ -23,8 +23,8 @@ Arquivos incluídos:
     • Ajustar o cenários para pegar o nome dos ciclos. (ok)
     • Adicionar o zoom dos diagrama linear. (ok)
     • Na solucao invez de coceitos da legenda do mapa trazer a solucao. (ok)
-    • O ranger de trechos priortários tem que iniciar em 10 a 1
-    • Não aparecer os trechos excelente ou que não tiver solucao pra fazer no cenário economico.
-    • Adicionar o backlog em em card invez de grafico e deixar o gráfico somente em cenário economico.
-Quando que vai faltar de orçamento
-Quanto que o backlog de extensao vai ficar de backlog
+    • O ranger de trechos priortários tem que iniciar em 10 a 1 (ok)
+    • Não aparecer os trechos excelente ou que não tiver solucao pra fazer no cenário economico. (ok)
+    • Adicionar o backlog em em card invez de grafico e deixar o gráfico somente em cenário economico. (ok)
+Quando que vai faltar de orçamento (ok)
+Quanto que o backlog de extensao vai ficar de backlog (ok)

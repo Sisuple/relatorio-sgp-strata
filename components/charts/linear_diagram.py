@@ -30,7 +30,7 @@ _IAP_LEGEND = [
     ("Péssimo", "#d71920"),
 ]
 _SOLUTION_LEGEND = [
-    ("OK", "#26c6f9"),
+    ("OK", "#00c2e8"),
     ("RL", "#00a651"),
     ("RL+RS", "#b6d7a8"),
     ("RL+REF", "#f4f1a6"),
@@ -156,6 +156,42 @@ def _render_legend(legend: list[tuple[str, str]], *, title: str | None = None, c
     return f'<div class="linear-legend{class_attr}">{title_markup}{items}</div>'
 
 
+def _linear_heading_html(title: str, subtitle: str, legend: list[tuple[str, str]]) -> str:
+    return (
+        '<div class="chart-heading linear-heading">'
+        f'<div><h3>{html.escape(title)}</h3>'
+        f'<p>{html.escape(subtitle)}</p></div>'
+        f'{_render_legend(legend)}'
+        '</div>'
+    )
+
+
+def _linear_body_html(
+    diagram_df,
+    rows_config: list[tuple[str, str, str, str]],
+    *,
+    solution_legend: list[tuple[str, str]] | None = None,
+    km_range: tuple[float, float] | None = None,
+) -> str:
+    rows = diagram_df.to_dict("records")
+    if km_range is not None:
+        min_km, max_km = km_range
+    else:
+        min_km = float(diagram_df["km_inicial"].min())
+        max_km = float(diagram_df["km_final"].max())
+    total_km = max(max_km - min_km, 1)
+    diagram_rows = "".join(
+        _render_row(label, class_key, color_key, value_key, rows, total_km, min_km, max_km)
+        for label, class_key, color_key, value_key in rows_config
+    )
+    footer_legend = (
+        _render_legend(solution_legend, title="Solução Corretiva", class_name="linear-solution-legend")
+        if solution_legend
+        else ""
+    )
+    return f'<div class="linear-diagram">{diagram_rows}{_render_axis(min_km, max_km)}{footer_legend}</div>'
+
+
 def _render_linear_card(
     diagram_df,
     *,
@@ -176,35 +212,13 @@ def _render_linear_card(
         st.info(message)
         return
 
-    rows = diagram_df.to_dict("records")
-    if km_range is not None:
-        min_km, max_km = km_range
-    else:
-        min_km = float(diagram_df["km_inicial"].min())
-        max_km = float(diagram_df["km_final"].max())
-    total_km = max(max_km - min_km, 1)
-    diagram_rows = "".join(
-        _render_row(label, class_key, color_key, value_key, rows, total_km, min_km, max_km)
-        for label, class_key, color_key, value_key in rows_config
-    )
     compact_class = " linear-card-compact" if compact else ""
-    footer_legend = (
-        _render_legend(solution_legend, title="Solução Corretiva", class_name="linear-solution-legend")
-        if solution_legend
-        else ""
-    )
-
     markup = (
         f'<section class="chart-card linear-card{compact_class}">'
-        '<div class="chart-heading linear-heading">'
-        f'<div><h3>{html.escape(title)}</h3>'
-        f'<p>{html.escape(subtitle)}</p></div>'
-        f'{_render_legend(legend)}'
-        '</div>'
-        f'<div class="linear-diagram">{diagram_rows}{_render_axis(min_km, max_km)}{footer_legend}</div>'
+        f'{_linear_heading_html(title, subtitle, legend)}'
+        f'{_linear_body_html(diagram_df, rows_config, solution_legend=solution_legend, km_range=km_range)}'
         '</section>'
     )
-
     st.markdown(markup, unsafe_allow_html=True)
 
 
@@ -219,6 +233,41 @@ def render_iap_linear(diagram_df, *, km_range: tuple[float, float] | None = None
         compact=True,
         km_range=km_range,
     )
+
+
+def render_iap_linear_zoomable(diagram_df, *, key: str, label: str = "Filtrar trecho (km)"):
+    """Card do IAP com o slider de km DENTRO do próprio card.
+
+    Renderiza tudo dentro de um container do Streamlit (estilizado como `.chart-card`
+    via CSS) na ordem: cabeçalho → slider de km → barras. Devolve `(df_filtrado, km_range)`
+    para que o expander de detalhes técnicos reutilize o mesmo intervalo.
+    """
+    with st.container(border=True):
+        # Marcador usado pelo CSS (:has) para estilizar este container como chart-card.
+        st.markdown('<span class="iap-zoom-marker"></span>', unsafe_allow_html=True)
+        st.markdown(
+            _linear_heading_html(
+                "Índice de Aptidão do Pavimento e Soluções Conceptivas",
+                "IAP por segmento",
+                _IAP_LEGEND,
+            ),
+            unsafe_allow_html=True,
+        )
+        filtered, km_range = apply_km_zoom(diagram_df, key=key, label=label)
+        if filtered is None or filtered.empty:
+            st.info(
+                "Sem segmentos no intervalo selecionado."
+                if km_range is not None
+                else "Sem dados para exibir o diagrama linear."
+            )
+        else:
+            st.markdown(
+                _linear_body_html(
+                    filtered, _IAP_ROWS, solution_legend=_SOLUTION_LEGEND, km_range=km_range
+                ),
+                unsafe_allow_html=True,
+            )
+    return filtered, km_range
 
 
 def render_condition_linear(diagram_df, *, km_range: tuple[float, float] | None = None) -> None:

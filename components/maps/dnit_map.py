@@ -6,6 +6,8 @@ from string import Template
 import streamlit as st
 import streamlit.components.v1 as components
 
+from components.maps.streetview import SV_CSS, SV_MODAL_HTML, sv_init_js, road_from_sre, clean
+
 
 def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: list | None = None) -> None:
     """Mapa DNIT colorido pela intervenção da matriz (faixas de cor da matriz CBUQ)."""
@@ -21,7 +23,23 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
         st.info("Sem geometria real para exibir no mapa.")
         return
 
-    segments_json = json.dumps(segments_df[cols].to_dict("records"), ensure_ascii=False, default=str)
+    df = segments_df.copy()
+
+    def _row_detail(r):
+        ext = max(float(r.get("km_final") or 0) - float(r.get("km_inicial") or 0), 0.0)
+        solucao = clean(r.get("solucao"), default=clean(r.get("solucao_grupo")))
+        return {
+            "title": "Trecho " + clean(r.get("sre")),
+            "rows": [
+                ["Rodovia", road_from_sre(r.get("sre"))],
+                ["Situação", clean(r.get("matriz_categoria"))],
+                ["Solução recomendada", solucao],
+                ["Extensão", (f"{ext:.2f} km").replace(".", ",")],
+            ],
+        }
+
+    df["detail"] = df.apply(_row_detail, axis=1)
+    segments_json = json.dumps(df[cols + ["detail"]].to_dict("records"), ensure_ascii=False, default=str)
 
     if "solucao_grupo" in segments_df.columns:
         # Severidade por faixa IRI (pior → melhor) para ordenar a legenda.
@@ -74,6 +92,7 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
             .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; }
             .legend-dot { width: 13px; height: 13px; border-radius: 999px; display: inline-block; flex: none; }
             .leaflet-control-container .leaflet-top, .leaflet-control-container .leaflet-bottom { display: none; }
+$sv_css
           </style>
         </head>
         <body>
@@ -102,6 +121,7 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
               <div class="legend-title">INTERVENÇÃO (MATRIZ DNIT)</div>
               <div class="legend-grid">$legend_items</div>
             </div>
+$sv_modal
           </div>
           <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
           <script>
@@ -130,7 +150,8 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
                   .addTo(map)
                   .bindTooltip('SRE ' + (s.sre || '-') + ' · km ' + fmt(s.km_inicial) + ' - ' + fmt(s.km_final)
                     + ' · IRI ' + Number(s.iri).toFixed(2) + ' · IGG ' + Number(s.igg).toFixed(0)
-                    + ' · ' + s.matriz_categoria);
+                    + ' · ' + s.matriz_categoria)
+                  .on('click', (e) => window.__openTrecho(e.latlng.lat, e.latlng.lng, s.detail));
               });
             });
             if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [34, 34] });
@@ -148,6 +169,7 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
               setTimeout(() => map.invalidateSize(), 120);
             });
             document.addEventListener('fullscreenchange', () => setTimeout(() => map.invalidateSize(), 120));
+            $sv_js
           </script>
         </body>
         </html>
@@ -155,7 +177,13 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
     )
 
     components.html(
-        html_template.substitute(segments_json=segments_json, legend_items=legend_items),
+        html_template.substitute(
+            segments_json=segments_json,
+            legend_items=legend_items,
+            sv_css=SV_CSS,
+            sv_modal=SV_MODAL_HTML,
+            sv_js=sv_init_js(),
+        ),
         height=456,
         scrolling=False,
     )

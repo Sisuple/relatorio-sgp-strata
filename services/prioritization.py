@@ -249,3 +249,118 @@ def calcular_indice_priorizacao(segmentos: list[dict]) -> list[dict]:
 
 # Alias com o nome solicitado na especificação (camelCase).
 calcularIndicePriorizacao = calcular_indice_priorizacao
+
+
+# ---------------------------------------------------------------------------
+# DNIT — sem IAP, VMDA ou DEF. Usa IRI (60%) + IGG (40%) por segmento.
+# ---------------------------------------------------------------------------
+PESO_IRI_DNIT = 0.60
+PESO_IGG_DNIT = 0.40
+
+
+def calcular_indice_priorizacao_dnit(segmentos: list[dict]) -> list[dict]:
+    """Versão DNIT: usa IRI e IGG no IPT (sem VMDA/DEF), mesma escala invertida.
+
+    Cada SEGMENTO gera um IPT/IPE/Priorização; o SNV herda o pior segmento.
+    Mantém a mesma shape de saída de `calcular_indice_priorizacao`.
+    """
+    if not segmentos:
+        return []
+
+    iri_seg = [v for s in segmentos if (v := _valor_valido(s.get("iri"))) is not None]
+    igg_seg = [v for s in segmentos if (v := _valor_valido(s.get("igg"))) is not None]
+    iri_min, iri_max = _min_max(iri_seg)
+    igg_min, igg_max = _min_max(igg_seg)
+
+    seg_records: list[dict] = []
+    for s in segmentos:
+        snv = str(s.get("snv"))
+        iri = _valor_valido(s.get("iri"))
+        igg = _valor_valido(s.get("igg"))
+        iri_n = _normalizar_linear(iri, iri_min, iri_max)
+        igg_n = _normalizar_linear(igg, igg_min, igg_max)
+        ip_tecnico = 10.0 * (PESO_IRI_DNIT * iri_n + PESO_IGG_DNIT * igg_n)
+
+        ext = _valor_valido(s.get("extensao_km")) or 0.0
+        custo = _valor_valido(s.get("custo")) or 0.0
+        custo_km = custo / ext if ext > 0 else 0.0
+        eficiencia = (ip_tecnico / custo_km * 1000) if custo_km > 0 else 0.0
+
+        seg_records.append(
+            {
+                "rodovia": s.get("rodovia"),
+                "snv": snv,
+                "extensao_km": ext,
+                "custo": custo,
+                "iri": iri or 0.0,
+                "igg": igg or 0.0,
+                "iri_n": iri_n,
+                "igg_n": igg_n,
+                "ip_tecnico": ip_tecnico,
+                "custo_km": custo_km,
+                "eficiencia": eficiencia,
+            }
+        )
+
+    eficiencias = [r["eficiencia"] for r in seg_records]
+    efic_min, efic_max = _min_max(eficiencias)
+    for r in seg_records:
+        ipe = (r["eficiencia"] - efic_min) / (efic_max - efic_min) * 10.0 if efic_max > efic_min else 0.0
+        r["ip_economico"] = ipe
+        bruta = PESO_TECNICO * r["ip_tecnico"] + PESO_ECONOMICO * ipe
+        r["priorizacao_segmento"] = int(round(10.0 - bruta))
+
+    snvs: dict[str, dict] = {}
+    ordem: list[str] = []
+    for r in seg_records:
+        snv = r["snv"]
+        if snv not in snvs:
+            snvs[snv] = {
+                "rodovia": r["rodovia"],
+                "snv": snv,
+                "extensao_km": 0.0,
+                "custo": 0.0,
+                "pior": r,
+            }
+            ordem.append(snv)
+        snvs[snv]["extensao_km"] += r["extensao_km"]
+        snvs[snv]["custo"] += r["custo"]
+        if r["priorizacao_segmento"] < snvs[snv]["pior"]["priorizacao_segmento"]:
+            snvs[snv]["pior"] = r
+        elif (
+            r["priorizacao_segmento"] == snvs[snv]["pior"]["priorizacao_segmento"]
+            and r["ip_tecnico"] > snvs[snv]["pior"]["ip_tecnico"]
+        ):
+            snvs[snv]["pior"] = r
+
+    resultado: list[dict] = []
+    for snv in ordem:
+        data = snvs[snv]
+        pior = data["pior"]
+        custo_km_total = data["custo"] / data["extensao_km"] if data["extensao_km"] > 0 else 0.0
+        resultado.append(
+            {
+                "rodovia": data["rodovia"],
+                "snv": snv,
+                "extensao_km": round(data["extensao_km"], 2),
+                "iri": round(pior["iri"], 4),
+                "igg": round(pior["igg"], 4),
+                "iri_normalizado": round(pior["iri_n"], 4),
+                "igg_normalizado": round(pior["igg_n"], 4),
+                "ip_tecnico": round(pior["ip_tecnico"], 4),
+                "custo_km": round(custo_km_total, 2),
+                "eficiencia": round(pior["eficiencia"], 6),
+                "ip_economico": round(pior["ip_economico"], 4),
+                "priorizacao": pior["priorizacao_segmento"],
+                "classificacao": classificar_prioridade(pior["priorizacao_segmento"]),
+                "ranking": 0,
+            }
+        )
+
+    resultado.sort(
+        key=lambda r: (r["priorizacao"], -r["ip_tecnico"], -r["eficiencia"]),
+    )
+    for posicao, item in enumerate(resultado, start=1):
+        item["ranking"] = posicao
+
+    return resultado

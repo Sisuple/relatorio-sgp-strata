@@ -6,6 +6,8 @@ from string import Template
 import streamlit as st
 import streamlit.components.v1 as components
 
+from components.maps.streetview import SV_CSS, SV_MODAL_HTML, sv_init_js, road_from_sre, clean
+
 
 _CLASS_COLORS = {
     "Excelente": "#00c2e8",
@@ -19,7 +21,7 @@ _CLASS_COLORS = {
 
 _SOLUTION_ORDER = ["RL", "RL+RS", "RL+REF", "RPS", "RPS+REF", "REC"]
 _SOLUTION_COLORS = {
-    "OK": "#26c6f9",
+    "OK": "#00c2e8",
     "RL": "#00a651",
     "RL+RS": "#b6d7a8",
     "RL+REF": "#f4f1a6",
@@ -68,6 +70,24 @@ def render_overview_map(
         records["attended"] = records["segment_id"].astype(int).isin(attended)
     else:
         records["attended"] = True
+
+    from services.overview_service import _SOLUTION_LABELS
+
+    def _row_detail(r):
+        ext = max(float(r.get("km_final") or 0) - float(r.get("km_inicial") or 0), 0.0)
+        cod = clean(r.get("intervencao_iap"), default="")
+        solucao = _SOLUTION_LABELS.get(cod, cod) if cod else "—"
+        return {
+            "title": "Trecho " + clean(r.get("sre")),
+            "rows": [
+                ["Rodovia", road_from_sre(r.get("sre"))],
+                ["Situação", clean(r.get("classe_iap"))],
+                ["Solução recomendada", solucao],
+                ["Extensão", (f"{ext:.2f} km").replace(".", ",")],
+            ],
+        }
+
+    records["detail"] = segments_df.apply(_row_detail, axis=1)
 
     segments = records.to_dict("records")
     segments_json = json.dumps(segments, ensure_ascii=False)
@@ -157,6 +177,7 @@ def render_overview_map(
               background-repeat: no-repeat;
             }
             .leaflet-control-container .leaflet-top, .leaflet-control-container .leaflet-bottom { display: none; }
+$sv_css
           </style>
         </head>
         <body>
@@ -188,6 +209,7 @@ def render_overview_map(
               <div class="legend-grid">$legend_items_html</div>
               <div class="legend-foot">$legend_foot_html</div>
             </div>
+$sv_modal
           </div>
           <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
           <script>
@@ -270,7 +292,7 @@ def render_overview_map(
                   ' · IAP ' + Number(segment.iap).toFixed(2) +
                   ' · $tooltip_label ' + colorKey +
                   (attended ? '' : ' · Fora do orçamento')
-                );
+                ).on('click', (e) => window.__openTrecho(e.latlng.lat, e.latlng.lng, segment.detail));
               });
             });
 
@@ -300,6 +322,7 @@ def render_overview_map(
             document.addEventListener('fullscreenchange', () => {
               setTimeout(() => map.invalidateSize(), 120);
             });
+            $sv_js
           </script>
         </body>
         </html>
@@ -315,6 +338,9 @@ def render_overview_map(
             legend_items_html=legend_items_html,
             color_key_js=color_key_js,
             tooltip_label=tooltip_label,
+            sv_css=SV_CSS,
+            sv_modal=SV_MODAL_HTML,
+            sv_js=sv_init_js(),
         ),
         height=456,
         scrolling=False,

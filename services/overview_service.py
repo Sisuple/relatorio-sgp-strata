@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import bisect
 import math
 from functools import lru_cache
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from core.constants import AVAILABLE_ROADS, DEFAULT_ROAD
+from services.cache import cached
 from src.database import MySQLConnection
 
 
@@ -44,14 +46,15 @@ _IAP_INTERVENTION_ORDER = [
     "REC",
     "Sem intervenção",
 ]
+# Cores das soluções = mesmas cores do conceito IAP correspondente (Quadro 37 DNIT).
 _IAP_INTERVENTION_COLORS = {
-    "OK": "#1fa2ff",
-    "RL": "#00a65a",
+    "OK": "#00c2e8",
+    "RL": "#00a651",
     "RL+RS": "#b6d7a8",
-    "RL+REF": "#e2f0d9",
+    "RL+REF": "#f4f1a6",
     "RPS": "#fff200",
-    "RPS+REF": "#ff8a00",
-    "REC": "#e31a1c",
+    "RPS+REF": "#f2a51a",
+    "REC": "#d71920",
     "Sem intervenção": "#82929d",
 }
 _IAP_INTERVENTION_TO_CLASS = {
@@ -78,7 +81,7 @@ _LINEAR_IAP_CLASS_COLORS = {
 _SOLUTION_LABELS = {
     "OK": "Sem intervenção",
     "RL": "Reparo localizado",
-    "RL+RS": "Reparo localizado + microrrevestimento",
+    "RL+RS": "Reparo localizado + Recarga Superficial",
     "RL+REF": "Reparo localizado + reforço",
     "RPS": "Fresagem e recomposição",
     "RPS+REF": "Fresagem e recomposição + reforço",
@@ -163,6 +166,15 @@ def _classify_condition(value: Any) -> str:
     return "Péssimo"
 
 
+def _normalize_solution_label(name: str) -> str:
+    """Terminologia do cliente: 'Microrrevestimento' -> 'Recarga Superficial'.
+
+    Cobre o nome vindo do código (_SOLUTION_LABELS) e o `tipoNome` gravado no banco,
+    com uma ou duas letras 'r' (microrevestimento / microrrevestimento).
+    """
+    return re.sub(r"[Mm]icrorr?evestimento", "Recarga Superficial", name)
+
+
 def _solution_name(solution_code: str | None, solutions_json: Any = None) -> str:
     if solutions_json:
         try:
@@ -173,11 +185,13 @@ def _solution_name(solution_code: str | None, solutions_json: Any = None) -> str
                 if isinstance(item, dict) and item.get("tipoNome")
             ]
             if names:
-                return " + ".join(dict.fromkeys(names))
+                return _normalize_solution_label(" + ".join(dict.fromkeys(names)))
         except (TypeError, ValueError):
             pass
 
-    return _SOLUTION_LABELS.get(str(solution_code or ""), str(solution_code or "Sem intervenção"))
+    return _normalize_solution_label(
+        _SOLUTION_LABELS.get(str(solution_code or ""), str(solution_code or "Sem intervenção"))
+    )
 
 
 def _solution_cost(solutions_json: Any = None) -> float:
@@ -225,6 +239,89 @@ def _has_large_coordinate_jump(coords: list[list[float]]) -> bool:
     return False
 
 
+def _merge_consecutive_paths(
+    paths: list[list[list[float]]], gap_tol: float = 0.0002
+) -> list[list[list[float]]]:
+    """Mescla mini-polylines contíguas em traçados maiores.
+
+    Os pontos de levantamento chegam como N segmentos de 2 pontos cada — cada um
+    é uma LINESTRING isolada. Como o final de uma costuma ser o início da próxima
+    (mesma estrada), juntamos tudo em polylines contínuas para reduzir o JSON
+    do mapa de centenas de mini-pares para 1-2 polylines por SNV.
+
+    `gap_tol`: tolerância em graus para considerar "mesmo ponto" no encontro (~22 m).
+    """
+    if not paths:
+        return []
+    # Ordena por primeiro ponto (lat, lon) — uma heurística simples para garantir
+    # que polylines adjacentes fiquem próximas. Se já vierem ordenadas (caso comum),
+    # a ordem é preservada.
+    sorted_paths = sorted(paths, key=lambda p: (p[0][0], p[0][1]) if p else (0, 0))
+    merged: list[list[list[float]]] = []
+    current: list[list[float]] = []
+    for path in sorted_paths:
+        if not path:
+            continue
+        if not current:
+            current = list(path)
+            continue
+        last = current[-1]
+        first = path[0]
+        # se o fim do atual está próximo do início do próximo, conecta.
+        if abs(last[0] - first[0]) < gap_tol and abs(last[1] - first[1]) < gap_tol:
+            current.extend(path[1:] if path[0] == last else path)
+        else:
+            merged.append(current)
+            current = list(path)
+    if current:
+        merged.append(current)
+    return merged
+
+
+def _simplify_path(coords: list[list[float]], tolerance: float = 0.00012) -> list[list[float]]:
+    """Simplifica uma polyline removendo pontos colineares/redundantes (Ramer-Douglas-Peucker iterativo).
+
+    `tolerance` em graus (~13 m em RO). Reduz drasticamente o tamanho do JSON
+    enviado pro iframe do mapa sem perder o traçado visual.
+    """
+    n = len(coords)
+    if n <= 4:
+        return coords
+
+    # Implementação iterativa com pilha (evita recursão profunda em traços longos).
+    keep = [False] * n
+    keep[0] = True
+    keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        i, j = stack.pop()
+        if j - i < 2:
+            continue
+        # Encontra o ponto com maior distância perpendicular ao segmento i-j.
+        x1, y1 = coords[i][1], coords[i][0]
+        x2, y2 = coords[j][1], coords[j][0]
+        dx, dy = x2 - x1, y2 - y1
+        seg_len_sq = dx * dx + dy * dy
+        max_dist = 0.0
+        max_k = i
+        for k in range(i + 1, j):
+            x0, y0 = coords[k][1], coords[k][0]
+            if seg_len_sq == 0:
+                d = ((x0 - x1) ** 2 + (y0 - y1) ** 2) ** 0.5
+            else:
+                # área do paralelogramo / base = altura
+                d = abs(dx * (y1 - y0) - (x1 - x0) * dy) / (seg_len_sq ** 0.5)
+            if d > max_dist:
+                max_dist = d
+                max_k = k
+        if max_dist > tolerance:
+            keep[max_k] = True
+            stack.append((i, max_k))
+            stack.append((max_k, j))
+
+    return [coords[i] for i in range(n) if keep[i]]
+
+
 def get_available_roads() -> list[str]:
     """Retorna rodovias cadastradas no banco, com fallback local."""
     roads = _get_available_roads_from_database()
@@ -256,7 +353,7 @@ def get_iap_extraction(
     return _get_iap_extraction_from_database(code, year, scenario_key)
 
 
-@lru_cache(maxsize=64)
+@cached(ttl=1800)
 def _get_iap_extraction_from_database(
     road_code: str,
     year: int | None,
@@ -393,7 +490,7 @@ def _get_iap_extraction_from_database(
     }
 
 
-@lru_cache(maxsize=64)
+@cached(ttl=3600)
 def _get_iap_map_segments_from_database(
     analise_id: int,
     ciclo_id: int,
@@ -422,53 +519,94 @@ def _get_iap_map_segments_from_database(
     if not iap_by_segment:
         return pd.DataFrame()
 
-    geometry_rows = db.execute_query(
+    # Segmentos da análise (km + código SNV p/ rótulo), ordenados por km.
+    seg_rows = db.execute_query(
         """
         SELECT
           seg.id AS id_segmento,
+          seg.rodovia AS rodovia,
+          seg.km_inicial AS km_inicial_segmento,
+          seg.km_final AS km_final_segmento,
           (
-            SELECT ps.codigo
-            FROM pista_shape ps
+            SELECT ps.codigo FROM pista_shape ps
             WHERE ps.rodovia = seg.rodovia
               AND ps.km_inicial <= seg.km_inicial
               AND ps.km_final >= seg.km_final
             ORDER BY ps.km_inicial DESC
             LIMIT 1
-          ) AS codigo,
-          seg.km_inicial AS km_inicial_segmento,
-          seg.km_final AS km_final_segmento,
-          pt.km_inicial AS km_inicial_ponto,
-          ST_AsText(pt.geometria) AS wkt
+          ) AS codigo
         FROM analise_gerencial_segmento_pistas seg
-        JOIN principal_levantamentos pt FORCE INDEX (idx_lev_importacao_km)
-          ON pt.levantamento_importacao_id = (
-            SELECT MIN(li.id)
-            FROM levantamento_importacoes li
-            WHERE li.nome_arquivo LIKE CONCAT('BR-', seg.rodovia, '%%IRI%%')
-          )
-         AND pt.rodovia = seg.rodovia
-         AND pt.km_inicial >= seg.km_inicial
-         AND pt.km_inicial <= seg.km_final
         WHERE seg.analise_gerencial_id = %s
-        ORDER BY seg.id, pt.km_inicial
+        ORDER BY seg.km_inicial, seg.id
         """,
         (analise_id,),
     ) or []
+    seg_rows = [r for r in seg_rows if int(r["id_segmento"]) in iap_by_segment]
+    if not seg_rows:
+        return pd.DataFrame()
 
-    segments: dict[int, dict[str, Any]] = {}
-    for row in geometry_rows:
-        segment_id = int(row["id_segmento"])
-        iap_data = iap_by_segment.get(segment_id)
-        if iap_data is None:
+    rodovia = seg_rows[0].get("rodovia")
+
+    # Geometria real: TODOS os pontos do levantamento IRI da rodovia em UMA
+    # consulta (sem join por segmento, que estourava o read_timeout nas longas).
+    # Os pontos seguem a estrada na ordem de km → agrupamos por faixa de km. Isso
+    # mantém o traçado contínuo (sem os saltos do pista_shape, que tem peças
+    # duplicadas/deslocadas em algumas rodovias).
+    point_rows = db.execute_query(
+        """
+        SELECT pt.km_inicial AS km, ST_AsText(pt.geometria) AS wkt
+        FROM principal_levantamentos pt
+        WHERE pt.levantamento_importacao_id = (
+            SELECT MIN(li.id) FROM levantamento_importacoes li
+            WHERE li.nome_arquivo LIKE CONCAT('BR-', %s, '%%IRI%%')
+          )
+          AND pt.rodovia = %s
+        ORDER BY pt.km_inicial
+        """,
+        (rodovia, rodovia),
+    ) or []
+
+    points: list[tuple[float, list[list[float]]]] = []
+    for p in point_rows:
+        coords = _parse_linestring_latlon(p.get("wkt"))
+        if len(coords) >= 2 and not _has_large_coordinate_jump(coords):
+            points.append((_to_float(p.get("km")), coords))
+    point_kms = [k for k, _ in points]
+
+    segments: list[dict[str, Any]] = []
+    for srow in seg_rows:
+        segment_id = int(srow["id_segmento"])
+        iap_data = iap_by_segment[segment_id]
+        seg_km_i = _to_float(srow.get("km_inicial_segmento"))
+        seg_km_f = _to_float(srow.get("km_final_segmento"))
+
+        lo = bisect.bisect_left(point_kms, seg_km_i)
+        hi = bisect.bisect_right(point_kms, seg_km_f)
+        # Cada km do levantamento traz vários pontos (faixas/sentidos, em posições
+        # distintas). Concatenar todos faz a linha ziguezaguear entre carreiros, e
+        # infla o comprimento. Colapsamos num ponto médio por km → eixo central,
+        # traçado contínuo e limpo.
+        by_km: dict[float, list[list[float]]] = {}
+        for km, coords in points[lo:hi]:
+            by_km.setdefault(round(km, 4), []).append(coords[0])
+        flat: list[list[float]] = []
+        for km in sorted(by_km):
+            grp = by_km[km]
+            avg = [
+                sum(c[0] for c in grp) / len(grp),
+                sum(c[1] for c in grp) / len(grp),
+            ]
+            if not flat or flat[-1] != avg:
+                flat.append(avg)
+        if len(flat) < 2:
             continue
 
-        segment = segments.setdefault(
-            segment_id,
+        segments.append(
             {
                 "segment_id": segment_id,
-                "sre": row.get("codigo") or f"Segmento {segment_id}",
-                "km_inicial": _to_float(row.get("km_inicial_segmento")),
-                "km_final": _to_float(row.get("km_final_segmento")),
+                "sre": srow.get("codigo") or f"Segmento {segment_id}",
+                "km_inicial": seg_km_i,
+                "km_final": seg_km_f,
                 "iap": iap_data["iap"] / 100,
                 "classe_iap": _classify_iap_for_map(
                     iap_data["iap"],
@@ -479,24 +617,14 @@ def _get_iap_map_segments_from_database(
                     iap_data["intervencao"],
                     "#fff200",
                 ),
-                "paths": [],
-            },
+                "paths": [_simplify_path(flat)],
+            }
         )
 
-        line_coords = _parse_linestring_latlon(row.get("wkt"))
-        if len(line_coords) >= 2 and not _has_large_coordinate_jump(line_coords):
-            segment["paths"].append(line_coords)
-
-    return pd.DataFrame(
-        [
-            segment
-            for segment in segments.values()
-            if segment.get("paths")
-        ]
-    )
+    return pd.DataFrame(segments)
 
 
-@lru_cache(maxsize=64)
+@cached(ttl=1800)
 def _get_linear_diagram_segments_from_database(
     analise_id: int,
     ciclo_id: int,
@@ -754,11 +882,22 @@ def _get_iap_scenario_by_key(road_code: str, scenario_key: str | None) -> dict[s
     if not scenario_key:
         return None
 
-    for scenario in _get_iap_scenarios_from_database(road_code, "Paragon"):
-        if scenario["key"] == scenario_key:
-            return scenario
+    for matrix_type in ("Paragon", "Matriz Cadastrada"):
+        for scenario in _get_iap_scenarios_from_database(road_code, matrix_type):
+            if scenario["key"] == scenario_key:
+                return scenario
 
     return None
+
+
+def get_scenario_label(selected_road: str, scenario_key: str | None) -> str | None:
+    """Nome do cenário a partir da key, buscando em qualquer tipo de matriz."""
+    code = _normalize_road_code(selected_road)
+    if not code or not scenario_key:
+        return None
+
+    scenario = _get_iap_scenario_by_key(code, scenario_key)
+    return scenario["cenario"] if scenario else None
 
 
 def _get_default_iap_scenario(db: MySQLConnection, road_code: str) -> dict[str, Any] | None:
@@ -1178,19 +1317,43 @@ def _eval_dnit_matrix(matrix: dict, iri: float, igg: float, numero_n: float, dc:
 def get_dnit_overview_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
     """Dados da visão geral DNIT: segmentos com IRI e IGG classificados (faixas DNIT)."""
     road = selected_road or get_available_roads()[0]
-    extraction = get_iap_extraction(road, scenario_key=scenario_key)
-    if not extraction:
+    code = _normalize_road_code(road)
+    if not code:
         return {}
 
-    data = _get_dnit_overview_from_database(extraction["analise_id"], extraction["ciclo_id"], extraction["ano"])
+    # Análise Cadastrada (pipeline DNIT) honrando o cenário escolhido; se a rodovia não
+    # tiver matriz Cadastrada, cai no Paragon (intervencoes_iap) — comportamento anterior.
+    analysis = _get_dnit_analysis_for_road(code, scenario_key)
+    if analysis:
+        analise_id, ciclo_id, year = analysis["analise_id"], analysis["ciclo_id"], analysis["ano"]
+    else:
+        extraction = get_iap_extraction(road, scenario_key=scenario_key)
+        if not extraction:
+            return {}
+        analise_id, ciclo_id, year = extraction["analise_id"], extraction["ciclo_id"], extraction["ano"]
+
+    data = _get_dnit_overview_from_database(analise_id, ciclo_id, year)
     if data:
         data["road"] = road
+        # Enriquece cada segmento com a Solução recomendada (pipeline de soluções DNIT).
+        sol = _get_dnit_solutions_from_database(analise_id, ciclo_id, year) or {}
+        sol_segs = sol.get("segments")
+        sol_by_seg: dict[int, Any] = {}
+        if sol_segs is not None and not sol_segs.empty and "solucao_grupo" in sol_segs.columns:
+            sol_by_seg = dict(zip(sol_segs["segment_id"].astype(int), sol_segs["solucao_grupo"]))
+        segs = data.get("segments")
+        if segs is not None and not segs.empty:
+            segs["solucao"] = segs["segment_id"].astype(int).map(sol_by_seg)
     return data
 
 
-@lru_cache(maxsize=32)
+@cached(ttl=1800)
 def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) -> dict:
+    # Paragon usa a geometria do mapa IAP; Cadastrada (sem intervencoes_iap) cai na
+    # geometria DNIT, que não depende de IAP e traz as mesmas colunas.
     geo = _get_iap_map_segments_from_database(analise_id, ciclo_id, year)
+    if geo is None or geo.empty:
+        geo = _get_dnit_geometry_from_database(analise_id)
     if geo is None or geo.empty:
         return {}
 
@@ -1400,7 +1563,7 @@ def get_dnit_solutions_data(selected_road: str | None = None, scenario_key: str 
     """
     road = selected_road or get_available_roads()[0]
     code = _normalize_road_code(road)
-    analysis = _get_dnit_analysis_for_road(code) if code else None
+    analysis = _get_dnit_analysis_for_road(code, scenario_key) if code else None
     base = {
         "road": road,
         "available": False,
@@ -1422,12 +1585,29 @@ def get_dnit_solutions_data(selected_road: str | None = None, scenario_key: str 
     return data
 
 
-@lru_cache(maxsize=8)
-def _get_dnit_analysis_for_road(road_code: str) -> dict | None:
-    """Análise 'Matriz Cadastrada' da rodovia com soluções DNIT gravadas (ano-base = 1º ano)."""
+def _scenario_ciclo_id(scenario_key: str | None) -> int | None:
+    """Extrai o ciclo_id de uma key 'analise_id:ciclo_id'."""
+    if not scenario_key:
+        return None
+    parts = str(scenario_key).split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+@lru_cache(maxsize=32)
+def _get_dnit_analysis_for_road(road_code: str, scenario_key: str | None = None) -> dict | None:
+    """Análise 'Matriz Cadastrada' da rodovia com soluções DNIT gravadas (ano-base = 1º ano).
+
+    Se `scenario_key` apontar para um ciclo Cadastrada com intervenções DNIT, usa-o
+    (respeita o seletor de Cenários: CRESCENTE/DECRESCENTE etc.); caso contrário, cai
+    no último ciclo Cadastrada processado da rodovia.
+    """
     db = MySQLConnection()
-    rows = db.execute_query(
-        """
+    base_select = """
         SELECT agdt.id AS analise_id, agdt.nome, agc.id AS ciclo_id,
                (SELECT MIN(d.ano) FROM analise_gerencial_intervencoes_dnit d WHERE d.gerencial_ciclo_id = agc.id) AS ano
         FROM analise_gerencial_dados_trechos agdt
@@ -1436,11 +1616,23 @@ def _get_dnit_analysis_for_road(road_code: str) -> dict | None:
           AND agdt.rodovia = %s
           AND agdt.tipo_matriz = 'Matriz Cadastrada'
           AND EXISTS (SELECT 1 FROM analise_gerencial_intervencoes_dnit d WHERE d.gerencial_ciclo_id = agc.id)
-        ORDER BY agc.id DESC
-        LIMIT 1
-        """,
-        (str(int(road_code)),),
+    """
+    ciclo_id = _scenario_ciclo_id(scenario_key)
+    params: list[Any] = [str(int(road_code))]
+    where_extra = ""
+    if ciclo_id is not None:
+        where_extra = " AND agc.id = %s"
+        params.append(ciclo_id)
+
+    rows = db.execute_query(
+        base_select + where_extra + " ORDER BY agc.id DESC LIMIT 1",
+        tuple(params),
     ) or []
+
+    # Cenário escolhido não é Cadastrada / sem intervenção DNIT → usa o último ciclo.
+    if not rows and ciclo_id is not None:
+        return _get_dnit_analysis_for_road(road_code, None)
+
     if not rows:
         return None
     r = rows[0]
@@ -1452,7 +1644,7 @@ def _get_dnit_analysis_for_road(road_code: str) -> dict | None:
     }
 
 
-@lru_cache(maxsize=32)
+@cached(ttl=3600)
 def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
     """Geometria/SRE/km de TODOS os segmentos da análise (sem depender de IAP)."""
     db = MySQLConnection()
@@ -1500,12 +1692,14 @@ def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
         )
         line_coords = _parse_linestring_latlon(row.get("wkt"))
         if len(line_coords) >= 2 and not _has_large_coordinate_jump(line_coords):
-            segment["paths"].append(line_coords)
+            # Simplifica antes de armazenar — reduz 90%+ do payload do mapa
+            # sem perder o traçado visual (tolerância ~13 m).
+            segment["paths"].append(_simplify_path(line_coords))
 
     return pd.DataFrame([s for s in segments.values() if s.get("paths")])
 
 
-@lru_cache(maxsize=32)
+@cached(ttl=1800)
 def _get_dnit_solutions_from_database(analise_id: int, ciclo_id: int, year: int) -> dict:
     geo = _get_dnit_geometry_from_database(analise_id)
     if geo is None or geo.empty:
@@ -1610,8 +1804,10 @@ def get_projection_data(selected_road: str | None = None, scenario_key: str | No
     if not code:
         return {}
 
-    scenarios = _get_iap_scenarios_from_database(code, "Paragon")
-    scenario = next((s for s in scenarios if s["key"] == scenario_key), scenarios[0] if scenarios else None)
+    scenario = _get_iap_scenario_by_key(code, scenario_key)
+    if not scenario:
+        defaults = _get_iap_scenarios_from_database(code, "Paragon")
+        scenario = defaults[0] if defaults else None
     if not scenario:
         return {}
 
@@ -1622,7 +1818,7 @@ def get_projection_data(selected_road: str | None = None, scenario_key: str | No
     return data
 
 
-@lru_cache(maxsize=32)
+@cached(ttl=3600)
 def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
     db = MySQLConnection()
 
@@ -1857,4 +2053,308 @@ def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
         "sre_history": sre_history,
         "composition": composition,
         "pct_above_meta": pct_above_meta,
+    }
+
+
+# ============================================================================
+# DNIT — Cenário Econômico e Projeção
+# ============================================================================
+
+
+@cached(ttl=1800)
+def _get_dnit_budget_items(ciclo_id: int, analise_id: int) -> pd.DataFrame:
+    """Lê analise_gerencial_orcamentos e retorna 1 linha por (segmento × ano × solução)
+    com o custo já tabulado. SRE/SNV vem da geometria DNIT cacheada."""
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT o.segmento_pista_id, o.ano, o.solucoes,
+               sp.km_inicial, sp.km_final, sp.extensao
+        FROM analise_gerencial_orcamentos o
+        JOIN analise_gerencial_segmento_pistas sp ON sp.id = o.segmento_pista_id
+        WHERE o.gerencial_ciclo_id = %s
+          AND sp.analise_gerencial_id = %s
+          AND o.solucoes IS NOT NULL
+        ORDER BY o.ano, sp.km_inicial
+        """,
+        (ciclo_id, analise_id),
+    ) or []
+
+    geo = _get_dnit_geometry_from_database(analise_id)
+    sre_by_seg: dict[int, Any] = {}
+    if geo is not None and not geo.empty:
+        sre_by_seg = {
+            int(r["segment_id"]): (r.get("sre") or f"Segmento {int(r['segment_id'])}")
+            for _, r in geo.iterrows()
+        }
+
+    items: list[dict[str, Any]] = []
+    budget_seq = 0
+    for r in rows:
+        seg_id = int(r["segmento_pista_id"])
+        sre = sre_by_seg.get(seg_id, f"Segmento {seg_id}")
+        sols = r.get("solucoes")
+        if isinstance(sols, str):
+            try:
+                sols = json.loads(sols)
+            except Exception:
+                sols = []
+        for sol in sols or []:
+            custo = _to_float(sol.get("orcamento"))
+            if custo <= 0:
+                continue
+            budget_seq += 1
+            items.append(
+                {
+                    "SNV": sre,
+                    "_segment_id": seg_id,
+                    "_budget_id": budget_seq,
+                    "Ano": int(r["ano"]),
+                    "Solução": sol.get("tipoNome") or "Sem nome",
+                    "Custo": custo,
+                    "Km Inicial": _to_float(r["km_inicial"]),
+                    "Km Final": _to_float(r["km_final"]),
+                    "Extensão": _to_float(r["extensao"]),
+                }
+            )
+    return pd.DataFrame(items)
+
+
+def get_dnit_economic_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    """Cenário econômico DNIT — mesma shape de get_solutions_data (Paragon).
+
+    Devolve table (segmentos com Custo estimado), budget_items (por seg×ano×solução)
+    e segments (geometria) — pronto para alimentar a página de cenário econômico DNIT.
+    """
+    road = selected_road or get_available_roads()[0]
+    code = _normalize_road_code(road)
+    analysis = _get_dnit_analysis_for_road(code, scenario_key) if code else None
+    if not analysis:
+        return {"road": road, "available": False, "table": pd.DataFrame(),
+                "budget_items": pd.DataFrame(), "segments": pd.DataFrame()}
+
+    sol_data = _get_dnit_solutions_from_database(
+        analysis["analise_id"], analysis["ciclo_id"], analysis["ano"]
+    )
+    if not sol_data:
+        return {"road": road, "available": False, "table": pd.DataFrame(),
+                "budget_items": pd.DataFrame(), "segments": pd.DataFrame()}
+
+    budget_items = _get_dnit_budget_items(analysis["ciclo_id"], analysis["analise_id"])
+
+    table = sol_data["table"].copy()
+    if not budget_items.empty:
+        custo_seg = budget_items.groupby("_segment_id")["Custo"].sum().to_dict()
+    else:
+        custo_seg = {}
+    table["Custo estimado"] = table["_segment_id"].astype(int).map(custo_seg).fillna(0.0)
+    table["_solucao_codigo"] = table["Solução núcleo"].astype(str)
+    # _classe_iap não existe no DNIT — usa Faixa como proxy. Permite o filtro existente
+    # (que tira "Excelente") ficar inerte aqui sem quebrar o pipeline.
+    table["_classe_iap"] = table["Faixa"]
+
+    return {
+        "road": road,
+        "available": True,
+        "table": table,
+        "budget_items": budget_items,
+        "segments": sol_data["segments"],
+        "extension_km": sol_data.get("extension_km"),
+        "zona_order": sol_data.get("zona_order"),
+        "zona_colors": sol_data.get("zona_colors"),
+        "analise_id": analysis["analise_id"],
+        "ciclo_id": analysis["ciclo_id"],
+        "ano_base": analysis["ano"],
+    }
+
+
+@cached(ttl=3600)
+def _get_dnit_projection_intervencoes(ciclo_id: int, analise_id: int) -> pd.DataFrame:
+    """Lê analise_gerencial_intervencoes_dnit + orcamentos e devolve 1 linha por
+    (segmento × ano) com a solução principal e o custo daquele ano."""
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT i.segmento_pista_id, i.ano, i.solucoes AS solucoes_intervencao,
+               o.solucoes AS solucoes_orcamento
+        FROM analise_gerencial_intervencoes_dnit i
+        LEFT JOIN analise_gerencial_orcamentos o
+               ON o.gerencial_ciclo_id = i.gerencial_ciclo_id
+              AND o.segmento_pista_id = i.segmento_pista_id
+              AND o.ano = i.ano
+        JOIN analise_gerencial_segmento_pistas sp ON sp.id = i.segmento_pista_id
+        WHERE i.gerencial_ciclo_id = %s
+          AND sp.analise_gerencial_id = %s
+          AND i.solucoes IS NOT NULL
+        ORDER BY sp.km_inicial, i.ano
+        """,
+        (ciclo_id, analise_id),
+    ) or []
+
+    geo = _get_dnit_geometry_from_database(analise_id)
+    sre_by_seg = {}
+    if geo is not None and not geo.empty:
+        sre_by_seg = {int(r["segment_id"]): r.get("sre") for _, r in geo.iterrows()}
+
+    items = []
+    for r in rows:
+        seg_id = int(r["segmento_pista_id"])
+        parsed = _dnit_parse_solucoes(r.get("solucoes_intervencao"))
+        nomes = [n for _, n in parsed]
+        nucleo = _dnit_solution_core_label(parsed) if parsed else "—"
+        grupo = _dnit_solution_group(nomes) if nomes else "Outras soluções"
+
+        sols_o = r.get("solucoes_orcamento")
+        if isinstance(sols_o, str):
+            try:
+                sols_o = json.loads(sols_o)
+            except Exception:
+                sols_o = []
+        custo = sum(_to_float(s.get("orcamento")) for s in (sols_o or []))
+
+        items.append({
+            "SRE": sre_by_seg.get(seg_id) or f"Segmento {seg_id}",
+            "_segment_id": seg_id,
+            "Ano": int(r["ano"]),
+            "Solução núcleo": nucleo,
+            "Solução grupo": grupo,
+            "Custo": custo,
+        })
+    return pd.DataFrame(items)
+
+
+@cached(ttl=3600)
+def _get_dnit_iri_projection(ciclo_id: int, analise_id: int) -> pd.DataFrame:
+    """Série anual de IRI projetado por segmento + flag de ano com intervenção.
+
+    `intervencao_irib` é NOT NULL quando há obra programada naquele ano (o valor
+    é o IRI pós-intervenção). `iria` é o IRI projetado antes da intervenção.
+    """
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT r.segmento_pista_id AS seg, r.ano,
+               r.iria, r.intervencao_irib
+        FROM analise_gerencial_roughness r
+        JOIN analise_gerencial_segmento_pistas sp ON sp.id = r.segmento_pista_id
+        WHERE r.gerencial_ciclo_id = %s
+          AND sp.analise_gerencial_id = %s
+          AND r.iria IS NOT NULL
+        ORDER BY r.segmento_pista_id, r.ano
+        """,
+        (ciclo_id, analise_id),
+    ) or []
+    if not rows:
+        return pd.DataFrame()
+
+    geo = _get_dnit_geometry_from_database(analise_id)
+    sre_by_seg = {}
+    ext_by_seg = {}
+    if geo is not None and not geo.empty:
+        for _, r in geo.iterrows():
+            seg_id = int(r["segment_id"])
+            sre_by_seg[seg_id] = r.get("sre") or f"Segmento {seg_id}"
+            ext_by_seg[seg_id] = max(_to_float(r.get("km_final")) - _to_float(r.get("km_inicial")), 0.0)
+
+    records = []
+    for r in rows:
+        seg_id = int(r["seg"])
+        iria = _to_float(r.get("iria"))
+        interv = r.get("intervencao_irib")
+        records.append({
+            "_segment_id": seg_id,
+            "SRE": sre_by_seg.get(seg_id) or f"Segmento {seg_id}",
+            "Extensão": ext_by_seg.get(seg_id, 0.0),
+            "Ano": int(r["ano"]),
+            "IRI": iria,
+            "Intervenção": interv is not None,
+        })
+    return pd.DataFrame(records)
+
+
+def get_dnit_iri_projection(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    """Para cada SRE da rodovia, série anual de IRI médio ponderado por extensão
+    e o conjunto de anos com intervenção (≥ 1 segmento recebendo obra)."""
+    road = selected_road or get_available_roads()[0]
+    code = _normalize_road_code(road)
+    analysis = _get_dnit_analysis_for_road(code, scenario_key) if code else None
+    if not analysis:
+        return {"road": road, "available": False}
+
+    df = _get_dnit_iri_projection(analysis["ciclo_id"], analysis["analise_id"])
+    if df.empty:
+        return {"road": road, "available": False}
+
+    # Média ponderada por extensão dentro de cada (SRE, Ano).
+    df["_iri_ext"] = df["IRI"] * df["Extensão"]
+    grouped = (
+        df.groupby(["SRE", "Ano"])
+        .agg(
+            iri_sum=("_iri_ext", "sum"),
+            ext_sum=("Extensão", "sum"),
+            interv=("Intervenção", "any"),
+        )
+        .reset_index()
+    )
+    grouped["IRI"] = grouped["iri_sum"] / grouped["ext_sum"].where(grouped["ext_sum"] > 0, 1)
+
+    sre_series: dict[str, dict] = {}
+    for sre, sub in grouped.groupby("SRE"):
+        sub = sub.sort_values("Ano")
+        sre_series[str(sre)] = {
+            "years": sub["Ano"].astype(int).tolist(),
+            "iri": [round(float(v), 2) for v in sub["IRI"].tolist()],
+            "interv": sub["interv"].astype(bool).tolist(),
+        }
+
+    sre_list = sorted(sre_series.keys())
+    anos = sorted(grouped["Ano"].astype(int).unique().tolist())
+
+    return {
+        "road": road,
+        "available": True,
+        "sre_series": sre_series,
+        "sre_list": sre_list,
+        "anos": anos,
+        "ano_inicial": min(anos) if anos else None,
+        "ano_final": max(anos) if anos else None,
+    }
+
+
+def get_dnit_projection_schedule(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    """Cronograma de intervenções DNIT por trecho (SRE) × ano.
+
+    Diferente do Paragon (curva contínua de IAP), o DNIT trabalha com eventos
+    discretos: para cada SRE, lista os anos em que receberá obra e a solução.
+    """
+    road = selected_road or get_available_roads()[0]
+    code = _normalize_road_code(road)
+    analysis = _get_dnit_analysis_for_road(code, scenario_key) if code else None
+    if not analysis:
+        return {"road": road, "available": False}
+
+    df = _get_dnit_projection_intervencoes(analysis["ciclo_id"], analysis["analise_id"])
+    if df.empty:
+        return {"road": road, "available": False}
+
+    sre_list = sorted(df["SRE"].dropna().astype(str).unique().tolist())
+    anos = sorted(df["Ano"].dropna().astype(int).unique().tolist())
+    custo_total = float(df["Custo"].sum())
+    custo_por_ano = (
+        df.groupby("Ano", as_index=False)["Custo"]
+        .sum()
+        .sort_values("Ano")
+    )
+
+    return {
+        "road": road,
+        "available": True,
+        "schedule": df,
+        "sre_list": sre_list,
+        "anos": anos,
+        "ano_inicial": min(anos) if anos else None,
+        "ano_final": max(anos) if anos else None,
+        "custo_total": custo_total,
+        "custo_por_ano": custo_por_ano,
+        "group_colors": _DNIT_GROUP_COLORS,
     }

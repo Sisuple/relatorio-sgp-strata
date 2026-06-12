@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -21,17 +20,27 @@ load_dotenv()
 
 _BASE = Path(__file__).resolve().parent.parent
 _PROMPT_PATH = _BASE / "prompts" / "iagon_system_prompt.md"
+_METHODOLOGY_PATH = _BASE / "prompts" / "metodologia_paragon_base_conhecimento.md"
 _MEMORY_PATH = _BASE / "data" / "iagon_memory.json"
 
 IAGON_MODEL = os.getenv("IAGON_MODEL", "gpt-4.1")
 
 
-@lru_cache(maxsize=1)
 def system_prompt() -> str:
+    """Lê o prompt principal a cada chamada — permite editar sem reiniciar o servidor."""
     try:
         return _PROMPT_PATH.read_text(encoding="utf-8")
     except OSError:
         return "Você é o IAGON, assistente de pavimentos do DNIT. Responda em português."
+
+
+def methodology_notes() -> str:
+    """Lê o arquivo editável `paragon_methodology.md` (conhecimento de domínio do usuário).
+    Atualizações no arquivo refletem na próxima conversa, sem reiniciar."""
+    try:
+        return _METHODOLOGY_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def is_configured() -> bool:
@@ -95,7 +104,7 @@ TOOLS: list[dict] = [
                 "properties": {
                     "escopo": {
                         "type": "string",
-                        "description": "'rede' para toda a malha, ou o código/nome de uma rodovia (ex.: '364', 'BR-364/RO').",
+                        "description": "'rede' para toda a malha, ou o código/nome de uma rodovia (ex.: 'BR-421', '429').",
                     },
                     "formato": {"type": "string", "enum": ["pdf", "excel", "csv"]},
                     "titulo": {"type": "string", "description": "Título opcional do relatório."},
@@ -107,10 +116,256 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "gerar_mapa",
+            "description": (
+                "Renderiza o MAPA INTERATIVO (Leaflet + Satélite) da rodovia no chat, "
+                "exatamente o mesmo componente das telas Diagnóstico/Soluções do painel. "
+                "Aceita FILTROS opcionais: 'classes' (IAP Paragon), 'solucoes' (intervenção Paragon), "
+                "'faixas_iri' (IRI DNIT). SEM filtro = mostra todos os segmentos. "
+                "É sua RESPONSABILIDADE decidir quais filtros aplicar baseado no pedido do usuário "
+                "(ex.: 'só péssimos' = classes=['Péssimo'])."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rodovia": {
+                        "type": "string",
+                        "description": "Código/nome da rodovia (ex.: 'BR-421', 'BR-429', 'BR-435').",
+                    },
+                    "metodologia": {
+                        "type": "string",
+                        "enum": ["paragon", "dnit"],
+                        "description": "Qual matriz colorir o mapa. Default: paragon.",
+                    },
+                    "classes": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["Excelente", "Bom", "++ Regular", "+ Regular", "- Regular", "Mau", "Péssimo"],
+                        },
+                        "description": (
+                            "Filtra Paragon por classes IAP. Ex.: ['Péssimo'] mostra só os trechos péssimos, "
+                            "['Mau', 'Péssimo'] mostra os críticos. Vazio = todos."
+                        ),
+                    },
+                    "solucoes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Filtra Paragon por tipo de solução. Use os nomes exatos: "
+                            "'Reconstrução', 'Fresagem e recomposição', 'Microrrevestimento + Reparo localizado', "
+                            "'Sem intervenção'. Ex.: ['Reconstrução'] mostra só trechos que precisam Reconstrução."
+                        ),
+                    },
+                    "faixas_iri": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["IRI ≤ 3", "3 < IRI ≤ 4", "4 < IRI ≤ 5,5", "IRI > 5,5"],
+                        },
+                        "description": (
+                            "Filtra DNIT por faixa IRI. Ex.: ['IRI > 5,5'] mostra só trechos críticos."
+                        ),
+                    },
+                    "snvs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Filtra por código(s) de SNV/SRE específico(s). "
+                            "Ex.: ['421BRO0040'] mostra SÓ esse trecho. "
+                            "Use sempre que o usuário pedir 'só o SNV X' ou 'apenas o trecho 421BRO0040'."
+                        ),
+                    },
+                },
+                "required": ["rodovia"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gerar_plano_trabalho",
+            "description": (
+                "Gera um PLANO DE TRABALHO real (PDF/Excel/CSV) com a LISTA segmento a segmento "
+                "dos trechos a serem intervindos: SNV, km inicial/final, extensão, IAP/IRI, classe, "
+                "intervenção recomendada e custo, além de resumo por solução. "
+                "Aceita os MESMOS filtros do mapa (classes, soluções, faixas IRI) — use os mesmos "
+                "que foram aplicados na última chamada de gerar_mapa para manter coerência. "
+                "Sempre que o usuário pedir 'plano de trabalho', 'plano de obras', 'lista de trechos', "
+                "'plano de intervenções', use esta tool — NUNCA `exportar_relatorio` para isso."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rodovia": {"type": "string", "description": "Ex.: 'BR-421'."},
+                    "metodologia": {
+                        "type": "string",
+                        "enum": ["paragon", "dnit"],
+                        "description": "Default: paragon.",
+                    },
+                    "classes": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["Excelente", "Bom", "++ Regular", "+ Regular", "- Regular", "Mau", "Péssimo"],
+                        },
+                        "description": "Paragon: filtra por classes IAP. Use os mesmos do mapa.",
+                    },
+                    "solucoes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Paragon: filtra por solução (ex.: ['Reconstrução']).",
+                    },
+                    "faixas_iri": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["IRI ≤ 3", "3 < IRI ≤ 4", "4 < IRI ≤ 5,5", "IRI > 5,5"],
+                        },
+                        "description": "DNIT: filtra por faixa IRI.",
+                    },
+                    "snvs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filtra por código(s) de SNV/SRE (ex.: ['421BRO0040']).",
+                    },
+                    "formato": {
+                        "type": "string",
+                        "enum": ["pdf", "excel", "csv"],
+                        "description": "Default: pdf.",
+                    },
+                },
+                "required": ["rodovia"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "simular_cenario_economico",
+            "description": (
+                "Roda o MESMO pipeline da página Cenário Econômico do painel e devolve os "
+                "NÚMEROS EXATOS: cobertura anual, km atendidos, orçamento faltante, lista "
+                "de SNVs atendidos vs fora do orçamento, custo por ano. "
+                "USE SEMPRE QUE O USUÁRIO MENCIONAR UM ORÇAMENTO ESPECÍFICO "
+                "(ex.: 'com 20 mi', 'se eu tiver R$ 50 mi por ano', 'quanto cubro com X mi'). "
+                "Se o usuário pedir um relatório, passe formato='pdf' (ou 'excel') para também "
+                "gerar o arquivo de download."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rodovia": {"type": "string", "description": "Ex.: 'BR-421'."},
+                    "orcamento_anual_mi": {
+                        "type": "integer",
+                        "description": "Orçamento anual em R$ milhões. Ex.: 20 para R$ 20 mi/ano.",
+                    },
+                    "horizonte_anos": {
+                        "type": "integer",
+                        "description": "Horizonte em anos. Default = 8 anos.",
+                    },
+                    "metodologia": {
+                        "type": "string",
+                        "enum": ["paragon", "dnit"],
+                        "description": "Default: paragon.",
+                    },
+                    "formato": {
+                        "type": "string",
+                        "enum": ["pdf", "excel", "csv"],
+                        "description": "Opcional. Se informado, também gera o arquivo do cenário.",
+                    },
+                },
+                "required": ["rodovia", "orcamento_anual_mi"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "comparar_metodologias",
+            "description": (
+                "Compara Paragon × DNIT para uma rodovia: necessidade, cobertura anual, km atendidos "
+                "e delta. Use quando o usuário pedir 'compare as duas metodologias', 'qual mais cara', "
+                "'qual cobre mais km'. Devolve um dicionário JSON-like que você deve interpretar e "
+                "apresentar em uma resposta executiva (tabela)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rodovia": {"type": "string", "description": "Ex.: 'BR-421'."},
+                    "orcamento_anual_mi": {
+                        "type": "integer",
+                        "description": "Orçamento anual em R$ milhões (default 50).",
+                    },
+                    "horizonte_anos": {
+                        "type": "integer",
+                        "description": "Horizonte de planejamento em anos (default 10).",
+                    },
+                },
+                "required": ["rodovia"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gerar_grafico",
+            "description": (
+                "Renderiza um gráfico PNG (matplotlib) e exibe inline no chat. "
+                "Use quando o usuário pedir um GRÁFICO, COMPARATIVO VISUAL, DISTRIBUIÇÃO, "
+                "PROJEÇÃO ou EVOLUÇÃO. É sua responsabilidade escolher o 'tipo' adequado."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tipo": {
+                        "type": "string",
+                        "enum": [
+                            "distribuicao_iap",
+                            "distribuicao_solucoes",
+                            "custo_por_ano",
+                            "comparativo_rodovias",
+                            "projecao_iap",
+                        ],
+                        "description": (
+                            "Tipo do gráfico: "
+                            "distribuicao_iap (pie/donut % por classe IAP de 1 rodovia); "
+                            "distribuicao_solucoes (bar km por solução, Paragon ou DNIT); "
+                            "custo_por_ano (bar R$/ano, Paragon ou DNIT); "
+                            "comparativo_rodovias (IAP médio + necessidade entre rodovias); "
+                            "projecao_iap (line chart evolução IAP de um SRE)."
+                        ),
+                    },
+                    "rodovia": {
+                        "type": "string",
+                        "description": "Rodovia (ex.: 'BR-421'). Obrigatório para todos os tipos exceto 'comparativo_rodovias'.",
+                    },
+                    "rodovias": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Para 'comparativo_rodovias': lista de rodovias. Omitir = todas.",
+                    },
+                    "metodologia": {
+                        "type": "string",
+                        "enum": ["paragon", "dnit"],
+                        "description": "Para distribuicao_solucoes/custo_por_ano. Default: paragon.",
+                    },
+                    "sre": {
+                        "type": "string",
+                        "description": "Para 'projecao_iap': código do SRE (ex.: '421BRO0040').",
+                    },
+                },
+                "required": ["tipo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "lembrar",
             "description": (
                 "Salva um aprendizado ou preferência na memória de longo prazo do IAGON, para reusar em "
-                "conversas futuras (ex.: 'o diretor foca na BR-364', 'prefere relatórios em PDF'). Use só o útil."
+                "conversas futuras (ex.: 'o diretor foca na BR-429', 'prefere relatórios em PDF'). Use só o útil."
             ),
             "parameters": {
                 "type": "object",
@@ -131,15 +386,23 @@ def _build_messages(context_text: str, history: list[dict]) -> list[dict]:
         + "\n\n═══ MEMÓRIA DE LONGO PRAZO (o que você já aprendeu) ═══\n"
         + memory_text()
     )
-    messages = [
-        {"role": "system", "content": sys},
-        {
+    messages = [{"role": "system", "content": sys}]
+
+    metodologia = methodology_notes()
+    if metodologia:
+        messages.append({
             "role": "system",
             "content": (
-                "DADOS DO RELATÓRIO — use SOMENTE estes números, não invente:\n\n" + context_text
+                "═══ BASE DE CONHECIMENTO — METODOLOGIA PARAGON ═══\n"
+                "(notas editáveis do engenheiro responsável — leia antes de responder "
+                "perguntas sobre a metodologia)\n\n" + metodologia
             ),
-        },
-    ]
+        })
+
+    messages.append({
+        "role": "system",
+        "content": "DADOS DO RELATÓRIO — use SOMENTE estes números, não invente:\n\n" + context_text,
+    })
     messages.extend(history)
     return messages
 
