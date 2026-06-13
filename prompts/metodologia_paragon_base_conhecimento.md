@@ -12,19 +12,17 @@
 A engenharia rodoviária dedicou grande esforço a desenvolver ferramentas cibernéticas para dimensionar reforços estruturais em pavimentos asfálticos (análises de sistemas estratificados elásticos submetidos a tensões e deformações). Entretanto, essas ferramentas falham em caracterizações excepcionais dos materiais constituintes do reforço estrutural pavimento-solo de fundação, principalmente porque:
 
 - Os índices de caracterização habituais (como IRI e flechas nas trilhas de roda) **têm demanda reduzida e não são específicas** para o tratamento de defeitos diversos da pista.
-- As proposições de tratamento de defeitos parcos dados são consistentemente primárias por misignar patologias e parâmetros de comportamento de natureza completamente distintas (muitas vezes por fronteiras cabalísticas).
+- As proposições de tratamento baseadas em poucos índices tendem a ser primárias, por agregar sob um mesmo critério patologias e parâmetros de comportamento de naturezas completamente distintas.
 - Os índices de caracterização, usualmente processados conjuntamente em **ambas as faixas de tráfego**, propõem-se a estabelecer uma classificação conceitual nos estados do pavimento, por meio de uma classificação para "**Segmentos homogêneos**" definidos a propósito de poder calcular um conceito estrutural representativo. Na realidade, as definições lavradas não correspondem à definição de valores modulares, na sequência de raciocínio, vale destacar que esta estratégia simplesmente viabiliza o dimensionamento mecanístico de reforços estruturais, pautado na definição dos esforços atuantes em camadas de reforço que externam espessuras crescentes (de 0,5 em 0,5 cm, até 20 cm ou mais — e no cotejamento contra os esforços resistentes máximos admissíveis).
 
 ### 1.2. Conceitos centrais da Metodologia Paragon
-A Metodologia Paragon foi desenvolvida com o objetivo prático de definir um sistema de codificação numérica integrada e estabelecer uma linguagem comum e universal para a **caracterização das condições vigentes**, do tráfego, da constituição dos pavimentos e camadas, independentemente das particularidades dos materiais constituintes ou da região onde se localizam.
+A Metodologia Paragon foi desenvolvida com o objetivo prático de criar um **sistema de codificação numérica integrada** e uma **linguagem comum e universal** para a caracterização das condições vigentes do pavimento — tráfego, constituição das camadas e estado de degradação — independentemente dos materiais constituintes ou da região.
 
-No âmbito do trabalho metodológico que caráter exortativo, define-se, por meio de um algoritmo de ordenação genética, **conjuntos específicos contemplados por distintas famílias de características físicas**, um *Código de Sanidade do pavimento* — estabelecidos cumulativamente em relação a cada estado de degradação do pavimento, qual define, com a devida acuidade, o seu verdadeiro diagnóstico.
+A partir dessa codificação define-se um **Código de Sanidade do pavimento**, construído cumulativamente em função de cada estado de degradação, que traduz o diagnóstico do trecho. A classificação aplica-se ao conjunto integral do pavimento, distinguindo os dois tipos de revestimento: **Concreto Asfáltico (CA)** e **Tratamento Superficial (TS)**.
 
-Os critérios de avaliação e diagnóstico de pavimentos asfálticos que regem a sua **Metodologia Paragon** são apoiados em pareceres técnicos rico desenvolvidos, sustentados nos princípios básicos concebidos para a definição dos estados de sanidade correspondentes a cada família de característica física e aos processos pensados para uma sumarização adequada das opções em conjunto, estabelecida uma classificação para conjunto integral do pavimento (Concreto Asfáltico - CA ou Tratamento Superficial - TS).
+O levantamento de campo é feito pelo *Multifunction Vehicle* (Figura 2) — conjunto de instrumentos de auscultação que operam de forma integrada e simultânea — e pelo *Laser Crack Measurement System II – Pavement Scanner* (Figura 3), equipamento autossuficiente com **17 módulos de avaliação**.
 
-A metodologia desenvolveu-se em procedimento analítico para o cálculo de reforços de pavimentos com uso da **Metodologia Paragon** ou *Multifunction Vehicle (Figura 2)*, dotado de um conjunto de instrumentos de auscultação de pavimentos que operam de forma integrada e simultânea, e o *Laser Crack Measurement System II – Pavement Scanner (Figura 3)*, dotado de equipamento autossuficiente dotado de **17 módulos de avaliação**.
-
-Parte dos instrumentos coletados propiciam a identificação e quantificação das degradações superficiais, os quais são tão precisos para identificar as deformações permanentes, mas com a equipamento são adiante devidamente descritos.
+Parte dos instrumentos identifica e quantifica as **degradações superficiais**; outra parte mede as **deformações permanentes** (ambas descritas adiante).
 
 ### 1.3. Equipamentos integrantes do *Multifunction Vehicle* (Figura 2)
 - High Speed Laser Camera
@@ -47,11 +45,11 @@ Parte dos instrumentos coletados propiciam a identificação e quantificação d
 
 No âmbito da metodologia de avaliação de pavimentos asfálticos, a proposição primária consiste em **promover, antes de quaisquer providências, uma visita de inspeção técnica ao campo** com o objetivo de adquirir uma sensibilidade maior sobre as condições de serventia vigentes, a natureza das principais degradações existentes, a hierarquia preponderante do sistema envolvido, as características das drenagens vigentes e sobre a composição da frota solicitante.
 
-A análise desse espectro envolverá, atrelada a uma visão pragmática, que possibilite o levantamento, faculta o despertar de uma mística que possibilita o sentido do sucesso de todo o empreendimento, particularmente no que toca à qualidade dos levantamentos e à fiadora das soluções de restauração a serem propostas.
+Essa análise, atrelada a uma visão pragmática, é determinante para o sucesso do empreendimento — particularmente no que toca à qualidade dos levantamentos e à consistência das soluções de restauração propostas.
 
 No desenvolvimento de um *Projeto de Restauração* considera-se de importância superior à obtenção de **todas as informações disponíveis acerca do histórico do pavimento existente, dos elementos relativos à sua constituição e aos materiais empregados**, das intervenções de manutenção e reabilitação já realizadas, às respectivas datas de entrega e periodicidade etc.
 
-Considera-se: para obter informações com maior nível de detalhe, é imprescindível promover entrevistas com os Engenheiros Residentes/Regionais das rodovias, subsidiados pelos procedimentos sem conjunto operacional, podendo-se destacar dentre eles: existentes e escalecedoras, organizando o pavimento original e largura da pista e dos acostamentos.
+Para obter informações com maior nível de detalhe, é imprescindível promover **entrevistas com os Engenheiros Residentes/Regionais** das rodovias, levantando dados como a constituição do pavimento original e a largura da pista e dos acostamentos.
 
 **Documentos e informações de interesse:**
 - Constituição do pavimento e acostamentos.
@@ -70,25 +68,17 @@ Considera-se: para obter informações com maior nível de detalhe, é imprescin
 
 ### 3.1. Considerações Gerais (2.2.1)
 
-O princípio basilar da Metodologia Paragon aproxima-se do que aqui se diagnóstico do pavimento esteja-se de fundamental para definição do paramento único, determinado com base no tratamento conjunto das manifestações de ruína que, sem se ter conta, são formuladas em conjunto, suas naturezas, magnitudes individualizadas, suas associações, distância entre si, tempos e percentuais de ocorrência.
+O princípio basilar da Metodologia Paragon é diagnosticar o pavimento por um **tratamento conjunto das manifestações de ruína**, considerando suas naturezas, magnitudes individuais, associações entre si, distâncias, tempos e percentuais de ocorrência — em vez de avaliar cada defeito isoladamente.
 
-Na busca de uma solução, a opção que se apresenta foi a de contemplar uma forma particularizada e independente, **distintas famílias de manifestações de ruína que, em conjunto, traduzem a serventia do pavimento — degradações superficiais e deformações permanentes — associadas ao nível de eficácia que vigora experimentada pelo pavimento bajo os carros do tráfego**.
+A avaliação contempla, de forma particularizada, as **duas famílias distintas de manifestações de ruína** que, em conjunto, traduzem a serventia do pavimento: as **degradações superficiais** e as **deformações permanentes**, associadas ao nível de desempenho do pavimento sob o tráfego. Em princípio, ambas devem ser alvo de intervenções corretivas, preliminares às obras de restauração funcional.
 
-Dessa modo, espera-se conjuntamente, fundamentalmente entre si os índices de detecção das distintas famílias de degradação, a consideração de que ambos devem **pelo menos em principio, ser alvo**, perfeitamente de intervenções comborrativas preliminares às obras de restauração funcional pré-estabelecida do pavimento existente.
+O método fundamenta-se em um procedimento prático apoiado em **codificação numérica integrada**, estabelecendo uma linguagem comum e universal para caracterizar os pavimentos independentemente de idade, composição estrutural, tráfego suportado e localização geográfica.
 
-Desfase, no âmbito da presente metodologia e a partir da consignação de diferentes manifestações de ruína, sem se ter conta, esta forma individualizada — suas naturezas, magnitudes e percentuais de ocorrência.
-
-A pesquisa fundamenta-se, portanto, na busca de um procedimento prático e codificação numérica integrada, como o estabelecimento de uma linguagem comum e universal, tradutora da caracterização dos pavimentos analisados, independentemente de suas idades, composições estruturais, tráfegos suportados e localizações geográficas.
-
-Adicionalmente, com o caráter integrante de modo a permitir a detecção das diferentes famílias de degradação individualizadas das suas associações, da deformabilidade elástica, um único genérico capaz de **permitir a definição do estado de sanidade externado pelo pavimento, amparado em atributos qualificados para processar seu diagnóstico**.
-
-Assim, foram consideridos os procedimentos por estaca — por preliminarmente considerados em conjunto todos os índices conceituais, **artifício que possibilitará a definição de estado de sanidade**, partindo de identificadores característicos, artifício esse que se qualifica para permitir a definição em conjunto da depuração, podendo destacar e considerar dentre eles os mais comprometidos e do estado de degradação, condição que impõe ao projetista um conjunto de valores específicos.
+A partir da detecção das diferentes famílias de degradação (e da deformabilidade elástica), define-se o **estado de sanidade** externado pelo pavimento, amparado em atributos qualificados para o diagnóstico. O cálculo é feito **por estaca**, considerando em conjunto os índices conceituais e destacando os trechos mais comprometidos.
 
 ### 3.2. Avaliação das Características de Degradação Superficial (2.2.2)
 
-Na busca de um procedimento novo, que se mostrasse competente bastante para definir os distintos graus de degradação e fornecer os subsídios necessários ao acompanhamento das medidas corretivas ideais, conceberam-se as proposições novas para subsidiar a base de sustentação, denominada *"Metodologia Paragon"*, pelo Prof. Armando Martins Pereira, das proposições genéticas (do tipo *"Método Expedito de Avaliação Paragon — Um Fleximela e Semi-Rigidos"*) — se apresentava com qualificação excepcional.
-
-Alicerçada pelos pressupostos do mestre, **promovam-se inicialmente a identificação e o agrupamento dos mais distintas manifestações de ruína de caráter funcional ocorrentes em um pavimento asfáltico, em famílias agrupadas de acordo com suas naturezas e ordenadas em ações de sua origem, manifestação e magnificância**. Aplicou-se procedimento de modo que se promovesse, dentro do universo de manifestações ou degradações, fossem definidos com os percentuais a serem de fato considerados, por meio de simples e estabeleceu-se as respectivas codificações.
+Para diagnosticar os distintos graus de degradação e subsidiar as medidas corretivas, a *Metodologia Paragon* — concebida pelo Prof. Armando Martins Pereira (no âmbito do *"Método Expedito de Avaliação Paragon — Pavimentos Flexíveis e Semi-Rígidos"*) — promove inicialmente a **identificação e o agrupamento das distintas manifestações de ruína de caráter funcional** de um pavimento asfáltico, organizadas em **famílias** segundo suas naturezas, origem, manifestação e magnitude. Para cada manifestação definem-se os percentuais a considerar e estabelecem-se as respectivas **codificações**.
 
 ### 3.3. Multifunction Vehicle
 
@@ -124,9 +114,9 @@ Com o emprego do "Mouse" — processa-se a demarcação gráfica de cada manifes
 
 ### 3.5. *Laser Crack Measurement System II — Pavement Scanner*
 
-O **Laser Crack Measurement System II (LCMS-II)** é o equipamento que consiste em um sistema de escaneamento do perfil transversal de alta resolução, que utiliza dois perfiladores a laser para gerar perfis 3D completos com 4.160 metros de largura. Na realidade, trata-se de um *"Pavement Scanner"* que processa a varredura contínua da superfície do pavimento através da leitura de **28.000 perfis transversais à razão de 4,1m por segundo (correspondendo a uma velocidade de operação de até 100 km/h) — resultando em uma coleta de 116 milhões de pontos a cada segundo (Figura 7);** os dados coletados a bordo do veículo de inspeção e as especificações técnicas dos LCMS-II estão indicados no **Quadro 3**.
+O **Laser Crack Measurement System II (LCMS-II)** é um sistema de escaneamento do perfil transversal de alta resolução que utiliza dois perfiladores a laser para gerar perfis 3D completos com **4.160 pontos transversais** (resolução de 1 mm). Trata-se de um *"Pavement Scanner"* que processa a varredura contínua da superfície do pavimento, lendo **28.000 perfis longitudinais por segundo e coletando até 116 milhões de pontos por segundo**, a uma velocidade de operação de até 100 km/h (Figura 7). Os dados coletados e as especificações técnicas do LCMS-II constam do **Quadro 3**.
 
-No âmbito do procedimento de escaneamento, as resoluções às distâncias da leitura LCMS são altíssimas, particularmente para as larguras de altíssimas particularidades das suturas, que permitem a sutileza das informações que se converte em uma imagem virtual, tão consistente que permite a detecção de todas as fissuras existentes. O levantamento dos LCMS-II são processados a altas velocidades — até 116 km/h — cabendo do software promover a velocidade de processamento.
+A altíssima resolução do LCMS-II permite converter as leituras em uma imagem virtual consistente o suficiente para detectar todas as fissuras existentes, inclusive as de pequena largura. O levantamento é feito em alta velocidade de operação, cabendo ao software o pós-processamento dos dados.
 
 #### 3.5.1. **Quadro 3** — Especificações LCMS-I e LCMS-II (Pavement Scanner)
 
@@ -143,7 +133,7 @@ No âmbito do procedimento de escaneamento, as resoluções às distâncias da l
 
 Estabelecimento específico de áreas degradadas, que distintas podem ocorrer várias vezes ao longo de uma mesma estaca ou até mesmo se repetirem no âmbito de uma mesma seção métrica Paragon (artifício de quantificação das fissuras), no âmbito da *Metodologia Paragon (Tabela TS3)*, localização e quantificação das fissuras no LCMS-II, o processado por meio de inteligência artificial — IA.
 
-Para um procedimento de análise mais elaborada, desenvolve-se sendo um procedimento minucioso e detalho, qual consiste em concluir o universo de análises efetuada por ele em sua extensão correspondente, ela é cada estaca por meio da medida correspondente, ela é cada extensão na sua extensão correspondente, ela é cada estaca por meio da medida exata requerida. Assim sendo, procura-se promover a definição do número médio de defeitos por estaca, considerando-se trechos de 20m com 4 estacas, de modo a obter um real fidedignidade desta definição, na real do tráfego.
+A análise é detalhada **por estaca**: em cada estaca de 20 m, contabiliza-se a ocorrência dos defeitos ao longo dos semi-intervalos de 1 m (universo de 20 unidades). Busca-se assim a definição fidedigna do número e da frequência de defeitos por estaca — base para o cálculo do parâmetro a seguir.
 
 A população analisada (20 unidades). Como a frequência relativa é definida pela relação entre o número de vezes em que o defeito se torna ocorrente em relação ao número de eventos que compõe o universo, tem-se:
 
@@ -213,23 +203,24 @@ Os defeitos são organizados em famílias e sub-famílias com codificação alfa
 ## 5. CÁLCULO DO ISG — ÍNDICE DE SEVERIDADE GLOBAL
 
 ### 5.1. Lógica conceitual
-Não trata-se da soma dos defeitos da estaca a serem a serem submetidos a soma dos defeitos com a estaca corretiva, mas sim do tratamento de **ponderações sequenciais distintas associadas a tipologias diferentes (FC.1, FC.2, FC.3) — que devem ser consideradas pela expressão**:
+O ISG_OS **não** é a simples soma dos defeitos da estaca: cada defeito entra **ponderado pelo seu fator de gravidade** (peso de responsabilidade), e tipologias diferentes (FC.1, FC.2, FC.3) recebem ponderações distintas. O índice é dado pela expressão:
 
 ```
-ISG_OS = Σ f_e × ISG_OS  (somatório por estaca)
+ISG_OS = Σ (f_e,i × p_i)   (somatório por estaca, sobre cada defeito i)
 ```
 
 > Onde:
-> - **f_e** = frequência relativa de ocorrência por semi-intervalos de 1,0 m afetados (universo de 20 unidades por estaca de 20m).
-> - **ISG_OS** = índice de severidade global por estaca.
+> - **f_e,i** = frequência relativa de ocorrência do defeito *i*, por semi-intervalos de 1,0 m afetados (universo de 20 unidades por estaca de 20 m).
+> - **p_i** = fator de ponderação (peso de responsabilidade) do defeito *i* — ver Quadros 4 (CA) e 5 (TS).
+> - **ISG_OS** = índice de severidade global da estaca (resultado do somatório).
 > - O cálculo é feito **por estaca** (e não para o trecho como um todo), permitindo identificar pontualmente as áreas mais críticas.
 
-### 5.2. Regra de não-duplicação (sobre o mesmo grupo)
-Quando, em uma mesma estaca, ocorrerem **simultaneamente degradações de um mesmo grupo (ex.: fissuras enquadradas nos tipos FC.1, FC.2, FC.3), na contabilização do ISG_OS deve-se ressaltar que, quando constatadas ocorrências simultâneas de degradações enquadradas no mesmo grupo (exemplo: tipo FC.1, FC.2, FC.3), no cálculo do ISG_OS, só se deve considerar a mais grave (FC-3)** — devem ser desconsideradas anotadas, mas para efeitos de ponderação no cálculo do ISG_OS, **só se deve considerar a mais grave (FC-3)**.
+### 5.2. Regra de não-duplicação (dentro do mesmo grupo)
+Quando, em uma mesma estaca, ocorrerem **simultaneamente degradações de um mesmo grupo de fissuras (FC.1, FC.2 e FC.3), no cálculo do ISG_OS considera-se apenas a mais grave (FC.3)**. As demais ficam **anotadas em relatório** (registro histórico), mas **não somam** no índice.
 
-A consideração desse condicionamento em face da concepção das escalas qualquer que seja o estado de degradação ou de severidade adotada, constata-se que **uma vez que correspondente índice de severidade global - ISG_OS, é sempre representada por componente de uma mesma magnitude, e qualquer ela um valor único, jamais um composto de várias parcelas — assim sendo, são situações distintas, induzem a obtenção de valores "médios" não aderentes à condição que impõe ao projetista um conjunto de valores específicos**.
+A regra evita índices "médios" inconsistentes: o ISG_OS deve representar a condição pela sua manifestação **mais severa** — um valor único e específico, não uma composição de parcelas de um mesmo grupo, que distorceria o diagnóstico.
 
-Quanto ao quesito das características funcionais, algumas técnicas têm sido desenvolvidas, podendo-se citar realmente como metodologias aplicadas e admissíveis nos métodos pelo Departamento Nacional de Infraestrutura de Transportes (DNIT) – o critério de procedimento aplicado nos EUA fundamentado no *Present Serviceability Index – (PSI)*.
+Para as características funcionais, a referência internacional usual é o critério norte-americano baseado no *Present Serviceability Index (PSI)*, também adotado como admissível pelo Departamento Nacional de Infraestrutura de Transportes (DNIT).
 
 ### 5.3. Fórmulas de cálculo (Tratamento Superficial - TS)
 
@@ -403,11 +394,11 @@ A Metodologia Paragon adota uma escala de cinco níveis para a qualificação do
 | **Mau** | 80 – 160 | 120 – 240 |
 | **Péssimo** | 160 – 320 | 240 – 480 |
 
-> Acreditando ser esta disciplina matemática-procurou-se de seguidamente da forma totalmente independente, estudar quais e quantos níveis de sanidade poderiam ser concebidos, definindo-se que cinco seriam suficientes para uma boa caracterização, considerando bastantes que para definir os estados de sanidade dos pavimentos (**Figura 12**).
+> Estudou-se quantos níveis de sanidade seriam necessários, definindo-se que **cinco** são suficientes para uma boa caracterização dos estados de sanidade dos pavimentos (**Figura 12**).
 
 ### 7.3. Conceito da escala AASHTO/PSI (referência comparativa)
 
-A escala AASHTO (Ottawa-Illinois - 1960) evidenciou na sua referência ao primeiro de cinco intervalos de variação do ISG_OS — e os respectivos estados de sanidade. Os índices de aptidão presente (**PSI – *Present Serviceability Index***) até hoje preconizados pela atual *American Association of State Highway and Transportation Officials – AASHTO*.
+A escala AASHTO (Ottawa-Illinois, 1960) introduziu o conceito de **serventia** por meio do **PSI – *Present Serviceability Index***, até hoje preconizado pela *American Association of State Highway and Transportation Officials (AASHTO)*. Serve de referência comparativa para os estados de sanidade da Metodologia Paragon.
 
 #### **Quadro 10** — Conceitos de Serventia AASHTO (PSI – Present Serviceability Index)
 
@@ -419,9 +410,9 @@ A escala AASHTO (Ottawa-Illinois - 1960) evidenciou na sua referência ao primei
 | **Mau** | 2 – 1 |
 | **Péssimo** | 1 – 0 |
 
-> Verifica-se, entretanto, que enquanto os valores de parâmetro Z policiam a gravidade dos estados de sanidade em ordem crescente, a AASHTO propõe a qualificação para sua conceituação, da sequência decrescente, traduzindo a sua proposição em uma escala decrescente para sanidade, condicionando para um conceito conceitualmente desenvolvido pela Metodologia Paragon — torna-a similar à escala AASHTO.
+> Observação: o parâmetro **Z_2x** ordena a gravidade em **ordem crescente** (0 = excelente, 5 = péssimo), enquanto o **PSI/AASHTO** usa escala **decrescente** (5 = excelente, 0 = péssimo). A conversão a seguir torna a Metodologia Paragon comparável à AASHTO.
 
-O processo de inversão, de fácil resolução, consiste em algébricamente uma estrategicamente estabelecido em termos qualitativos, podem manter a mesma qualificação. Mas, **5,0 - Z_2x**, qual se denominado em ICDS — "*Índice da Condição de Degradação Superficial*".
+A inversão é simples: define-se **ICDS = 5,0 − Z_2x**, o *"Índice da Condição de Degradação Superficial"*, que passa a variar de 0 (péssimo) a 5 (excelente) — na mesma direção do PSI.
 
 ---
 
@@ -463,9 +454,9 @@ O processo de inversão, de fácil resolução, consiste em algébricamente uma 
 ## 9. AVALIAÇÃO DAS CARACTERÍSTICAS DE DEFORMAÇÃO PERMANENTE (2.2.3)
 
 ### 9.1. Considerações iniciais
-Pesquisas realizadas em literatura especializada não evidenciam a existência de um método para a avaliação conjunta de um pavimento integrada de pavimentos e seus respectivos comportamentos, ou de comportamento estrutural de pavimentos asfálticos e os efeitos de cada componente.
+A literatura especializada não evidencia um método consolidado para a avaliação **conjunta** do comportamento estrutural do pavimento e dos efeitos de cada um de seus componentes na deformação permanente.
 
-De forma geral, verifica-se uma tendência por simplesmente ignorar — em uma das misturas asfálticas tipos de defeitos permanentes acumulados como comparativos traduções com misigenagens excessivas para deformações permanentes — exemplo, **a miscigenação das características permanentes e desigualadades planas — vinculadas à uniformidade longitudinal**.
+De forma geral, há uma tendência a tratar de modo simplificado os defeitos de deformação permanente acumulados, sem separar adequadamente suas causas — por exemplo, misturando as **deformações permanentes** (afundamentos de trilha de roda) com as irregularidades ligadas à **uniformidade longitudinal**.
 
 ### 9.2. IRI — *International Roughness Index*
 
@@ -504,9 +495,9 @@ Nos EUA, o cálculo do *Present Serviceability Index (PSI)* contempla concomitan
 
 Em síntese, as características de deformação permanente têm sido apreciadas, normalmente, por meio de medições das irregularidades longitudinais e transversais, feitas em ambas as trilhas de roda.
 
-Na avaliação da irregularidade longitudinal busca-se aquilar o nível de deformações permanentes existentes por meio do parâmetro *International Roughness Index (IRI)*, o qual é considerado qualificado para "traduzir" de forma plena, toda a sorte de irregularidades existentes, com aceitação do grau de comprometimento — desligadamente associadas à conjugação, corrugação, emporadamento, estufamentos, desintegração, desnívelamento etc.
+Na avaliação da **irregularidade longitudinal**, mede-se o nível de deformações permanentes pelo parâmetro *International Roughness Index (IRI)*, considerado capaz de "traduzir" toda a sorte de irregularidades existentes — corrugação, empolamento, estufamentos, desintegração, desnivelamento etc.
 
-A avaliação da irregularidade transversal procura-se definir a magnitude das deformações permanentes por meio da medição pura e simples das flechas nas trilhas de roda (FwwL), das considerações com auxílio de uma régua de 1,20 m. **Esta vertente clássica, no Brasil, vinculada ao sabido Professor Armando Martins Pereira, tem o objetivo de apreciar, mesmo que de forma indireta, a irregularidade longitudinal estabelecida pelo pavimento.**
+Na avaliação da **irregularidade transversal**, define-se a magnitude das deformações permanentes pela medição das **flechas nas trilhas de roda**, feita com auxílio de uma régua de 1,20 m. Essa vertente clássica, no Brasil, está associada ao Professor Armando Martins Pereira.
 
 ### 9.4. Os três processos de deformação permanente
 Os três primeiros processos, que se caracterizam por deformações permanentes excessivas com reduções modulares, derivam fundamentalmente do número de repetições, da magnitude das cargas impostas, ao expoente da resistência das misturas, da magnitude das cargas, das tensões, das condições granulométricas, das características dos materiais e da efetividade dos seus processos de compactação.
@@ -532,9 +523,9 @@ Deformações permanentes, sem variações no volume, associadas a estabilidades
 
 ### 10.1. Resultados (forma de apresentação)
 
-Os resultados podem ser tratados em relação à faixa de tráfego como um todo ou somente nas trilhas de roda, no entanto, nos procedimentos adotados pela metodologia, tem-se constituindo uma prática usual sob percentuais previstos para cada faixa de tráfego, expressando os resultados por estaca, por meio do *Levantamento Específico das Áreas Degradadas (LEAD)*, com a aplicação do "*zoom*" e por meio de avanços de retroprocessos automáticos.
+Os resultados podem ser tratados em relação à faixa de tráfego como um todo ou apenas nas trilhas de roda. A prática usual da metodologia é expressar os resultados **por estaca e por faixa de tráfego**, com base no *Levantamento Específico das Áreas Degradadas (LEAD)*.
 
-Após reflexões filosóficas e algumas análises matemáticas, optou-se por intervalos globais de ambos os revestimentos, caso considerando ambos os revestimentos em termos de área afetada, abrangendo, de maneira magistral as informações apuradas dos principais parâmetros, a distribuição de níveis de sanidade regidos por uma lei logarítmica de base 2, ou seja, por uma progressão geométrica de razão igual a 2, traduzindo no **Quadro 6**.
+Para ambos os revestimentos, a distribuição dos níveis de sanidade é regida por uma **lei logarítmica de base 2** (progressão geométrica de razão 2), conforme consolidado no **Quadro 6**.
 
 ### 10.2. Indicação de procedimentos
 - A consideração dos defeitos correntes encontrados, por meio dos processos de varredura ao longo do trecho, decidindo os levantamentos efetuados por meio dos sistemas dotados de inteligência artificial.
