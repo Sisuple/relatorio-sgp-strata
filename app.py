@@ -5537,6 +5537,19 @@ def _sentido_label(nome: str) -> str:
     return str(nome)
 
 
+def _paragon_sentido_keys(road: str):
+    """(cr_key, de_key, labels) se a rodovia tem análises Paragon CRESCENTE e
+    DECRESCENTE; senão None. Usado para mostrar mapa, distribuição e segmentação
+    por sentido."""
+    scenarios = get_available_scenarios(road, "Paragon")
+    labels = {s["key"]: s["cenario"] for s in scenarios}
+    cr = next((s["key"] for s in scenarios
+               if "crescente" in s["cenario"].lower()
+               and "decrescente" not in s["cenario"].lower()), None)
+    de = next((s["key"] for s in scenarios if "decrescente" in s["cenario"].lower()), None)
+    return (cr, de, labels) if (cr and de) else None
+
+
 def _two_sentido_map_segments(road: str):
     """Se a rodovia tem análises Paragon CRESCENTE e DECRESCENTE, devolve os
     segmentos das duas, levemente deslocados (uma camada por sentido) e marcados
@@ -5775,13 +5788,44 @@ def main() -> None:
         )
     else:
         render_overview_map(data["segments"], metrics["extension_km"])
-    render_iap_distribution(data["distribution"], metrics["iap_average"])
-    st.markdown("<div style='height: 32px'></div>", unsafe_allow_html=True)
-    filtered_diagram, km_range = render_iap_linear_zoomable(
-        data["linear_diagram"], key="paragon_linear_zoom"
-    )
-    with st.expander("Mostrar detalhes técnicos (ICDS, ICDP, ICDE)"):
-        render_condition_linear(filtered_diagram, km_range=km_range)
+    _sentidos = _paragon_sentido_keys(selected_road)
+    if _sentidos:
+        _cr, _de, _slabels = _sentidos
+        # Distribuição IAP por sentido (lado a lado).
+        _dist_cols = st.columns(2)
+        for _col, _k in zip(_dist_cols, (_cr, _de)):
+            with _col:
+                st.markdown(
+                    f"<div style='font-weight:700;color:#cbd5df;margin:4px 0 2px'>"
+                    f"◆ {_sentido_label(_slabels[_k])}</div>",
+                    unsafe_allow_html=True,
+                )
+                _d = get_overview_data(selected_road, scenario_key=_k)
+                render_iap_distribution(_d["distribution"], _d["metrics"]["iap_average"])
+        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+        # Segmentação por sentido (uma faixa por sentido).
+        for _k in (_cr, _de):
+            _d = get_overview_data(selected_road, scenario_key=_k)
+            st.markdown(
+                f"<div style='font-weight:700;color:#cbd5df;margin:8px 0 4px'>"
+                f"Segmentação · ◆ {_sentido_label(_slabels[_k])}</div>",
+                unsafe_allow_html=True,
+            )
+            _filt, _kmr = render_iap_linear_zoomable(
+                _d["linear_diagram"], key=f"paragon_linear_{_k}"
+            )
+            with st.expander(
+                f"Detalhes técnicos (ICDS, ICDP, ICDE) · {_sentido_label(_slabels[_k])}"
+            ):
+                render_condition_linear(_filt, km_range=_kmr)
+    else:
+        render_iap_distribution(data["distribution"], metrics["iap_average"])
+        st.markdown("<div style='height: 32px'></div>", unsafe_allow_html=True)
+        filtered_diagram, km_range = render_iap_linear_zoomable(
+            data["linear_diagram"], key="paragon_linear_zoom"
+        )
+        with st.expander("Mostrar detalhes técnicos (ICDS, ICDP, ICDE)"):
+            render_condition_linear(filtered_diagram, km_range=km_range)
 
 
 if __name__ == "__main__":
