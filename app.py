@@ -2759,8 +2759,13 @@ def _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, a
 # ----------------------------------------------------------------------------
 # Comparativo Paragon × DNIT (dentro de Cenário Econômico)
 # ----------------------------------------------------------------------------
-def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int) -> dict:
-    """Roda o pipeline Paragon e devolve métricas + budget agregado por ano."""
+def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int, attended_budget_mi: int | None = None) -> dict:
+    """Roda o pipeline Paragon e devolve métricas + budget agregado por ano.
+
+    `attended_budget_mi` (R$ mi) = orçamento usado em "trechos atendidos"/cobertura.
+    None → 1 ano (`annual_budget`, carteira anual = tela Cenário Econômico).
+    Comparativo/compare passam `annual_budget * horizon` (escopo do horizonte).
+    """
     scenarios = get_available_scenarios(road)
     if not scenarios:
         return {"available": False}
@@ -2782,9 +2787,11 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int) -> di
     else:
         total_need = float(snv_budget_table["Custo econômico"].sum()) if not snv_budget_table.empty else 0.0
 
-    # Comparativo: usa o orçamento do HORIZONTE (anual × anos). Senão, um SNV cujo
-    # custo de N anos não cabe em 1 ano nunca é "atendido" (gerava 0 km na Paragon).
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget * horizon)
+    # Orçamento de "atendidos"/cobertura: o caller decide. None = 1 ano (carteira anual,
+    # = tela Cenário Econômico). Comparativo/compare passam anual×horizonte (senão um SNV
+    # multi-ano nunca cabe em 1 ano → gerava 0 km na Paragon).
+    eff_budget_mi = attended_budget_mi if attended_budget_mi is not None else annual_budget
+    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, eff_budget_mi)
     attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
@@ -2804,7 +2811,7 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int) -> di
     return {
         "available": True,
         "total_need": total_need,
-        "annual_coverage": min((annual_budget * horizon * 1_000_000) / total_need * 100, 100) if total_need else 0,
+        "annual_coverage": min((eff_budget_mi * 1_000_000) / total_need * 100, 100) if total_need else 0,
         "attended_km": attended_km,
         "scope_km": scope_km,
         "custo_por_ano": custo_por_ano,
@@ -2813,8 +2820,11 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int) -> di
     }
 
 
-def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int) -> dict:
-    """Roda o pipeline DNIT e devolve métricas + budget agregado por ano."""
+def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended_budget_mi: int | None = None) -> dict:
+    """Roda o pipeline DNIT e devolve métricas + budget agregado por ano.
+
+    `attended_budget_mi`: ver _compute_paragon_pipeline (None = carteira de 1 ano).
+    """
     data = get_dnit_economic_data(road)
     if not data.get("available") or data["table"].empty:
         return {"available": False}
@@ -2847,9 +2857,11 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int) -> dict:
         .sort_values("Prioridade")
         .reset_index(drop=True)
     )
-    # Comparativo: usa o orçamento do HORIZONTE (anual × anos). Senão, um SNV cujo
-    # custo de N anos não cabe em 1 ano nunca é "atendido" (gerava 0 km na Paragon).
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget * horizon)
+    # Orçamento de "atendidos"/cobertura: o caller decide. None = 1 ano (carteira anual,
+    # = tela Cenário Econômico). Comparativo/compare passam anual×horizonte (senão um SNV
+    # multi-ano nunca cabe em 1 ano → gerava 0 km na Paragon).
+    eff_budget_mi = attended_budget_mi if attended_budget_mi is not None else annual_budget
+    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, eff_budget_mi)
     attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
@@ -2869,7 +2881,7 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int) -> dict:
     return {
         "available": True,
         "total_need": total_need,
-        "annual_coverage": min((annual_budget * horizon * 1_000_000) / total_need * 100, 100) if total_need else 0,
+        "annual_coverage": min((eff_budget_mi * 1_000_000) / total_need * 100, 100) if total_need else 0,
         "attended_km": attended_km,
         "scope_km": scope_km,
         "custo_por_ano": custo_por_ano,
@@ -3056,7 +3068,7 @@ def _render_comparativo_page(road: str, scenario_key: str | None) -> None:
     with horizon_col:
         _filter_caption("Horizonte")
         horizon = st.slider(
-            "Horizonte (anos)", 1, 30, 10, 1,
+            "Horizonte (anos)", 1, 30, _ECONOMIC_DEFAULT_HORIZON, 1,
             key=f"cmp_horizon_{road}",
             label_visibility="collapsed",
         )
@@ -3071,8 +3083,8 @@ def _render_comparativo_page(road: str, scenario_key: str | None) -> None:
         st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
 
     # Pipelines paralelos.
-    paragon = _compute_paragon_pipeline(road, annual_budget, horizon)
-    dnit = _compute_dnit_pipeline(road, annual_budget, horizon)
+    paragon = _compute_paragon_pipeline(road, annual_budget, horizon, attended_budget_mi=annual_budget * horizon)
+    dnit = _compute_dnit_pipeline(road, annual_budget, horizon, attended_budget_mi=annual_budget * horizon)
 
     if not paragon.get("available") or not dnit.get("available"):
         st.info("Pipeline incompleto: uma das metodologias não retornou dados.")
@@ -4290,6 +4302,58 @@ def _render_network_overview(diagnosis: str) -> None:
 
 
 # ──────────────────────────── IAGON (assistente de IA) ────────────────────────────
+def _cond_class(v: float) -> str:
+    """Classe dos índices estruturais 0–5 (maior = melhor condição) — mesma régua do painel."""
+    return ("Excelente" if v >= 4.5 else "Bom" if v >= 3.5 else
+            "Regular" if v >= 2.5 else "Mau" if v >= 1.5 else "Péssimo")
+
+
+def _iagon_enrich_detail(road: str) -> dict:
+    """Dados extras p/ o contexto da IAGON, via funções já cacheadas do relatório:
+    (a) por sentido CRESCENTE/DECRESCENTE (IAP, extensão, necessidade 8a);
+    (b) sub-índices estruturais ICDS/ICDP/ICDE (média ponderada por extensão);
+    (c) deflexão média (mm). Cada item é defensivo — falha isolada não derruba o contexto."""
+    out: dict = {"sentidos": [], "subindices": None, "def_mm": None}
+    try:  # (a) por sentido — só cenários CRESCENTE/DECRESCENTE da Paragon
+        for s in get_available_scenarios(road, "Paragon"):
+            if _sentido_label(s.get("cenario", "")) not in ("CRESCENTE", "DECRESCENTE"):
+                continue
+            sol = get_solutions_data(road, scenario_key=s["key"])
+            t = sol.get("table")
+            if t is None or t.empty:
+                continue
+            bi = _limit_budget_to_horizon(sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON)
+            out["sentidos"].append({
+                "sentido": _sentido_label(s["cenario"]),
+                "iap": round(float(t["IAP"].mean()), 2) if "IAP" in t.columns else None,
+                "ext": round(float(t["Extensão"].sum()), 1),
+                "necessidade": float(bi["Custo"].sum()) if bi is not None and not bi.empty else 0.0,
+            })
+    except Exception:
+        pass
+    try:  # (b) sub-índices estruturais (média ponderada por extensão)
+        ld = get_overview_data(road).get("linear_diagram")
+        if ld is not None and not ld.empty and "extensao" in ld.columns and float(ld["extensao"].sum()) > 0:
+            tot = float(ld["extensao"].sum())
+            sub = {}
+            for c in ("icds", "icdp", "icde"):
+                if c in ld.columns:
+                    avg = float((ld[c] * ld["extensao"]).sum() / tot)
+                    sub[c] = (round(avg, 2), _cond_class(avg))
+            out["subindices"] = sub or None
+    except Exception:
+        pass
+    try:  # (c) deflexão média (mm) — tabela de soluções (cenário default)
+        t = get_solutions_data(road).get("table")
+        if t is not None and not t.empty and "DEF" in t.columns:
+            d = t[["DEF", "Extensão"]].dropna(subset=["DEF"])
+            if not d.empty and float(d["Extensão"].sum()) > 0:
+                out["def_mm"] = round(float((d["DEF"] * d["Extensão"]).sum() / d["Extensão"].sum()), 2)
+    except Exception:
+        pass
+    return out
+
+
 def _iagon_road_detail(road: str) -> tuple[list[tuple[int, float]], list[tuple[str, float]], list[dict]]:
     """Dados Paragon de uma rodovia: (custo por ano, distribuição de soluções, trechos SNV priorizados).
 
@@ -4470,6 +4534,8 @@ def _build_iagon_context() -> tuple[str, dict]:
     paragon_trecho_blocks: list[str] = []
     dnit_blocks: list[str] = []
     proj_blocks: list[str] = []
+    sentido_blocks: list[str] = []
+    cond_blocks: list[str] = []
 
     for _, r in df.iterrows():
         road = r["Rodovia"]
@@ -4550,6 +4616,26 @@ def _build_iagon_context() -> tuple[str, dict]:
                 )
             proj_blocks.append(f"### {road}\n" + "\n".join(chunks))
 
+        enrich = _iagon_enrich_detail(road)
+        if enrich["sentidos"]:
+            sl = " · ".join(
+                f"**{s['sentido']}** IAP {s['iap']:.2f} · {s['ext']:.0f} km · "
+                f"necessidade {_format_money(s['necessidade'])}"
+                for s in enrich["sentidos"] if s.get("iap") is not None
+            )
+            if sl:
+                sentido_blocks.append(f"- {road}: {sl}")
+        sub = enrich.get("subindices")
+        if sub or enrich.get("def_mm") is not None:
+            parts = []
+            for c, nome in (("icds", "ICDS"), ("icdp", "ICDP"), ("icde", "ICDE")):
+                if sub and c in sub:
+                    parts.append(f"{nome} {sub[c][0]:.2f} ({sub[c][1]})")
+            if enrich.get("def_mm") is not None:
+                parts.append(f"Deflexão média {enrich['def_mm']:.2f} mm")
+            if parts:
+                cond_blocks.append(f"- {road}: " + " · ".join(parts))
+
     linhas = "\n".join(
         f"| {r['Rodovia']} | {r['IAP']:.2f} | {r['IRI']:.2f} | {r['IGG']:.0f} | "
         f"{r['iap_bad_pct']:.0f}% | {r['iri_bad_pct']:.0f}% | {int(r['prio'])} | {_format_money(float(r['custo']))} |"
@@ -4571,7 +4657,7 @@ def _build_iagon_context() -> tuple[str, dict]:
 {linhas}
 
 ## 2) Soluções Paragon por rodovia
-Nomes Paragon (use EXATAMENTE estes): *Reconstrução, Fresagem e recomposição, Microrrevestimento + Reparo localizado, Sem intervenção*.
+Nomes Paragon (use EXATAMENTE estes): *Reconstrução, Fresagem e recomposição, Recarga Superficial + Reparo localizado, Sem intervenção*.
 {chr(10).join(paragon_sol_lines)}
 
 ## 3) Cenário econômico Paragon — custo por ano (horizonte {_ECONOMIC_DEFAULT_HORIZON} anos)
@@ -4592,6 +4678,14 @@ Não confunda com Paragon. Cada metodologia tem o próprio cálculo de prioriza�
 ## 6) Projeção (evolução ano a ano)
 {chr(10).join(proj_blocks) or "_Sem projeção disponível_"}
 
+## 6b) Sentidos Paragon — CRESCENTE × DECRESCENTE (por rodovia)
+A matriz processada não tem faixa; cada rodovia foi rodada por sentido. Use quando o usuário perguntar de um sentido específico ou da diferença entre eles. Necessidade no horizonte de {_ECONOMIC_DEFAULT_HORIZON} anos.
+{chr(10).join(sentido_blocks) or "_Sem separação por sentido disponível_"}
+
+## 6c) Condição estrutural — ICDS/ICDP/ICDE e Deflexão (média ponderada por extensão)
+Índices estruturais 0–5, **MAIOR = MELHOR** condição (≥4,5 Excelente · ≥3,5 Bom · ≥2,5 Regular · ≥1,5 Mau · <1,5 Péssimo). NÃO confunda com o IAP. ICDP baixo = pavimento estruturalmente fraco; Deflexão (mm) alta = estrutura mais frágil.
+{chr(10).join(cond_blocks) or "_Sem dados estruturais disponíveis_"}
+
 ## 7) Regras de interpretação
 - **Diagnóstico padrão = Paragon**. Use DNIT só quando o usuário pedir explicitamente "matriz DNIT", "Revitaliza" ou citar nomes DNIT (CBUQ, FR5, Micro(0,8/1,5), Drenagem).
 - **Priorização invertida 0–10**: menor valor = MAIS crítico. NUNCA inverta o sentido — priorização 2 é pior que priorização 8.
@@ -4599,6 +4693,9 @@ Não confunda com Paragon. Cada metodologia tem o próprio cálculo de prioriza�
 - **Mix de soluções**: ao listar um SNV, cite TODAS as soluções presentes (com km), nunca apenas a dominante.
   Se houver Reconstrução, ela vai SEMPRE primeiro na lista (severidade mais alta).
 - Custos são necessidades cadastradas no banco; cobertura anual depende do orçamento.
+- **Por sentido**: ao citar CRESCENTE/DECRESCENTE, use a seção "6b) Sentidos Paragon". As seções 1–4 trazem o cenário padrão de cada rodovia (em geral um dos sentidos); a 6b traz os dois lado a lado.
+- **Estrutura ≠ superfície**: ICDS/ICDP/ICDE (seção 6c) são índices ESTRUTURAIS (maior = melhor); o IAP tem régua de classe própria. Não troque os dois.
+- **Horizonte**: necessidades e cenário deste resumo usam {_ECONOMIC_DEFAULT_HORIZON} anos. SEMPRE informe o horizonte ao dar um número; para outro horizonte, use as ferramentas (simular/comparar), que recalculam.
 """
     report_data = {
         "network_df": df,
@@ -4945,6 +5042,22 @@ def _iagon_render_chart(
     return None
 
 
+# A base de dados usa "Recarga Superficial + Reparo localizado". O nome legado
+# "Microrrevestimento + Reparo localizado" ainda pode vir do modelo/usuário — tratamos
+# como sinônimo para o filtro de solução (substring) não retornar vazio à toa.
+def _iagon_norm_solucoes(solucoes: list[str] | None) -> set[str]:
+    out: set[str] = set()
+    for s in (solucoes or []):
+        if not s or not s.strip():
+            continue
+        low = s.strip().lower()
+        out.add(low)
+        if "microrrev" in low:
+            out.add(low.replace("microrrevestimento", "recarga superficial"))
+            out.add("recarga superficial")
+    return out
+
+
 def _iagon_generate_work_plan(
     road: str,
     metodologia: str = "paragon",
@@ -4964,7 +5077,7 @@ def _iagon_generate_work_plan(
     """
     metodologia = (metodologia or "paragon").lower()
     classes_set = {c.strip() for c in (classes or []) if c and c.strip()}
-    solucoes_set = {s.strip().lower() for s in (solucoes or []) if s and s.strip()}
+    solucoes_set = _iagon_norm_solucoes(solucoes)
     faixas_set = {f.strip() for f in (faixas_iri or []) if f and f.strip()}
     snvs_set = {s.strip().upper() for s in (snvs or []) if s and s.strip()}
 
@@ -5149,25 +5262,26 @@ def _iagon_simulate_economic_scenario(
     custo_por_ano = pipe.get("custo_por_ano")
     custo_por_snv = pipe.get("custo_por_snv")
 
-    # Lista SNVs ordenada por priorização — atendidos vs fora do orçamento.
+    # Lista SNVs por prioridade — atendidos vs fora. MESMA lógica de
+    # _select_snv_attended_by_budget (ordem estrita: para no 1º que não couber),
+    # para que sum(atendidos.ext) == attended_km do pipeline (carteira de 1 ano).
     snvs_atendidos: list[dict] = []
     snvs_fora: list[dict] = []
     if custo_por_snv is not None and not custo_por_snv.empty:
-        # Re-roda _select_snv_attended_by_budget para descobrir quais entram no orçamento.
-        # `custo_por_snv` já está ordenado por priorização vinda do pipeline.
-        atendido_acc = 0.0
-        budget = annual_budget_val
+        remaining = annual_budget_val
+        corte = False
         for _, r in custo_por_snv.iterrows():
             row = {
                 "snv": str(r["SNV"]),
                 "ext_km": round(float(r["Extensão"]), 2),
                 "custo": float(r["Custo"]),
             }
-            if atendido_acc + row["custo"] <= budget:
-                atendido_acc += row["custo"]
-                snvs_atendidos.append(row)
-            else:
+            if corte or row["custo"] > remaining:
+                corte = True
                 snvs_fora.append(row)
+            else:
+                remaining -= row["custo"]
+                snvs_atendidos.append(row)
 
     return {
         "available": True,
@@ -5242,15 +5356,16 @@ def _iagon_simulate_to_pdf(sim: dict) -> tuple[str, bytes, str] | None:
     return fname, pdf_bytes, "application/pdf"
 
 
-def _iagon_compare_methodologies(road: str, annual_budget_mi: int = 50, horizon: int = 10) -> dict:
+def _iagon_compare_methodologies(road: str, annual_budget_mi: int = 50, horizon: int = _ECONOMIC_DEFAULT_HORIZON) -> dict:
     """Comparativo Paragon × DNIT para uma rodovia — devolve métricas + delta.
 
     Usa os mesmos pipelines do `_render_comparativo_page` para garantir aderência ao
     que o usuário vê na UI.
     """
     out: dict[str, Any] = {"road": road, "annual_budget_mi": annual_budget_mi, "horizon": horizon}
-    paragon = _compute_paragon_pipeline(road, annual_budget_mi, horizon)
-    dnit = _compute_dnit_pipeline(road, annual_budget_mi, horizon)
+    # Espelha o comparativo da UI: atendidos/cobertura medidos no horizonte (anual × anos).
+    paragon = _compute_paragon_pipeline(road, annual_budget_mi, horizon, attended_budget_mi=annual_budget_mi * horizon)
+    dnit = _compute_dnit_pipeline(road, annual_budget_mi, horizon, attended_budget_mi=annual_budget_mi * horizon)
     if not paragon.get("available"):
         out["error"] = f"Sem dados Paragon para {road}."
         return out
@@ -5321,7 +5436,7 @@ def _iagon_render_map(
 
     metodologia = (metodologia or "paragon").lower()
     classes_filter = {c.strip() for c in (classes or []) if c and c.strip()}
-    solucoes_filter = {s.strip().lower() for s in (solucoes or []) if s and s.strip()}
+    solucoes_filter = _iagon_norm_solucoes(solucoes)
     faixas_filter = {f.strip() for f in (faixas_iri or []) if f and f.strip()}
 
     if metodologia == "dnit":
@@ -5506,7 +5621,7 @@ def _iagon_filter_segments_for_map(
     metodologia = (metodologia or "paragon").lower()
     classes_set = {c.strip() for c in (classes or []) if c and c.strip()}
     faixas_set = {f.strip() for f in (faixas_iri or []) if f and f.strip()}
-    solucoes_set = {s.strip().lower() for s in (solucoes or []) if s and s.strip()}
+    solucoes_set = _iagon_norm_solucoes(solucoes)
     snvs_set = {s.strip().upper() for s in (snvs or []) if s and s.strip()}
 
     if metodologia == "dnit":

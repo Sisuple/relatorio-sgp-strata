@@ -153,7 +153,7 @@ TOOLS: list[dict] = [
                         "items": {"type": "string"},
                         "description": (
                             "Filtra Paragon por tipo de solução. Use os nomes exatos: "
-                            "'Reconstrução', 'Fresagem e recomposição', 'Microrrevestimento + Reparo localizado', "
+                            "'Reconstrução', 'Fresagem e recomposição', 'Recarga Superficial + Reparo localizado', "
                             "'Sem intervenção'. Ex.: ['Reconstrução'] mostra só trechos que precisam Reconstrução."
                         ),
                     },
@@ -299,7 +299,7 @@ TOOLS: list[dict] = [
                     },
                     "horizonte_anos": {
                         "type": "integer",
-                        "description": "Horizonte de planejamento em anos (default 10).",
+                        "description": "Horizonte de planejamento em anos (default 8).",
                     },
                 },
                 "required": ["rodovia"],
