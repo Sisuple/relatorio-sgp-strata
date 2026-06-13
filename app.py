@@ -733,7 +733,7 @@ def _combined_solution_data(road, keys, labels):
     for i, k in enumerate(keys):
         d = get_solutions_data(road, scenario_key=k)
         t, s = d.get("table"), d.get("segments")
-        sent = _sentido_label(labels.get(k, k))
+        sent = _sentido_faixa(labels.get(k, k))
         if t is not None and not t.empty:
             t = t.copy()
             t["Sentido"] = sent
@@ -2342,7 +2342,7 @@ def _combined_economic_data(road, keys, labels):
     for i, k in enumerate(keys):
         d = get_solutions_data(road, scenario_key=k)
         t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
-        sent = _sentido_label(labels.get(k, k))
+        sent = _sentido_faixa(labels.get(k, k))
         per_sentido.append(
             {"sentido": sent, "need": _necessidade_total(t, b, _ECONOMIC_DEFAULT_HORIZON)}
         )
@@ -2489,7 +2489,7 @@ def _combined_dnit_economic_data(road, keys, labels):
         if not d.get("available"):
             continue
         t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
-        sent = _sentido_label(labels.get(k, k))
+        sent = _sentido_faixa(labels.get(k, k))
         need = float(t["Custo estimado"].sum()) if t is not None and not t.empty else 0.0
         per_sentido.append({"sentido": sent, "need": need})
         zona_colors = zona_colors or d.get("zona_colors")
@@ -6130,6 +6130,14 @@ def _sentido_label(nome: str) -> str:
     return str(nome)
 
 
+def _sentido_faixa(nome: str) -> str:
+    """Rótulo de EXIBIÇÃO do sentido + faixa (pista simples ⇒ Faixa 1).
+    Ex.: 'CRESCENTE - Faixa 1'. Para nomes que não são sentido, devolve o próprio.
+    NÃO use em lógica/comparação — para isso use _sentido_label (mantém CRESCENTE/DECRESCENTE puros)."""
+    s = _sentido_label(nome)
+    return f"{s} - Faixa 1" if s in ("CRESCENTE", "DECRESCENTE") else s
+
+
 def _paragon_sentido_keys(road: str):
     """(cr_key, de_key, labels) se a rodovia tem análises Paragon CRESCENTE e
     DECRESCENTE; senão None. Usado para mostrar mapa, distribuição e segmentação
@@ -6166,7 +6174,7 @@ def _two_sentido_map_segments(road: str):
         seg["paths"] = seg["paths"].apply(
             lambda paths: [_offset_path(p, offset_m) for p in paths]
         )
-        seg["sentido"] = _sentido_label(labels.get(k, k))
+        seg["sentido"] = _sentido_faixa(labels.get(k, k))
         parts.append(seg)
     if len(parts) < 2:
         return None
@@ -6426,7 +6434,7 @@ def main() -> None:
             with _col:
                 st.markdown(
                     f"<div style='font-weight:700;color:#cbd5df;margin:4px 0 2px'>"
-                    f"◆ {_sentido_label(_slabels[_k])}</div>",
+                    f"{_sentido_faixa(_slabels[_k])}</div>",
                     unsafe_allow_html=True,
                 )
                 _d = get_overview_data(selected_road, scenario_key=_k)
@@ -6437,14 +6445,14 @@ def main() -> None:
             _d = get_overview_data(selected_road, scenario_key=_k)
             st.markdown(
                 f"<div style='font-weight:700;color:#cbd5df;margin:8px 0 4px'>"
-                f"Segmentação · ◆ {_sentido_label(_slabels[_k])}</div>",
+                f"Segmentação · {_sentido_faixa(_slabels[_k])}</div>",
                 unsafe_allow_html=True,
             )
             _filt, _kmr = render_iap_linear_zoomable(
                 _d["linear_diagram"], key=f"paragon_linear_{_k}"
             )
             with st.expander(
-                f"Detalhes técnicos (ICDS, ICDP, ICDE) · {_sentido_label(_slabels[_k])}"
+                f"Detalhes técnicos (ICDS, ICDP, ICDE) · {_sentido_faixa(_slabels[_k])}"
             ):
                 render_condition_linear(_filt, km_range=_kmr)
     else:
