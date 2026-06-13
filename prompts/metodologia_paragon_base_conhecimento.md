@@ -451,6 +451,89 @@ A inversão é simples: define-se **ICDS = 5,0 − Z_2x**, o *"Índice da Condi�
 
 ---
 
+## 8.4. Matriz de Decisão de Soluções — "Código Genético" (ICDS · ICDP · ICDE)
+
+O diagnóstico funcional Paragon combina os **três índices de condição** — cada um na escala **0,0 a 5,0** (maior = melhor) — em um **"código genético" de 3 dígitos** que define o **estado de sanidade** e a **intervenção recomendada** (Figuras 45 e 46):
+
+| Posição | Índice | O que mede |
+|---|---|---|
+| 1º dígito | **ICDS** — Condição de Degradação Superficial | trincas, panelas, remendos, exsudação… (defeitos de superfície) |
+| 2º dígito | **ICDP** — Condição de Deformação Permanente | afundamento de trilha de roda / irregularidade (IRI, flechas) |
+| 3º dígito | **ICDE** — Condição de Deformabilidade Elástica | comportamento elástico/estrutural (deflexão) |
+
+> Cada dígito é a **classe 1–5** do índice: **1 = Péssimo · 2 = Mau · 3 = Regular · 4 = Bom · 5 = Excelente**. Ex.: código **245** = ICDS 2 (Mau) · ICDP 4 (Bom) · ICDE 5 (Excelente).
+
+**Legenda das intervenções** (siglas e cores idênticas às do painel — `_SOLUTION_LABELS`):
+
+| Sigla | Intervenção | Cor |
+|---|---|---|
+| **OK** | Sem intervenção | azul |
+| **RL** | Reparo localizado | verde |
+| **RL+RS** | Reparo localizado + Recarga Superficial | verde-claro |
+| **RL+REF** | Reparo localizado + reforço | amarelo-claro |
+| **RPS** | Fresagem e recomposição | amarelo |
+| **RPS+REF** | Fresagem e recomposição + reforço | laranja |
+| **REC** | Reconstrução | vermelho |
+| **REC\*** | Reconstrução com ressalva — ocorre quando ICDP = 1 (deformação permanente péssima). O asterisco remete a uma nota específica do livro; _significado exato a confirmar._ | rosa |
+| **CA** | _Sigla do livro — significado a confirmar._ Ocorre quando ICDS e ICDP estão bons (≥ 4) mas o **ICDE é baixo (1–2)**: superfície boa, porém pavimento **estruturalmente frágil** (alta deformabilidade elástica). | preto |
+
+### Tabela completa (125 combinações) — intervenção por (ICDS, ICDP, ICDE)
+Leitura: fixado o **ICDS** (bloco), a **linha** é o ICDP e a **coluna** é o ICDE.
+
+**ICDS = 1 (superfície Péssima)**
+| ICDP \ ICDE | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| **1** | REC | REC | REC | REC | REC |
+| **2** | REC | REC | REC | REC | REC |
+| **3** | REC | REC | RPS+REF | RPS | RPS |
+| **4** | REC | REC | RPS+REF | RPS | RPS |
+| **5** | REC | REC | RPS+REF | RPS | RPS |
+
+**ICDS = 2 (superfície Má)**
+| ICDP \ ICDE | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| **1** | REC | REC | REC* | REC* | REC* |
+| **2** | REC | REC | RPS+REF | RPS | RPS |
+| **3** | REC | RPS+REF | RPS+REF | RPS | RPS |
+| **4** | REC | RPS+REF | RPS+REF | RPS | RPS |
+| **5** | REC | RPS+REF | RPS+REF | RPS | RPS |
+
+**ICDS = 3 (superfície Regular)**
+| ICDP \ ICDE | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| **1** | REC | REC | REC* | REC* | REC* |
+| **2** | REC | REC | RPS+REF | RPS | RPS |
+| **3** | REC | RPS+REF | RPS+REF | RL+RS | RL+RS |
+| **4** | REC | RL+REF | RL+REF | RL+RS | RL+RS |
+| **5** | REC | RL+REF | RL+REF | RL+RS | RL+RS |
+
+**ICDS = 4 (superfície Boa)**
+| ICDP \ ICDE | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| **1** | REC | REC | REC* | REC* | REC* |
+| **2** | REC | RPS+REF | RPS+REF | RPS | RPS |
+| **3** | REC | RL+REF | RL+REF | RL+RS | RL+RS |
+| **4** | CA | CA | RL | RL | RL |
+| **5** | CA | CA | RL | RL | RL |
+
+**ICDS = 5 (superfície Excelente)**
+| ICDP \ ICDE | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| **1** | REC | REC | REC* | REC* | REC* |
+| **2** | REC | RPS+REF | RPS+REF | RPS | RPS |
+| **3** | REC | RL+REF | RL+REF | RL+RS | RL+RS |
+| **4** | CA | CA | OK | OK | OK |
+| **5** | CA | CA | OK | OK | OK |
+
+### Leitura prática da matriz
+- **ICDS = 1 ou 2** (superfície péssima/má) → predomina **REC**; havendo alguma margem nos demais, **RPS+REF** ou **RPS** (fresagem com/sem reforço).
+- **ICDE = 1** (deformabilidade elástica péssima) → quase sempre **REC** (problema estrutural manda reconstruir), salvo os casos **CA** (quando ICDS e ICDP estão bons).
+- **ICDP = 1** com ICDS ≥ 2 → **REC\*** (reconstrução com ressalva).
+- **Índices altos (4–5)** nos três → **RL** ou **OK** (reparo localizado ou nenhuma intervenção).
+- Em geral, a intervenção tende à **mais severa exigida pelo pior dos três índices**.
+
+---
+
 ## 9. AVALIAÇÃO DAS CARACTERÍSTICAS DE DEFORMAÇÃO PERMANENTE (2.2.3)
 
 ### 9.1. Considerações iniciais
@@ -550,7 +633,11 @@ Para ambos os revestimentos, a distribuição dos níveis de sanidade é regida 
 | **SV** | *Slope Variance* — variância da inclinação. |
 | **RD** | *Rut Depth* — profundidade da flecha nas trilhas de roda. |
 | **ISG_OS** | Índice de Severidade Global por estaca. |
-| **ICDS** | Índice da Condição de Degradação Superficial. |
+| **ICDS** | Índice da Condição de Degradação Superficial (1º dígito do código genético). |
+| **ICDP** | Índice da Condição de Deformação Permanente (2º dígito; afundamento de trilha de roda / IRI). |
+| **ICDE** | Índice da Condição de Deformabilidade Elástica (3º dígito; comportamento elástico / deflexão estrutural). |
+| **Código genético** | Combinação de 3 dígitos **ICDS·ICDP·ICDE** (cada um classe 1–5) que define o estado de sanidade e a intervenção (ver §8.4). |
+| **REC · RPS · RL · RS · REF · OK** | Siglas de intervenção: REC = Reconstrução · RPS = Fresagem e recomposição · RL = Reparo localizado · RS = Recarga Superficial · REF = reforço · OK = sem intervenção (ver §8.4). |
 | **LCMS-II** | *Laser Crack Measurement System II* — sistema de escaneamento a laser de alta resolução. |
 | **LEAD** | Levantamento Específico de Áreas Degradadas. |
 | **GNSS** | *Global Navigation Satellite System*. |
@@ -665,6 +752,12 @@ R: Levantamento Específico de Áreas Degradadas — processo de demarcação gr
 
 **P: Quem desenvolveu a Metodologia Paragon?**
 R: A Metodologia Paragon foi concebida pelo Prof. Armando Martins Pereira, integrante do "*Método Expedito de Avaliação Paragon — Pavimentos Flexíveis e Semi-Rígidos*". O livro é assinado pelos autores Paulo Cerejo, Christel Almeida Pereira, Humberto Santana e Armando Martins Pereira.
+
+**P: Como a Metodologia Paragon escolhe a intervenção de um trecho?**
+R: Pela **matriz de decisão** (§8.4): combina os três índices de condição no código genético **ICDS·ICDP·ICDE** (cada dígito de 1 = Péssimo a 5 = Excelente) e lê a intervenção correspondente. Ex.: código **555** → **OK** (sem intervenção); código **111** → **REC** (reconstrução); código **245** → **RPS** (fresagem e recomposição). Em geral, vale a intervenção mais severa exigida pelo pior dos três índices.
+
+**P: O que é o "código genético" do pavimento?**
+R: É a combinação numérica dos três índices de condição (Figuras 45 e 46): **ICDS** (degradação superficial), **ICDP** (deformação permanente) e **ICDE** (deformabilidade elástica), cada um na escala 1–5. Esse código define tanto o **estado de sanidade** quanto a **intervenção** recomendada (ver §8.4).
 
 ---
 
