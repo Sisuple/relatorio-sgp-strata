@@ -699,19 +699,154 @@ def _render_solution_distribution(
     st.markdown(markup, unsafe_allow_html=True)
 
 
+def _solutions_sentido_keys(road, topbar_key):
+    """Multiselect de cenários (sentidos) da tela de Soluções. Devolve (keys, labels).
+    Default = CRESCENTE + DECRESCENTE se existirem; senão o cenário do topo."""
+    scenarios = get_available_scenarios(road, "Paragon")
+    labels = {s["key"]: s["cenario"] for s in scenarios}
+    keys = [s["key"] for s in scenarios]
+    if not keys:
+        return ([topbar_key] if topbar_key else []), labels
+    cr = next((k for k in keys if "crescente" in labels[k].lower()
+               and "decrescente" not in labels[k].lower()), None)
+    de = next((k for k in keys if "decrescente" in labels[k].lower()), None)
+    default = [k for k in (cr, de) if k] or ([topbar_key] if topbar_key in keys else keys[:1])
+    _filter_caption("Cenários (sentidos) — selecione um ou mais")
+    selected = st.multiselect(
+        "Cenários (sentidos)", keys, default=default,
+        format_func=lambda k: labels.get(k, k),
+        key=f"sol_scen_{road}", label_visibility="collapsed",
+    )
+    return (selected or default), labels
+
+
+def _combined_solution_data(road, keys, labels):
+    """Tabela e segmentos combinados de vários cenários, com coluna/atributo de
+    Sentido e os segmentos deslocados (uma camada por sentido) para o mapa."""
+    tables, segs = [], []
+    n = len(keys)
+    delta = 14.0
+    for i, k in enumerate(keys):
+        d = get_solutions_data(road, scenario_key=k)
+        t, s = d.get("table"), d.get("segments")
+        sent = _sentido_label(labels.get(k, k))
+        if t is not None and not t.empty:
+            t = t.copy()
+            t["Sentido"] = sent
+            tables.append(t)
+        if s is not None and not s.empty:
+            s = s.copy()
+            off = (i - (n - 1) / 2.0) * (2 * delta)
+            s["paths"] = s["paths"].apply(lambda paths: [_offset_path(p, off) for p in paths])
+            s["sentido"] = sent
+            segs.append(s)
+    return (
+        pd.concat(tables, ignore_index=True) if tables else None,
+        pd.concat(segs, ignore_index=True) if segs else None,
+    )
+
+
+def _sentido_bar_bg(color: str, idx: int) -> str:
+    """Fundo da barra mantendo a COR DA SOLUÇÃO; o sentido é distinguido por padrão:
+    1º sentido sólido, demais com listras diagonais (vãos transparentes)."""
+    if idx <= 0:
+        return color
+    angle = 45 if idx % 2 == 1 else -45
+    return (
+        f"repeating-linear-gradient({angle}deg, {color} 0, {color} 5px, "
+        "transparent 5px, transparent 10px)"
+    )
+
+
+def _render_solution_distribution_by_sentido(table_df) -> None:
+    """Distribuição de soluções com BARRAS POR SENTIDO (um gráfico só: para cada
+    solução, uma barra por sentido)."""
+    if table_df is None or table_df.empty or "Sentido" not in table_df.columns:
+        _render_solution_distribution(table_df)
+        return
+    g = table_df.groupby(["Solução recomendada", "Sentido"], as_index=False)["Extensão"].sum()
+    solucoes = list(
+        g.groupby("Solução recomendada")["Extensão"].sum().sort_values(ascending=False).index
+    )
+    sentidos = list(dict.fromkeys(table_df["Sentido"].tolist()))
+    sent_idx = {s: i for i, s in enumerate(sentidos)}
+    pivot = {sol: {} for sol in solucoes}
+    for r in g.to_dict("records"):
+        pivot[r["Solução recomendada"]][r["Sentido"]] = float(r["Extensão"])
+    max_km = max((max(d.values()) for d in pivot.values() if d), default=1.0) or 1.0
+    axis_max = _axis_max_10(max_km)
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{t / axis_max * 100:.2f}%;">{t:.0f}</span>'
+        for t in ticks
+    )
+    groups, labels = [], []
+    for sol in solucoes:
+        col = _solution_color(sol)
+        bars = ""
+        for sent in sentidos:
+            km = pivot[sol].get(sent, 0.0)
+            h = max(km / axis_max * 100, 1.5) if km > 0 else 0.0
+            bars += (
+                f'<div class="solution-bar" style="height:{h:.2f}%;'
+                f'background:{_sentido_bar_bg(col, sent_idx[sent])};'
+                'min-width:22px;width:auto;flex:0 0 auto">'
+                f'<span class="solution-bar-value">{km:.1f}<span>km</span></span></div>'
+            )
+        groups.append(
+            '<div class="solution-bar-item" style="display:flex;gap:8px;'
+            f'align-items:flex-end;justify-content:center">{bars}</div>'
+        )
+        labels.append(f'<div class="solution-bar-label">{html.escape(str(sol))}</div>')
+    legend = "".join(
+        '<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;'
+        f'color:#cbd5df;margin:0 14px 0 0"><span style="width:12px;height:12px;border-radius:3px;'
+        f'background:{_sentido_bar_bg("#cbd5df", sent_idx[s])};display:inline-block"></span>'
+        f'{html.escape(s)}</span>'
+        for s in sentidos
+    )
+    markup = (
+        '<div class="solution-distribution">'
+        '<div class="solution-distribution-head">'
+        '<div class="solution-distribution-title">'
+        '<div class="solution-distribution-icon">≋</div>'
+        '<div><h3>Distribuição de soluções por sentido</h3>'
+        '<p>Extensão (km) de cada solução, por sentido</p></div>'
+        '</div>'
+        f'<div class="solution-distribution-meta">{legend}</div>'
+        '</div>'
+        '<div class="solution-bars">'
+        f'<div class="solution-y-axis">{tick_markup}</div>'
+        '<div class="solution-chart-area">'
+        '<div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid">{"".join(groups)}</div>'
+        '</div>'
+        f'<div class="solution-label-grid">{"".join(labels)}</div>'
+        '</div>'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(markup, unsafe_allow_html=True)
+
+
 def _render_solutions_table(table_df) -> None:
     if table_df is None or table_df.empty:
         st.info("Sem trechos para exibir na matriz.")
         return
 
+    has_sentido = "Sentido" in table_df.columns
     rows_markup = []
     for index, row in enumerate(table_df.to_dict("records"), start=1):
         iap_color = html.escape(str(row.get("_cor_iap", "#fff200")))
         iap_class = html.escape(str(row.get("_classe_iap", "")))
+        sentido_td = (
+            f"<td>{html.escape(str(row.get('Sentido', '')))}</td>" if has_sentido else ""
+        )
         rows_markup.append(
             "<tr>"
             f"<td class='muted'>{index}</td>"
             f"<td class='mono'>{html.escape(str(row['SNV']))}</td>"
+            + sentido_td +
             f"<td>{_format_km(float(row['Km Inicial']))}</td>"
             f"<td>{_format_km(float(row['Km Final']))}</td>"
             f"<td>{_format_km(float(row['Extensão']))} km</td>"
@@ -734,7 +869,7 @@ def _render_solutions_table(table_df) -> None:
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>SRE</th>
+                  <th>SRE</th>""" + ("<th>Sentido</th>" if has_sentido else "") + """
                   <th>Km Inicial</th>
                   <th>Km Final</th>
                   <th>Extensão</th>
@@ -5678,10 +5813,20 @@ def main() -> None:
         if diagnosis == "Diagnóstico DNIT":
             _render_dnit_solutions_page(selected_road, scenario_key)
             return
-        data = get_solutions_data(selected_road, scenario_key=scenario_key)
         st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
-        filtered_table = _render_solution_filter_panel(data["table"])
-        filtered_segments = _filter_map_segments(data["segments"], filtered_table)
+        _sol_keys, _sol_labels = _solutions_sentido_keys(selected_road, scenario_key)
+        _multi = len(_sol_keys) >= 2
+        if _multi:
+            _base_table, _base_segments = _combined_solution_data(
+                selected_road, _sol_keys, _sol_labels
+            )
+        else:
+            _d = get_solutions_data(
+                selected_road, scenario_key=(_sol_keys[0] if _sol_keys else scenario_key)
+            )
+            _base_table, _base_segments = _d["table"], _d["segments"]
+        filtered_table = _render_solution_filter_panel(_base_table)
+        filtered_segments = _filter_map_segments(_base_segments, filtered_table)
         filtered_extension = float(filtered_table["Extensão"].sum()) if filtered_table is not None and not filtered_table.empty else 0
         intervention_segments = (
             filtered_segments[~filtered_segments["intervencao_iap"].isin(["OK", "Sem intervenção"])]
@@ -5690,13 +5835,21 @@ def main() -> None:
             else filtered_segments
         )
         render_overview_map(intervention_segments, filtered_extension, color_by="solucao")
+        if _multi:
+            st.caption(
+                "Mapa com os sentidos em camadas levemente deslocadas (~14 m/lado); "
+                "clique numa linha para ver o sentido."
+            )
         intervention_table = (
             filtered_table[filtered_table["Solução recomendada"] != "Sem intervenção"]
             if filtered_table is not None and not filtered_table.empty
             and "Solução recomendada" in filtered_table.columns
             else filtered_table
         )
-        _render_solution_distribution(intervention_table)
+        if _multi:
+            _render_solution_distribution_by_sentido(intervention_table)
+        else:
+            _render_solution_distribution(intervention_table)
         _, paginated_table = _render_solution_table_controls(intervention_table)
         _render_solutions_table(paginated_table)
         return

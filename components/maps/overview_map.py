@@ -287,7 +287,7 @@ $sv_modal
                   lineCap: 'round',
                   lineJoin: 'round'
                 }).addTo(map).bindTooltip(
-                  (segment.sentido ? '◆ ' + segment.sentido + ' · ' : '') +
+                  (segment.sentido ? segment.sentido + ' · ' : '') +
                   'SRE ' + (segment.sre || '-') +
                   ' · Segmento ' + segment.segment_id +
                   ' · km ' + formatKm(segment.km_inicial) +
