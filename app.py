@@ -2782,7 +2782,9 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int) -> di
     else:
         total_need = float(snv_budget_table["Custo econômico"].sum()) if not snv_budget_table.empty else 0.0
 
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget)
+    # Comparativo: usa o orçamento do HORIZONTE (anual × anos). Senão, um SNV cujo
+    # custo de N anos não cabe em 1 ano nunca é "atendido" (gerava 0 km na Paragon).
+    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget * horizon)
     attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
@@ -2802,7 +2804,7 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int) -> di
     return {
         "available": True,
         "total_need": total_need,
-        "annual_coverage": min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0,
+        "annual_coverage": min((annual_budget * horizon * 1_000_000) / total_need * 100, 100) if total_need else 0,
         "attended_km": attended_km,
         "scope_km": scope_km,
         "custo_por_ano": custo_por_ano,
@@ -2845,7 +2847,9 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int) -> dict:
         .sort_values("Prioridade")
         .reset_index(drop=True)
     )
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget)
+    # Comparativo: usa o orçamento do HORIZONTE (anual × anos). Senão, um SNV cujo
+    # custo de N anos não cabe em 1 ano nunca é "atendido" (gerava 0 km na Paragon).
+    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget * horizon)
     attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
@@ -2865,7 +2869,7 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int) -> dict:
     return {
         "available": True,
         "total_need": total_need,
-        "annual_coverage": min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0,
+        "annual_coverage": min((annual_budget * horizon * 1_000_000) / total_need * 100, 100) if total_need else 0,
         "attended_km": attended_km,
         "scope_km": scope_km,
         "custo_por_ano": custo_por_ano,
@@ -3086,19 +3090,19 @@ def _render_comparativo_page(road: str, scenario_key: str | None) -> None:
         _format_money(dnit["total_need"]),
     )
     _render_compare_kpi(
-        "Cobertura anual com este orçamento",
+        f"Cobertura no horizonte ({horizon} anos × orçamento)",
         f"{paragon['annual_coverage']:.1f}%",
         f"{dnit['annual_coverage']:.1f}%",
     )
     _render_compare_kpi(
-        "Trechos atendidos (km)",
+        "Trechos atendidos no horizonte (km)",
         f"{paragon['attended_km']:.1f} / {paragon['scope_km']:.1f} km",
         f"{dnit['attended_km']:.1f} / {dnit['scope_km']:.1f} km",
     )
     _render_compare_kpi(
-        "Orçamento faltante",
-        _format_money(max(paragon["total_need"] - annual_budget * 1_000_000, 0)),
-        _format_money(max(dnit["total_need"] - annual_budget * 1_000_000, 0)),
+        "Orçamento faltante no horizonte",
+        _format_money(max(paragon["total_need"] - annual_budget * horizon * 1_000_000, 0)),
+        _format_money(max(dnit["total_need"] - annual_budget * horizon * 1_000_000, 0)),
     )
 
     st.markdown("<div style='height: 18px'></div>", unsafe_allow_html=True)
@@ -3114,6 +3118,100 @@ def _render_comparativo_page(road: str, scenario_key: str | None) -> None:
         f'<em>{html.escape(paragon["scenario_label"])}</em>; '
         '<span style="color:#f2a51a;font-weight:700">DNIT</span> usa '
         f'<em>{html.escape(dnit["scenario_label"])}</em>.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    _render_iagon_comparativo(road, paragon, dnit, annual_budget, horizon)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _iagon_comparativo_text(
+    road: str, p_total: float, d_total: float, p_cov: float, d_cov: float,
+    p_att: float, d_att: float, scope: float, annual_budget: int, horizon: int,
+    top_snv_lines: str,
+) -> str:
+    """Chama a IAGON (system prompt + memória) para interpretar o comparativo.
+    Cacheado pelos números → não re-chama a API em reruns/sliders inalterados."""
+    try:
+        from services import iagon
+    except Exception:
+        return ""
+    if not iagon.is_configured():
+        return ""
+    razao = (p_total / d_total) if d_total else 0.0
+    contexto = (
+        f"Rodovia: BR-{road}.\n"
+        f"Comparativo: metodologia Paragon × Matriz Revitaliza DNIT (mesma rodovia, mesmos km).\n"
+        f"Horizonte: {horizon} anos · Orçamento: R$ {annual_budget} mi/ano "
+        f"(R$ {annual_budget * horizon} mi no horizonte).\n\n"
+        f"NECESSIDADE TOTAL NO HORIZONTE: Paragon R$ {p_total / 1e6:.1f} mi · "
+        f"DNIT R$ {d_total / 1e6:.1f} mi (Paragon = {razao:.1f}× o DNIT).\n"
+        f"COBERTURA NO HORIZONTE com este orçamento: Paragon {p_cov:.1f}% · DNIT {d_cov:.1f}%.\n"
+        f"TRECHOS ATENDIDOS NO HORIZONTE: Paragon {p_att:.1f}/{scope:.1f} km · "
+        f"DNIT {d_att:.1f}/{scope:.1f} km.\n\n"
+        f"CUSTO POR TRECHO (SRE) — Paragon vs DNIT (delta = Paragon − DNIT):\n{top_snv_lines}\n"
+    )
+    pergunta = (
+        "Você é a IAGON. Com base SOMENTE nos números acima, escreva uma análise técnica "
+        "e objetiva (3 a 5 frases, em português, em prosa corrida — sem listas nem markdown) "
+        "do comparativo Paragon × DNIT desta rodovia, para um gestor de pavimentos: "
+        "(1) a diferença de custo total e o porquê — a Paragon prescreve soluções mais pesadas "
+        "(reconstrução/fresagem) e a Revitaliza DNIT intervenções mais leves sobre os mesmos km; "
+        "(2) o que o orçamento informado cobre em cada metodologia; "
+        "(3) feche com uma recomendação prática. Não invente números além dos fornecidos."
+    )
+    try:
+        return iagon.analisar(contexto, pergunta)
+    except Exception:
+        return ""
+
+
+def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budget: int, horizon: int) -> None:
+    """Bloco final: interpretação do comparativo gerada pela IAGON (com memória)."""
+    try:
+        from services import iagon
+    except Exception:
+        return
+    if not iagon.is_configured():
+        return
+
+    # Top trechos por delta (Paragon − DNIT), em texto, para alimentar o modelo.
+    p, d = paragon.get("custo_por_snv"), dnit.get("custo_por_snv")
+    linhas = ""
+    if p is not None and not p.empty and d is not None and not d.empty:
+        m = p.merge(d, on="SNV", suffixes=("_p", "_d"))
+        if not m.empty:
+            m = m.rename(columns={"Custo_p": "cp", "Custo_d": "cd", "Extensão_p": "ext"})
+            m["delta"] = m["cp"] - m["cd"]
+            m = m.sort_values("delta", ascending=False).head(6)
+            linhas = "\n".join(
+                f"- {r.SNV}: Paragon R$ {r.cp / 1e6:.1f} mi · DNIT R$ {r.cd / 1e6:.1f} mi · "
+                f"{r.ext:.1f} km · delta R$ {r.delta / 1e6:+.1f} mi"
+                for r in m.itertuples()
+            )
+
+    with st.spinner("IAGON analisando o comparativo…"):
+        texto = _iagon_comparativo_text(
+            road, float(paragon["total_need"]), float(dnit["total_need"]),
+            float(paragon["annual_coverage"]), float(dnit["annual_coverage"]),
+            float(paragon["attended_km"]), float(dnit["attended_km"]),
+            float(paragon["scope_km"]), int(annual_budget), int(horizon), linhas,
+        )
+    if not texto:
+        return
+
+    corpo = html.escape(texto).replace("\n\n", "<br><br>").replace("\n", "<br>")
+    st.markdown(
+        '<div style="margin-top:16px;border:1px solid rgba(0,194,232,.30);border-radius:14px;'
+        'background:linear-gradient(180deg,rgba(0,194,232,.07),rgba(0,194,232,.02));padding:16px 18px">'
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'
+        '<div style="width:30px;height:30px;border-radius:9px;background:#00c2e8;color:#04141b;'
+        'display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px">IA</div>'
+        '<div style="font-weight:850;letter-spacing:.03em;color:#e8f6fb;font-size:15px">Análise da IAGON</div>'
+        '<div style="font-size:11px;color:#7fb9c9;font-weight:600">· interpretação automática · '
+        'confira sempre os números acima</div></div>'
+        f'<div style="color:#c8d6df;font-size:14px;line-height:1.65">{corpo}</div>'
         '</div>',
         unsafe_allow_html=True,
     )

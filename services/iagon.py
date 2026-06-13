@@ -407,6 +407,21 @@ def _build_messages(context_text: str, history: list[dict]) -> list[dict]:
     return messages
 
 
+def analisar(context_text: str, pergunta: str, *, temperature: float = 0.3) -> str:
+    """Análise one-shot (sem tools, sem streaming) usando o mesmo system prompt,
+    base de conhecimento e MEMÓRIA de longo prazo da IAGON. Devolve o texto."""
+    if not is_configured():
+        return ""
+    client = _client()
+    messages = _build_messages(context_text, [{"role": "user", "content": pergunta}])
+    resp = client.chat.completions.create(
+        model=IAGON_MODEL,
+        messages=messages,
+        temperature=temperature,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
 def run_chat(
     context_text: str,
     history: list[dict],
