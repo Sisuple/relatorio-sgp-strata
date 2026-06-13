@@ -64,6 +64,8 @@ def render_overview_map(
     ]
     if color_by == "solucao":
         selected_cols.append("intervencao_iap")
+    if "sentido" in segments_df.columns:
+        selected_cols.append("sentido")
     records = segments_df[selected_cols].copy()
     if attended_ids is not None:
         attended = {int(value) for value in attended_ids}
@@ -285,6 +287,7 @@ $sv_modal
                   lineCap: 'round',
                   lineJoin: 'round'
                 }).addTo(map).bindTooltip(
+                  (segment.sentido ? '◆ ' + segment.sentido + ' · ' : '') +
                   'SRE ' + (segment.sre || '-') +
                   ' · Segmento ' + segment.segment_id +
                   ' · km ' + formatKm(segment.km_inicial) +

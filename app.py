@@ -5504,6 +5504,149 @@ def _render_iagon_page() -> None:
     st.rerun()
 
 
+def _offset_path(coords, meters):
+    """Desloca uma polilinha perpendicularmente por `meters` (sinal = lado).
+
+    Separa visualmente os sentidos no mesmo pavimento (pista simples): CRESCENTE
+    para um lado, DECRESCENTE para o outro.
+    """
+    if len(coords) < 2 or not meters:
+        return coords
+    out = []
+    n = len(coords)
+    for i in range(n):
+        lat, lon = coords[i][0], coords[i][1]
+        a = coords[max(0, i - 1)]
+        b = coords[min(n - 1, i + 1)]
+        dlat = b[0] - a[0]
+        dlon = (b[1] - a[1]) * math.cos(math.radians(lat))
+        L = math.hypot(dlat, dlon) or 1e-9
+        plat, plon = -dlon / L, dlat / L  # perpendicular unitária (rotação +90°)
+        off_lat = (meters / 111000.0) * plat
+        off_lon = (meters / 111000.0) * plon / (math.cos(math.radians(lat)) or 1e-9)
+        out.append([lat + off_lat, lon + off_lon])
+    return out
+
+
+def _sentido_label(nome: str) -> str:
+    low = str(nome).lower()
+    if "decrescente" in low:
+        return "DECRESCENTE"
+    if "crescente" in low:
+        return "CRESCENTE"
+    return str(nome)
+
+
+def _two_sentido_map_segments(road: str):
+    """Se a rodovia tem análises Paragon CRESCENTE e DECRESCENTE, devolve os
+    segmentos das duas, levemente deslocados (uma camada por sentido) e marcados
+    com o sentido. Senão devolve None (mapa segue normal, com um cenário)."""
+    scenarios = get_available_scenarios(road, "Paragon")
+    labels = {s["key"]: s["cenario"] for s in scenarios}
+    cr = next((s["key"] for s in scenarios
+               if "crescente" in s["cenario"].lower()
+               and "decrescente" not in s["cenario"].lower()), None)
+    de = next((s["key"] for s in scenarios if "decrescente" in s["cenario"].lower()), None)
+    if not (cr and de):
+        return None
+    delta = 14.0  # metros de deslocamento por sentido
+    parts = []
+    for i, k in enumerate((cr, de)):
+        seg = get_overview_data(road, scenario_key=k).get("segments")
+        if seg is None or seg.empty:
+            continue
+        seg = seg.copy()
+        offset_m = (i - 0.5) * (2 * delta)  # CRESCENTE -14 m · DECRESCENTE +14 m
+        seg["paths"] = seg["paths"].apply(
+            lambda paths: [_offset_path(p, offset_m) for p in paths]
+        )
+        seg["sentido"] = _sentido_label(labels.get(k, k))
+        parts.append(seg)
+    if len(parts) < 2:
+        return None
+    return pd.concat(parts, ignore_index=True)
+
+
+# Linhas do comparativo de cenários (rótulo, campo em metrics, formatação, marca "pior").
+_CMP_METRICS = [
+    ("IAP médio", "iap_average", lambda v: f"{v:.2f}", None),
+    ("% trechos críticos", "critical_percent", lambda v: f"{v:.1f}%", "max"),
+    ("Km críticos", "critical_km", lambda v: f"{v:.1f} km", "max"),
+    ("Extensão total", "extension_km", lambda v: f"{v:.1f} km", None),
+    ("Custo (necessidade)", "_custo", lambda v: _format_money(v), "max"),
+]
+
+
+def _render_scenario_comparison(road: str) -> None:
+    """Comparativo de métricas entre cenários (ex.: CRESCENTE × DECRESCENTE).
+
+    Mostra % crítico, km crítico e custo lado a lado — útil enquanto não há faixa
+    na matriz (o sentido vira o eixo de diferenciação). O estado vem do retorno do
+    `multiselect` (sem escrever em `session_state`), evitando erros de inicialização.
+    """
+    scenarios = get_available_scenarios(road, "Paragon")
+    if len(scenarios) < 2:
+        return
+    labels = {s["key"]: s["cenario"] for s in scenarios}
+    keys = [s["key"] for s in scenarios]
+    cr = next((k for k in keys if "crescente" in labels[k].lower()
+               and "decrescente" not in labels[k].lower()), None)
+    de = next((k for k in keys if "decrescente" in labels[k].lower()), None)
+    default = [k for k in (cr, de) if k] or keys[:2]
+
+    with st.expander("⚖️  Comparar cenários (sentidos / metodologias)", expanded=bool(cr and de)):
+        selected = st.multiselect(
+            "Cenários para comparar",
+            keys,
+            default=default,
+            format_func=lambda k: labels.get(k, k),
+            key=f"cmp_scenarios_{road}",
+        )
+        if len(selected) < 2:
+            st.caption("Selecione ao menos 2 cenários para comparar.")
+            return
+
+        rows = []
+        with st.spinner("Calculando comparativo…"):
+            for k in selected:
+                metrics = dict(get_overview_data(road, scenario_key=k)["metrics"])
+                sol = get_solutions_data(road, scenario_key=k)
+                metrics["_custo"] = _necessidade_total(
+                    sol.get("table"), sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON
+                )
+                metrics["_label"] = labels.get(k, k)
+                rows.append(metrics)
+
+        ths = "".join(f"<th>{html.escape(r['_label'])}</th>" for r in rows)
+        body = []
+        for nome, campo, fmt, marca in _CMP_METRICS:
+            vals = [float(r.get(campo) or 0) for r in rows]
+            pior = max(vals) if marca == "max" else None
+            tds = ""
+            for v in vals:
+                worse = pior is not None and v == pior and len(set(vals)) > 1
+                tds += f"<td class='cmp-worse'>{fmt(v)}</td>" if worse else f"<td>{fmt(v)}</td>"
+            body.append(f"<tr><th class='cmp-metric'>{nome}</th>{tds}</tr>")
+
+        st.markdown(
+            "<style>"
+            ".cmp-table{width:100%;border-collapse:collapse;margin-top:6px;font-size:14px}"
+            ".cmp-table th,.cmp-table td{padding:10px 14px;text-align:right;"
+            "border-bottom:1px solid rgba(148,163,184,.16)}"
+            ".cmp-table thead th{color:#9aa8b3;font-size:11px;letter-spacing:.06em;text-transform:uppercase}"
+            ".cmp-table th.cmp-metric{text-align:left;color:#cbd5df;font-weight:600}"
+            ".cmp-table td.cmp-worse{color:#ff6b6b;font-weight:700}"
+            "</style>"
+            f"<table class='cmp-table'><thead><tr><th class='cmp-metric'>Métrica</th>{ths}</tr></thead>"
+            f"<tbody>{''.join(body)}</tbody></table>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Vermelho = pior valor entre os cenários (mais crítico / maior custo). "
+            "Sem faixa na matriz, o sentido é o eixo de diferenciação."
+        )
+
+
 def main() -> None:
     inject_css()
     page = st.query_params.get("page", "overview")
@@ -5619,8 +5762,19 @@ def main() -> None:
     metrics = data["metrics"]
 
     render_metric_cards(data["cards"])
-    st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
-    render_overview_map(data["segments"], metrics["extension_km"])
+    st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
+    _render_scenario_comparison(selected_road)
+    st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
+    _two_sentido = _two_sentido_map_segments(selected_road)
+    if _two_sentido is not None and not _two_sentido.empty:
+        render_overview_map(_two_sentido, metrics["extension_km"])
+        st.caption(
+            "Mapa com os dois sentidos (CRESCENTE e DECRESCENTE) em camadas levemente "
+            "deslocadas (~14 m/lado), cada uma colorida pela sua condição. Clique numa "
+            "linha para ver o sentido."
+        )
+    else:
+        render_overview_map(data["segments"], metrics["extension_km"])
     render_iap_distribution(data["distribution"], metrics["iap_average"])
     st.markdown("<div style='height: 32px'></div>", unsafe_allow_html=True)
     filtered_diagram, km_range = render_iap_linear_zoomable(
