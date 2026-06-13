@@ -6090,6 +6090,10 @@ def _render_iagon_page() -> None:
             )
 
     st.session_state.iagon_messages.append({"role": "assistant", "content": full, "artifacts": artifacts})
+    try:  # memória RAG: captura automática da troca (conversa crua + fatos destilados)
+        iagon.capture_exchange(prompt, full)
+    except Exception:
+        pass
     st.rerun()
 
 
