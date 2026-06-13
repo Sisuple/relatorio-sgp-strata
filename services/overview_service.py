@@ -1731,7 +1731,9 @@ def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
 
 
 @cached(ttl=1800)
-def _get_dnit_solutions_from_database(analise_id: int, ciclo_id: int, year: int) -> dict:
+def _get_dnit_solutions_from_database(
+    analise_id: int, ciclo_id: int, year: int, all_years: bool = False
+) -> dict:
     geo = _get_dnit_geometry_from_database(analise_id)
     if geo is None or geo.empty:
         return {}
@@ -1745,14 +1747,31 @@ def _get_dnit_solutions_from_database(analise_id: int, ciclo_id: int, year: int)
         "SELECT segmento_pista_id AS seg, igga, situacao_igga FROM analise_gerencial_igg WHERE gerencial_ciclo_id = %s AND ano = %s",
         (ciclo_id, year),
     ) or []
-    sol_rows = db.execute_query(
-        "SELECT segmento_pista_id AS seg, solucoes FROM analise_gerencial_intervencoes_dnit WHERE gerencial_ciclo_id = %s AND ano = %s",
-        (ciclo_id, year),
-    ) or []
+    if all_years:
+        # Econômico: inclui os segmentos tratados em QUALQUER ano do horizonte
+        # (scope = via toda, coerente com o custo do horizonte). Pega a solução do
+        # ano-base se houver; senão, a do primeiro ano de intervenção.
+        sol_rows = db.execute_query(
+            "SELECT segmento_pista_id AS seg, ano, solucoes FROM analise_gerencial_intervencoes_dnit "
+            "WHERE gerencial_ciclo_id = %s AND solucoes IS NOT NULL ORDER BY ano",
+            (ciclo_id,),
+        ) or []
+        sol_by = {}
+        for r in sol_rows:
+            seg = int(r["seg"])
+            if seg not in sol_by:  # ordenado por ano → 1º ano de intervenção
+                sol_by[seg] = r["solucoes"]
+            if int(r["ano"]) == year:  # prefere a solução do ano-base
+                sol_by[seg] = r["solucoes"]
+    else:
+        sol_rows = db.execute_query(
+            "SELECT segmento_pista_id AS seg, solucoes FROM analise_gerencial_intervencoes_dnit WHERE gerencial_ciclo_id = %s AND ano = %s",
+            (ciclo_id, year),
+        ) or []
+        sol_by = {int(r["seg"]): r["solucoes"] for r in sol_rows}
 
     iri_by = {int(r["seg"]): _to_float(r["iria"]) for r in iri_rows}
     igg_by = {int(r["seg"]): (_to_float(r["igga"]), r.get("situacao_igga")) for r in igg_rows}
-    sol_by = {int(r["seg"]): r["solucoes"] for r in sol_rows}
 
     seg_records = []
     table_records = []
@@ -2165,7 +2184,7 @@ def get_dnit_economic_data(selected_road: str | None = None, scenario_key: str |
                 "budget_items": pd.DataFrame(), "segments": pd.DataFrame()}
 
     sol_data = _get_dnit_solutions_from_database(
-        analysis["analise_id"], analysis["ciclo_id"], analysis["ano"]
+        analysis["analise_id"], analysis["ciclo_id"], analysis["ano"], all_years=True
     )
     if not sol_data:
         return {"road": road, "available": False, "table": pd.DataFrame(),

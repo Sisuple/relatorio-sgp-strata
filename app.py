@@ -387,6 +387,7 @@ def render_top_bar(
     show_diagnosis: bool = True,
     keep_title: bool = False,
     show_filters: bool = True,
+    show_scenario: bool = True,
     diagnosis_options: list[str] | None = None,
 ) -> tuple[str, str | None, str | None]:
     options = diagnosis_options or ["Diagnóstico Paragon", "Diagnóstico DNIT"]
@@ -440,26 +441,29 @@ def render_top_bar(
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
             # Para listar cenários: Comparativo não tem matriz própria → usa Paragon (oculto).
             matrix_type = matrix_choice if matrix_choice in ("Paragon", "Matriz Cadastrada") else "Paragon"
-            scenarios = get_available_scenarios(selected_out, matrix_type)
-            with scenario_col:
-                # Comparativo não usa o seletor de Cenários (cada metodologia tem o seu).
-                if diagnosis == "Comparativo Paragon × DNIT":
-                    _filter_label("Cenários")
-                    st.markdown(
-                        '<div class="status-pill" style="margin-top:2px">Auto · Paragon (SH) + DNIT Revitaliza</div>',
-                        unsafe_allow_html=True,
-                    )
-                    scenario_key = None
-                else:
-                    _filter_label("Cenários")
-                    scenario_keys = [scenario["key"] for scenario in scenarios]
-                    scenario_labels = {scenario["key"]: scenario["cenario"] for scenario in scenarios}
-                    scenario_key = st.selectbox(
-                        "Cenário",
-                        scenario_keys,
-                        format_func=lambda key: scenario_labels.get(key, key),
-                        label_visibility="collapsed",
-                    ) if scenario_keys else None
+            if show_scenario:
+                scenarios = get_available_scenarios(selected_out, matrix_type)
+                with scenario_col:
+                    # Comparativo não usa o seletor de Cenários (cada metodologia tem o seu).
+                    if diagnosis == "Comparativo Paragon × DNIT":
+                        _filter_label("Cenários")
+                        st.markdown(
+                            '<div class="status-pill" style="margin-top:2px">Auto · Paragon (SH) + DNIT Revitaliza</div>',
+                            unsafe_allow_html=True,
+                        )
+                        scenario_key = None
+                    else:
+                        _filter_label("Cenários")
+                        scenario_keys = [scenario["key"] for scenario in scenarios]
+                        scenario_labels = {scenario["key"]: scenario["cenario"] for scenario in scenarios}
+                        scenario_key = st.selectbox(
+                            "Cenário",
+                            scenario_keys,
+                            format_func=lambda key: scenario_labels.get(key, key),
+                            label_visibility="collapsed",
+                        ) if scenario_keys else None
+            else:
+                scenario_key = None
 
     with left:
         st.markdown(
@@ -699,10 +703,10 @@ def _render_solution_distribution(
     st.markdown(markup, unsafe_allow_html=True)
 
 
-def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen"):
+def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type="Paragon"):
     """Multiselect de cenários (sentidos). Devolve (keys, labels).
     Default = CRESCENTE + DECRESCENTE se existirem; senão o cenário do topo."""
-    scenarios = get_available_scenarios(road, "Paragon")
+    scenarios = get_available_scenarios(road, matrix_type)
     labels = {s["key"]: s["cenario"] for s in scenarios}
     keys = [s["key"] for s in scenarios]
     if not keys:
@@ -2406,10 +2410,11 @@ def _aplicar_indice_priorizacao_dnit(df: pd.DataFrame) -> pd.DataFrame:
     """Versão DNIT do priorização — IRI 60% + IGG 40% (sem IAP/VMDA/DEF)."""
     if df is None or df.empty:
         return df
+    has_sent = "Sentido" in df.columns
     segmentos = [
         {
             "rodovia": row.get("Rodovia", ""),
-            "snv": str(row.get("SNV")),
+            "snv": (f"{row.get('SNV')}␟{row.get('Sentido')}" if has_sent else str(row.get("SNV"))),
             "extensao_km": row.get("Extensão"),
             "iri": row.get("IRI"),
             "igg": row.get("IGG"),
@@ -2418,7 +2423,10 @@ def _aplicar_indice_priorizacao_dnit(df: pd.DataFrame) -> pd.DataFrame:
         for _, row in df.iterrows()
     ]
     prio = {item["snv"]: item for item in calcular_indice_priorizacao_dnit(segmentos)}
-    snv = df["SNV"].astype(str)
+    snv = (
+        df["SNV"].astype(str) + "␟" + df["Sentido"].astype(str)
+        if has_sent else df["SNV"].astype(str)
+    )
     df = df.copy()
     df["IPT"] = snv.map(lambda s: prio.get(s, {}).get("ip_tecnico", 0.0))
     df["IPE"] = snv.map(lambda s: prio.get(s, {}).get("ip_economico", 0.0))
@@ -2468,10 +2476,64 @@ def _render_dnit_economic_controls(total_need: float, scenario_key: str) -> tupl
     return annual_budget, horizon, prio_max
 
 
+def _combined_dnit_economic_data(road, keys, labels):
+    """Combina os dados econômicos DNIT de vários cenários (sentidos): a simulação
+    roda sobre os dois juntos (necessidade total = soma) e `per_sentido` traz a
+    necessidade de cada um para o comparativo. Segmentos deslocados (2 camadas)."""
+    tables, budgets, segs, per_sentido = [], [], [], []
+    n = len(keys)
+    delta = 14.0
+    zona_colors = zona_order = ano_base = None
+    for i, k in enumerate(keys):
+        d = get_dnit_economic_data(road, scenario_key=k)
+        if not d.get("available"):
+            continue
+        t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
+        sent = _sentido_label(labels.get(k, k))
+        need = float(t["Custo estimado"].sum()) if t is not None and not t.empty else 0.0
+        per_sentido.append({"sentido": sent, "need": need})
+        zona_colors = zona_colors or d.get("zona_colors")
+        zona_order = zona_order or d.get("zona_order")
+        ano_base = ano_base or d.get("ano_base")
+        if t is not None and not t.empty:
+            t = t.copy()
+            t["Sentido"] = sent
+            tables.append(t)
+        if b is not None and not b.empty:
+            b = b.copy()
+            b["Sentido"] = sent
+            budgets.append(b)
+        if s is not None and not s.empty:
+            s = s.copy()
+            off = (i - (n - 1) / 2.0) * (2 * delta)
+            s["paths"] = s["paths"].apply(lambda paths: [_offset_path(p, off) for p in paths])
+            s["sentido"] = sent
+            segs.append(s)
+    return {
+        "available": bool(tables),
+        "table": pd.concat(tables, ignore_index=True) if tables else pd.DataFrame(),
+        "budget_items": pd.concat(budgets, ignore_index=True) if budgets else pd.DataFrame(),
+        "segments": pd.concat(segs, ignore_index=True) if segs else pd.DataFrame(),
+        "per_sentido": per_sentido,
+        "zona_colors": zona_colors,
+        "zona_order": zona_order,
+        "ano_base": ano_base,
+    }
+
+
 def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
     """Cenário econômico DNIT — usa orçamentos gravados em analise_gerencial_orcamentos
     e priorização IRI+IGG. Espelha estrutura visual do Paragon."""
-    data = get_dnit_economic_data(road, scenario_key)
+    st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
+    _dnit_keys, _dnit_labels = _solutions_sentido_keys(
+        road, scenario_key, widget_key="dnit_eco_scen", matrix_type="Matriz Cadastrada"
+    )
+    _dnit_multi = len(_dnit_keys) >= 2
+    if _dnit_multi:
+        data = _combined_dnit_economic_data(road, _dnit_keys, _dnit_labels)
+    else:
+        _dkey = _dnit_keys[0] if _dnit_keys else scenario_key
+        data = get_dnit_economic_data(road, _dkey)
     if not data.get("available") or data.get("table") is None or data["table"].empty:
         disponiveis = get_dnit_available_roads()
         if disponiveis:
@@ -2483,6 +2545,9 @@ def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
         else:
             st.info("Nenhuma rodovia foi processada com a **Matriz Revitaliza DNIT/RO** ainda.")
         return
+
+    if _dnit_multi:
+        _render_economic_comparison(data["per_sentido"])
 
     table = data["table"].copy()
     segments_df = data["segments"]
@@ -2510,9 +2575,10 @@ def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
     work["Custo econômico"] = work["Custo estimado"].astype(float)
     work = _aplicar_indice_priorizacao_dnit(work)
 
-    # Agrega por SNV pra construir snv_budget_table.
+    # Agrega por SNV (× Sentido quando há) pra construir snv_budget_table.
+    _dnit_gkeys = ["SNV", "Sentido"] if "Sentido" in work.columns else ["SNV"]
     snv_budget_table = (
-        work.groupby("SNV", as_index=False)
+        work.groupby(_dnit_gkeys, as_index=False)
         .agg({
             "Prioridade": "min",
             "Priorização": "max",
@@ -2643,14 +2709,17 @@ def _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, a
         return
 
     attended_sres = set(attended_snv_table["SNV"].astype(str)) if attended_snv_table is not None and not attended_snv_table.empty else set()
+    has_sentido = "Sentido" in snv_budget_table.columns
     rows_html = []
     for _, row in snv_budget_table.iterrows():
         sre = str(row.get("SNV"))
         atendido = sre in attended_sres
+        sentido_td = f"<td>{html.escape(str(row.get('Sentido', '')))}</td>" if has_sentido else ""
         rows_html.append(
             "<tr>"
             f"<td>{int(row['Prioridade'])}</td>"
             f"<td>{html.escape(sre)}</td>"
+            + sentido_td +
             f"<td>{_format_km(float(row['Km Inicial']))}</td>"
             f"<td>{_format_km(float(row['Km Final']))}</td>"
             f"<td>{_format_km(float(row['Extensão']))} km</td>"
@@ -2675,7 +2744,7 @@ def _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, a
           </div>
           <table class="solution-table">
             <thead><tr>
-              <th>PRIOR.</th><th>SRE</th><th>KM INICIAL</th><th>KM FINAL</th><th>EXTENSÃO</th>
+              <th>PRIOR.</th><th>SRE</th>{'<th>SENTIDO</th>' if has_sentido else ''}<th>KM INICIAL</th><th>KM FINAL</th><th>EXTENSÃO</th>
               <th>IRI</th><th>IGG</th><th>IPT</th><th>IPE</th><th>PRIORIZAÇÃO</th>
               <th>SOLUÇÃO RECOMENDADA</th><th>CUSTO</th><th>STATUS</th>
             </tr></thead>
@@ -6032,6 +6101,7 @@ def main() -> None:
             page_title="Cenário econômico",
             show_diagnosis=True,
             keep_title=True,
+            show_scenario=False,
             diagnosis_options=[
                 "Diagnóstico Paragon",
                 "Diagnóstico DNIT",
