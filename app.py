@@ -699,8 +699,8 @@ def _render_solution_distribution(
     st.markdown(markup, unsafe_allow_html=True)
 
 
-def _solutions_sentido_keys(road, topbar_key):
-    """Multiselect de cenários (sentidos) da tela de Soluções. Devolve (keys, labels).
+def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen"):
+    """Multiselect de cenários (sentidos). Devolve (keys, labels).
     Default = CRESCENTE + DECRESCENTE se existirem; senão o cenário do topo."""
     scenarios = get_available_scenarios(road, "Paragon")
     labels = {s["key"]: s["cenario"] for s in scenarios}
@@ -715,7 +715,7 @@ def _solutions_sentido_keys(road, topbar_key):
     selected = st.multiselect(
         "Cenários (sentidos)", keys, default=default,
         format_func=lambda k: labels.get(k, k),
-        key=f"sol_scen_{road}", label_visibility="collapsed",
+        key=f"{widget_key}_{road}", label_visibility="collapsed",
     )
     return (selected or default), labels
 
@@ -774,7 +774,7 @@ def _render_solution_distribution_by_sentido(table_df) -> None:
     for r in g.to_dict("records"):
         pivot[r["Solução recomendada"]][r["Sentido"]] = float(r["Extensão"])
     max_km = max((max(d.values()) for d in pivot.values() if d), default=1.0) or 1.0
-    axis_max = _axis_max_10(max_km)
+    axis_max = _axis_max_headroom(max_km)
     ticks = _axis_ticks_10(axis_max)
     tick_markup = "".join(
         f'<span class="solution-y-tick" style="bottom:{t / axis_max * 100:.2f}%;">{t:.0f}</span>'
@@ -1183,6 +1183,12 @@ def _axis_ticks_10(axis_max: int) -> list[int]:
     return list(range(int(axis_max), -1, -10))
 
 
+def _axis_max_headroom(value: float) -> int:
+    """Como _axis_max_10, mas com folga acima da maior barra para o rótulo
+    (que fica em cima da barra) não ser cortado no topo do gráfico."""
+    return _axis_max_10(value * 1.18)
+
+
 def _economic_work_table(table_df) -> pd.DataFrame:
     if table_df is None or table_df.empty:
         return pd.DataFrame()
@@ -1216,10 +1222,13 @@ def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
         if df.empty:
             return {}
 
+    has_sent = "Sentido" in df.columns
     segmentos = [
         {
             "rodovia": row.get("Rodovia", ""),
-            "snv": str(row.get("SNV")),
+            # Chave por (SNV, Sentido) quando há sentido → priorização/IPT/IPE
+            # independentes por sentido (senão CR e DE ficariam idênticos).
+            "snv": (f"{row.get('SNV')}␟{row.get('Sentido')}" if has_sent else str(row.get("SNV"))),
             "extensao_km": row.get("Extensão"),
             "vmda": row.get("VMDA"),
             "iri": row.get("IRI"),
@@ -1237,7 +1246,10 @@ def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     prio = _prioridade_por_snv(df)
-    snv = df["SNV"].astype(str)
+    if "Sentido" in df.columns:
+        snv = df["SNV"].astype(str) + "␟" + df["Sentido"].astype(str)
+    else:
+        snv = df["SNV"].astype(str)
     df["IPT"] = snv.map(lambda s: prio.get(s, {}).get("ip_tecnico", 0.0))
     df["IPE"] = snv.map(lambda s: prio.get(s, {}).get("ip_economico", 0.0))
     # SNVs sem entrada no ranking (ex.: só com segmentos Excelente) ficam com 10.0
@@ -1350,19 +1362,6 @@ def _necessidade_total(table_df, budget_items, horizon: int) -> float:
 
 
 def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_key: str) -> tuple[int, int, int]:
-    st.markdown(
-        """
-        <section class="economic-panel">
-          <div class="economic-head">
-            <div class="economic-title">
-              <div class="economic-icon">≋</div>
-              <div><h3>Cenários orçamentários</h3><p>Orçamento anual × horizonte × trechos prioritários</p></div>
-            </div>
-          </div>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
     budget_col, horizon_col, prio_col = st.columns([1, 1, 1], gap="medium")
 
     # Horizonte primeiro: a necessidade total (default do orçamento) depende dele.
@@ -1461,8 +1460,110 @@ def _render_cost_by_solution(table_df: pd.DataFrame) -> None:
     )
 
 
+def _grouped_bars_html(groups, sentidos, height_of, label_of, color_of, axis_max):
+    """Monta (ticks, grupos, labels, legenda) de barras agrupadas por sentido:
+    cor pelo grupo (solução/ano), sentido distinguido por listras (1º sólido)."""
+    sent_idx = {s: i for i, s in enumerate(sentidos)}
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{t / axis_max * 100:.2f}%;">{t:.0f}</span>'
+        for t in ticks
+    )
+    ghtml, lhtml = [], []
+    for g in groups:
+        col = color_of(g)
+        bars = ""
+        for s in sentidos:
+            v = height_of(g, s)
+            h = max(v / axis_max * 100, 1.5) if v > 0 else 0.0
+            bars += (
+                f'<div class="solution-bar" style="height:{h:.2f}%;'
+                f'background:{_sentido_bar_bg(col, sent_idx[s])};width:56px;min-width:56px;flex:0 0 auto">'
+                '<span class="solution-bar-value" style="font-size:9px;line-height:1.12;letter-spacing:-.2px">'
+                f'{label_of(g, s)}</span></div>'
+            )
+        ghtml.append(
+            '<div class="solution-bar-item" style="display:flex;gap:16px;'
+            f'align-items:flex-end;justify-content:center">{bars}</div>'
+        )
+        lhtml.append(f'<div class="solution-bar-label">{html.escape(str(g))}</div>')
+    legend = "".join(
+        '<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;'
+        f'color:#cbd5df;margin:0 14px 0 0"><span style="width:12px;height:12px;border-radius:3px;'
+        f'background:{_sentido_bar_bg("#cbd5df", sent_idx[s])};display:inline-block"></span>'
+        f'{html.escape(s)}</span>'
+        for s in sentidos
+    )
+    return tick_markup, "".join(ghtml), "".join(lhtml), legend
+
+
+def _grouped_bars_card(icon, title, subtitle, meta_html, tick, groups_html, labels_html):
+    return (
+        '<div class="solution-distribution"><div class="solution-distribution-head">'
+        f'<div class="solution-distribution-title"><div class="solution-distribution-icon">{icon}</div>'
+        f'<div><h3>{title}</h3><p>{subtitle}</p></div></div>'
+        f'<div class="solution-distribution-meta">{meta_html}</div></div>'
+        '<div class="solution-bars">'
+        f'<div class="solution-y-axis">{tick}</div>'
+        '<div class="solution-chart-area"><div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid">{groups_html}</div></div>'
+        f'<div class="solution-label-grid">{labels_html}</div></div></div></div>'
+    )
+
+
+def _render_budget_cost_by_year_sentido(budget_items: pd.DataFrame) -> None:
+    g = budget_items.groupby(["Ano", "Sentido"], as_index=False)["Custo"].sum()
+    anos = sorted(g["Ano"].unique())
+    sentidos = list(dict.fromkeys(budget_items["Sentido"].tolist()))
+    total_cost = float(g["Custo"].sum())
+    pivot = {(int(r["Ano"]), r["Sentido"]): float(r["Custo"]) for r in g.to_dict("records")}
+    mi_of = lambda ano, sent: pivot.get((int(ano), sent), 0.0) / 1_000_000
+    axis_max = _axis_max_headroom(max((mi_of(a, s) for a in anos for s in sentidos), default=1.0) or 1.0)
+    tick, gh, lh, legend = _grouped_bars_html(
+        [int(a) for a in anos],
+        sentidos,
+        mi_of,
+        lambda ano, sent: _format_money_chart(pivot.get((int(ano), sent), 0.0)),
+        lambda ano: "#9aa0a6",
+        axis_max,
+    )
+    meta = f'<span>Total · <strong>{_format_money(total_cost)}</strong></span>{legend}'
+    st.markdown(
+        _grouped_bars_card("$", "Custo por ano", "Programação orçamentária por sentido", meta, tick, gh, lh),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_budget_cost_by_solution_sentido(budget_items: pd.DataFrame, color_fn) -> None:
+    g = budget_items.groupby(["Solução", "Sentido"], as_index=False).agg({"Custo": "sum", "Extensão": "sum"})
+    solucoes = list(g.groupby("Solução")["Custo"].sum().sort_values(ascending=False).index)
+    sentidos = list(dict.fromkeys(budget_items["Sentido"].tolist()))
+    total_cost = float(g["Custo"].sum()) or 1.0
+    pivot = {(r["Solução"], r["Sentido"]): (float(r["Custo"]), float(r["Extensão"])) for r in g.to_dict("records")}
+    pct_of = lambda sol, sent: pivot.get((sol, sent), (0.0, 0.0))[0] / total_cost * 100
+    axis_max = _axis_max_headroom(max((pct_of(s, se) for s in solucoes for se in sentidos), default=1.0) or 1.0)
+
+    def label_of(sol, sent):
+        cost, _km = pivot.get((sol, sent), (0.0, 0.0))
+        return f"{pct_of(sol, sent):.1f}%<span>{_format_money(cost)}</span>"
+
+    tick, gh, lh, legend = _grouped_bars_html(solucoes, sentidos, pct_of, label_of, color_fn, axis_max)
+    total_km = float(budget_items.drop_duplicates(["_budget_id", "_segment_id"])["Extensão"].sum())
+    meta = (
+        f'<span>Total · <strong>{_format_money(total_cost)}</strong></span>'
+        f'<span>Trecho · <strong>{total_km:.1f} km</strong></span>{legend}'
+    )
+    st.markdown(
+        _grouped_bars_card("$", "Custos por solução", "Itens do orçamento por sentido", meta, tick, gh, lh),
+        unsafe_allow_html=True,
+    )
+
+
 def _render_budget_cost_by_year(budget_items: pd.DataFrame) -> None:
     if budget_items is None or budget_items.empty:
+        return
+    if "Sentido" in budget_items.columns and budget_items["Sentido"].nunique() > 1:
+        _render_budget_cost_by_year_sentido(budget_items)
         return
 
     grouped = budget_items.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano")
@@ -1513,6 +1614,9 @@ def _render_budget_cost_by_solution(budget_items: pd.DataFrame, *, color_fn=None
         return
 
     color_fn = color_fn or _solution_color
+    if "Sentido" in budget_items.columns and budget_items["Sentido"].nunique() > 1:
+        _render_budget_cost_by_solution_sentido(budget_items, color_fn)
+        return
     grouped = (
         budget_items.groupby("Solução", as_index=False)
         .agg({"Custo": "sum", "Extensão": "sum"})
@@ -1577,10 +1681,11 @@ def _group_priority_by_snv(table_df: pd.DataFrame) -> pd.DataFrame:
     }
     for col in ("IPT", "IPE", "Priorização"):
         if col in table_df.columns:
-            agg[col] = "max"  # constantes por SNV — "max" só extrai o valor
+            agg[col] = "max"  # constantes por (SNV, sentido) — "max" só extrai o valor
 
+    keys = ["SNV", "Sentido"] if "Sentido" in table_df.columns else ["SNV"]
     grouped = (
-        table_df.groupby("SNV", as_index=False)
+        table_df.groupby(keys, as_index=False)
         .agg(agg)
         .sort_values(["Prioridade", "IAP", "Km Inicial"], ascending=[True, True, True])
         .reset_index(drop=True)
@@ -1598,8 +1703,9 @@ def _group_budget_by_snv(budget_items: pd.DataFrame, priority_table: pd.DataFram
     if budget_items is None or budget_items.empty:
         return _group_priority_by_snv(priority_table)
 
+    keys = ["SNV", "Sentido"] if "Sentido" in budget_items.columns else ["SNV"]
     cost_by_snv = (
-        budget_items.groupby("SNV", as_index=False)
+        budget_items.groupby(keys, as_index=False)
         .agg(
             {
                 "Custo": "sum",
@@ -1611,17 +1717,22 @@ def _group_budget_by_snv(budget_items: pd.DataFrame, priority_table: pd.DataFram
         .rename(columns={"Custo": "Custo econômico", "Solução": "Solução recomendada"})
     )
     extension_by_snv = (
-        budget_items.drop_duplicates(["SNV", "_segment_id"])
-        .groupby("SNV", as_index=False)["Extensão"]
+        budget_items.drop_duplicates(keys + ["_segment_id"])
+        .groupby(keys, as_index=False)["Extensão"]
         .sum()
     )
-    grouped = cost_by_snv.merge(extension_by_snv, on="SNV", how="left")
+    grouped = cost_by_snv.merge(extension_by_snv, on=keys, how="left")
 
     priority = _group_priority_by_snv(priority_table)
     if not priority.empty:
+        merge_keys = (
+            ["SNV", "Sentido"]
+            if ("Sentido" in grouped.columns and "Sentido" in priority.columns)
+            else ["SNV"]
+        )
         grouped = grouped.merge(
-            priority[["SNV", "Prioridade", "IAP", "IPT", "IPE", "Priorização"]],
-            on="SNV",
+            priority[merge_keys + ["Prioridade", "IAP", "IPT", "IPE", "Priorização"]],
+            on=merge_keys,
             how="left",
         )
     else:
@@ -1987,15 +2098,18 @@ def _render_economic_priority_table(
         return
 
     view = view.head(25).copy()
+    has_sentido = "Sentido" in view.columns
     rows_markup = []
     for index, row in enumerate(view.to_dict("records"), start=1):
         snv = str(row["SNV"])
         toggle_id = f"snv-detail-{index}"
         detail_chart = _snv_detail_chart_markup(snv, budget_items, priority_table)
+        sentido_td = f"<td>{html.escape(str(row.get('Sentido', '')))}</td>" if has_sentido else ""
         rows_markup.append(
             "<tr class='snv-row'>"
             f"<td class='muted'>{int(row['Prioridade'])}</td>"
             f"<td class='mono'>{html.escape(snv)}</td>"
+            + sentido_td +
             f"<td>{_format_km(float(row['Km Inicial']))}</td>"
             f"<td>{_format_km(float(row['Km Final']))}</td>"
             f"<td>{_format_km(float(row['Extensão']))} km</td>"
@@ -2010,7 +2124,7 @@ def _render_economic_priority_table(
             "</td>"
             "</tr>"
             "<tr class='detail-row'>"
-            "<td class='detail-cell' colspan='12'>"
+            f"<td class='detail-cell' colspan='{13 if has_sentido else 12}'>"
             f"<input type='checkbox' id='{toggle_id}' class='detail-checkbox'>"
             f"<div class='detail-content'>{detail_chart}</div>"
             "</td>"
@@ -2029,7 +2143,7 @@ def _render_economic_priority_table(
               <thead>
                 <tr>
                   <th>Prior.</th>
-                  <th>SRE</th>
+                  <th>SRE</th>""" + ("<th>Sentido</th>" if has_sentido else "") + """
                   <th>Km Inicial</th>
                   <th>Km Final</th>
                   <th>Extensão</th>
@@ -2214,6 +2328,77 @@ def _render_economic_page(
     )
 
 
+def _combined_economic_data(road, keys, labels):
+    """Combina tabela/orçamento/segmentos de vários cenários (sentidos) para o
+    módulo econômico: a simulação roda sobre os dois juntos (necessidade total =
+    soma) e `per_sentido` traz a necessidade de cada um para o comparativo."""
+    tables, budgets, segs, per_sentido = [], [], [], []
+    n = len(keys)
+    delta = 14.0
+    for i, k in enumerate(keys):
+        d = get_solutions_data(road, scenario_key=k)
+        t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
+        sent = _sentido_label(labels.get(k, k))
+        per_sentido.append(
+            {"sentido": sent, "need": _necessidade_total(t, b, _ECONOMIC_DEFAULT_HORIZON)}
+        )
+        if t is not None and not t.empty:
+            t = t.copy()
+            t["Sentido"] = sent
+            tables.append(t)
+        if b is not None and not b.empty:
+            b = b.copy()
+            b["Sentido"] = sent
+            budgets.append(b)
+        if s is not None and not s.empty:
+            s = s.copy()
+            off = (i - (n - 1) / 2.0) * (2 * delta)
+            s["paths"] = s["paths"].apply(lambda paths: [_offset_path(p, off) for p in paths])
+            s["sentido"] = sent
+            segs.append(s)
+    return {
+        "table": pd.concat(tables, ignore_index=True) if tables else None,
+        "budget_items": pd.concat(budgets, ignore_index=True) if budgets else None,
+        "segments": pd.concat(segs, ignore_index=True) if segs else None,
+        "per_sentido": per_sentido,
+    }
+
+
+def _render_economic_comparison(per_sentido) -> None:
+    """Cards comparando a necessidade total de cada sentido + o total combinado."""
+    if not per_sentido:
+        return
+    total = sum(p["need"] for p in per_sentido)
+    cells = ""
+    for p in per_sentido:
+        pct = (p["need"] / total * 100) if total else 0.0
+        cells += (
+            "<div style='flex:1;min-width:170px;background:rgba(7,17,25,.5);"
+            "border:1px solid rgba(148,163,184,.18);border-radius:12px;padding:14px 16px'>"
+            "<div style='font-size:11px;letter-spacing:.08em;color:#9aa8b3;"
+            f"text-transform:uppercase'>{html.escape(p['sentido'])}</div>"
+            "<div style='font-size:22px;font-weight:800;color:#e6edf2;margin-top:4px'>"
+            f"{_format_money(p['need'])}</div>"
+            f"<div style='font-size:12px;color:#7f909c'>{pct:.0f}% do total</div></div>"
+        )
+    cells += (
+        "<div style='flex:1;min-width:170px;background:rgba(46,86,106,.25);"
+        "border:1px solid rgba(90,169,230,.35);border-radius:12px;padding:14px 16px'>"
+        "<div style='font-size:11px;letter-spacing:.08em;color:#9aa8b3;"
+        "text-transform:uppercase'>Total (ambos os sentidos)</div>"
+        "<div style='font-size:22px;font-weight:800;color:#5aa9e6;margin-top:4px'>"
+        f"{_format_money(total)}</div>"
+        "<div style='font-size:12px;color:#7f909c'>necessidade combinada</div></div>"
+    )
+    st.markdown(
+        "<div style='margin:6px 0 16px'>"
+        "<div style='font-weight:700;color:#cbd5df;margin-bottom:8px'>"
+        "⚖️ Necessidade total por sentido</div>"
+        f"<div style='display:flex;gap:12px;flex-wrap:wrap'>{cells}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ----------------------------------------------------------------------------
 # Cenário Econômico DNIT
 # ----------------------------------------------------------------------------
@@ -2247,19 +2432,6 @@ def _aplicar_indice_priorizacao_dnit(df: pd.DataFrame) -> pd.DataFrame:
 
 def _render_dnit_economic_controls(total_need: float, scenario_key: str) -> tuple[int, int, int]:
     """Mesmo layout do controle Paragon, mas com defaults compatíveis com DNIT."""
-    st.markdown(
-        """
-        <section class="economic-panel">
-          <div class="economic-head">
-            <div class="economic-title">
-              <div class="economic-icon">≋</div>
-              <div><h3>Cenários orçamentários</h3><p>Orçamento anual × horizonte × nível de prioridade</p></div>
-            </div>
-          </div>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
     budget_col, horizon_col, prio_col = st.columns([1, 1, 1], gap="medium")
 
     with horizon_col:
@@ -5872,16 +6044,33 @@ def main() -> None:
         if diagnosis == "Diagnóstico DNIT":
             _render_dnit_economic_page(selected_road, scenario_key)
             return
-        data = get_solutions_data(selected_road, scenario_key=scenario_key)
-        scenario_label = get_scenario_label(selected_road, scenario_key) or "Paragon"
-        _render_economic_page(
-            data["table"],
-            data.get("budget_items"),
-            data.get("segments"),
-            scenario_key=f"{selected_road}:{scenario_key}",
-            road=selected_road,
-            scenario_label=scenario_label,
+        st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
+        _eco_keys, _eco_labels = _solutions_sentido_keys(
+            selected_road, scenario_key, widget_key="eco_scen"
         )
+        if len(_eco_keys) >= 2:
+            _ec = _combined_economic_data(selected_road, _eco_keys, _eco_labels)
+            _render_economic_comparison(_ec["per_sentido"])
+            _render_economic_page(
+                _ec["table"],
+                _ec["budget_items"],
+                _ec["segments"],
+                scenario_key=f"{selected_road}:multi",
+                road=selected_road,
+                scenario_label="Paragon · CR + DE",
+            )
+        else:
+            _ekey = _eco_keys[0] if _eco_keys else scenario_key
+            data = get_solutions_data(selected_road, scenario_key=_ekey)
+            scenario_label = get_scenario_label(selected_road, _ekey) or "Paragon"
+            _render_economic_page(
+                data["table"],
+                data.get("budget_items"),
+                data.get("segments"),
+                scenario_key=f"{selected_road}:{_ekey}",
+                road=selected_road,
+                scenario_label=scenario_label,
+            )
         return
 
     if page == "projecao":

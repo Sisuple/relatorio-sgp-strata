@@ -1646,57 +1646,88 @@ def _get_dnit_analysis_for_road(road_code: str, scenario_key: str | None = None)
 
 @cached(ttl=3600)
 def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
-    """Geometria/SRE/km de TODOS os segmentos da análise (sem depender de IAP)."""
+    """Geometria/SRE/km de TODOS os segmentos da análise (sem depender de IAP).
+
+    Geometria pelos pontos do levantamento IRI agrupados por km (eixo central),
+    numa única consulta — evita o timeout do join por segmento nas rodovias longas
+    (mesmo fix do `_get_iap_map_segments_from_database`).
+    """
     db = MySQLConnection()
-    geometry_rows = db.execute_query(
+    seg_rows = db.execute_query(
         """
         SELECT
           seg.id AS id_segmento,
+          seg.rodovia AS rodovia,
+          seg.km_inicial AS km_inicial_segmento,
+          seg.km_final AS km_final_segmento,
           (
             SELECT ps.codigo FROM pista_shape ps
             WHERE ps.rodovia = seg.rodovia
               AND ps.km_inicial <= seg.km_inicial
               AND ps.km_final >= seg.km_final
             ORDER BY ps.km_inicial DESC LIMIT 1
-          ) AS codigo,
-          seg.km_inicial AS km_inicial_segmento,
-          seg.km_final AS km_final_segmento,
-          ST_AsText(pt.geometria) AS wkt
+          ) AS codigo
         FROM analise_gerencial_segmento_pistas seg
-        JOIN principal_levantamentos pt FORCE INDEX (idx_lev_importacao_km)
-          ON pt.levantamento_importacao_id = (
-            SELECT MIN(li.id) FROM levantamento_importacoes li
-            WHERE li.nome_arquivo LIKE CONCAT('BR-', seg.rodovia, '%%IRI%%')
-          )
-         AND pt.rodovia = seg.rodovia
-         AND pt.km_inicial >= seg.km_inicial
-         AND pt.km_inicial <= seg.km_final
         WHERE seg.analise_gerencial_id = %s
-        ORDER BY seg.id, pt.km_inicial
+        ORDER BY seg.km_inicial, seg.id
         """,
         (analise_id,),
     ) or []
+    if not seg_rows:
+        return pd.DataFrame()
 
-    segments: dict[int, dict[str, Any]] = {}
-    for row in geometry_rows:
-        segment_id = int(row["id_segmento"])
-        segment = segments.setdefault(
-            segment_id,
+    rodovia = seg_rows[0].get("rodovia")
+    point_rows = db.execute_query(
+        """
+        SELECT pt.km_inicial AS km, ST_AsText(pt.geometria) AS wkt
+        FROM principal_levantamentos pt
+        WHERE pt.levantamento_importacao_id = (
+            SELECT MIN(li.id) FROM levantamento_importacoes li
+            WHERE li.nome_arquivo LIKE CONCAT('BR-', %s, '%%IRI%%')
+          )
+          AND pt.rodovia = %s
+        ORDER BY pt.km_inicial
+        """,
+        (rodovia, rodovia),
+    ) or []
+    points: list[tuple[float, list[list[float]]]] = []
+    for p in point_rows:
+        coords = _parse_linestring_latlon(p.get("wkt"))
+        if len(coords) >= 2 and not _has_large_coordinate_jump(coords):
+            points.append((_to_float(p.get("km")), coords))
+    point_kms = [k for k, _ in points]
+
+    segments: list[dict[str, Any]] = []
+    for srow in seg_rows:
+        km_i = _to_float(srow.get("km_inicial_segmento"))
+        km_f = _to_float(srow.get("km_final_segmento"))
+        lo = bisect.bisect_left(point_kms, km_i)
+        hi = bisect.bisect_right(point_kms, km_f)
+        by_km: dict[float, list[list[float]]] = {}
+        for km, coords in points[lo:hi]:
+            by_km.setdefault(round(km, 4), []).append(coords[0])
+        flat: list[list[float]] = []
+        for km in sorted(by_km):
+            grp = by_km[km]
+            avg = [
+                sum(c[0] for c in grp) / len(grp),
+                sum(c[1] for c in grp) / len(grp),
+            ]
+            if not flat or flat[-1] != avg:
+                flat.append(avg)
+        if len(flat) < 2:
+            continue
+        segments.append(
             {
-                "segment_id": segment_id,
-                "sre": row.get("codigo") or f"Segmento {segment_id}",
-                "km_inicial": _to_float(row.get("km_inicial_segmento")),
-                "km_final": _to_float(row.get("km_final_segmento")),
-                "paths": [],
-            },
+                "segment_id": int(srow["id_segmento"]),
+                "sre": srow.get("codigo") or f"Segmento {int(srow['id_segmento'])}",
+                "km_inicial": km_i,
+                "km_final": km_f,
+                "paths": [_simplify_path(flat)],
+            }
         )
-        line_coords = _parse_linestring_latlon(row.get("wkt"))
-        if len(line_coords) >= 2 and not _has_large_coordinate_jump(line_coords):
-            # Simplifica antes de armazenar — reduz 90%+ do payload do mapa
-            # sem perder o traçado visual (tolerância ~13 m).
-            segment["paths"].append(_simplify_path(line_coords))
 
-    return pd.DataFrame([s for s in segments.values() if s.get("paths")])
+    return pd.DataFrame(segments)
 
 
 @cached(ttl=1800)
