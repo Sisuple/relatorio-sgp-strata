@@ -1776,6 +1776,116 @@ def _select_snv_attended_by_budget(snv_table: pd.DataFrame, annual_budget_mi: in
     return pd.DataFrame(attended_rows)
 
 
+def _segment_cost_frame(
+    budget_items: pd.DataFrame | None,
+    priority_table: pd.DataFrame | None,
+    keys: list[str],
+) -> pd.DataFrame | None:
+    """Tabela de custo+extensão POR SEGMENTO para o atendimento por orçamento.
+
+    Prefere o `budget_items` (programação do banco, recortada ao horizonte). Quando
+    ele está vazio — caso do horizonte de 1 ano, em que a janela do banco fica fora
+    do intervalo (ano-base × dados) — usa a `priority_table` (segmentos priorizados
+    com o custo econômico de uma intervenção). Sem nenhuma das duas, devolve None.
+    """
+    if (
+        budget_items is not None and not budget_items.empty
+        and {"_segment_id", "Extensão", "Custo"}.issubset(budget_items.columns)
+        and all(k in budget_items.columns for k in keys)
+    ):
+        df, cost_col = budget_items, "Custo"
+    elif (
+        priority_table is not None and not priority_table.empty
+        and {"_segment_id", "Extensão", "Custo econômico"}.issubset(priority_table.columns)
+        and all(k in priority_table.columns for k in keys)
+    ):
+        df, cost_col = priority_table, "Custo econômico"
+    else:
+        return None
+
+    agg = {"_custo": (cost_col, "sum"), "_ext": ("Extensão", "first")}
+    if "Km Inicial" in df.columns:
+        agg["_km_ini"] = ("Km Inicial", "min")
+    seg = df.groupby(keys + ["_segment_id"], as_index=False).agg(**agg)
+    if "_km_ini" not in seg.columns:
+        seg["_km_ini"] = 0.0
+    # Só segmentos que precisam de intervenção (custo > 0) entram na carteira.
+    return seg[seg["_custo"] > 0].copy()
+
+
+def _segment_attendance(
+    snv_table: pd.DataFrame,
+    budget_items: pd.DataFrame | None,
+    annual_budget_mi: int,
+    priority_table: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, float, set]:
+    """Atende SEGMENTO a segmento, em ordem estrita de prioridade do SNV.
+
+    A versão por SNV inteiro (`_select_snv_attended_by_budget`) dava `break` no
+    primeiro SNV que não coubesse — quando o trecho mais prioritário sozinho já
+    estourava o orçamento, retornava 0 km mesmo a cobertura indicando >0% (ver
+    "Cenário econômico"). Aqui o corte é por segmento: um SNV pode ser
+    parcialmente atendido, então os km atendidos ficam coerentes com a cobertura
+    e nunca zeram com orçamento > 0. A ordem de prioridade continua estrita —
+    segmentos de um SNV menos prioritário só entram depois de esgotados os mais
+    prioritários.
+
+    Retorna (attended_snv_table, attended_km, attended_segment_ids):
+      - attended_snv_table: uma linha por SNV com ≥1 segmento financiado;
+        `Extensão` e `Custo econômico` refletem apenas a porção atendida.
+      - attended_segment_ids: `_segment_id` efetivamente financiados (mapa/PDF).
+    """
+    if snv_table is None or snv_table.empty:
+        return pd.DataFrame(), 0.0, set()
+
+    keys = ["SNV", "Sentido"] if "Sentido" in snv_table.columns else ["SNV"]
+
+    seg = _segment_cost_frame(budget_items, priority_table, keys)
+    # Sem dados por segmento (ex.: custo paramétrico) → cai no SNV inteiro.
+    if seg is None or seg.empty:
+        attended = _select_snv_attended_by_budget(snv_table, annual_budget_mi)
+        km = float(attended["Extensão"].sum()) if not attended.empty else 0.0
+        return attended, km, set()
+
+    budget = float(annual_budget_mi) * 1_000_000
+
+    # Ordem de prioridade herdada do SNV (snv_table já vem ordenada por prioridade).
+    # Segmentos cujo SNV não está no escopo (filtro de nível) ficam de fora.
+    order = {tuple(str(r[k]) for k in keys): i for i, r in enumerate(snv_table.to_dict("records"))}
+    seg["_ord"] = seg.apply(lambda r: order.get(tuple(str(r[k]) for k in keys)), axis=1)
+    seg = seg[seg["_ord"].notna()].sort_values(["_ord", "_km_ini"]).reset_index(drop=True)
+
+    remaining = budget
+    attended_ids: set = set()
+    att_ext: dict = {}
+    att_cost: dict = {}
+    for r in seg.to_dict("records"):
+        cost = float(r["_custo"] or 0)
+        if cost > remaining:
+            break
+        remaining -= cost
+        attended_ids.add(int(r["_segment_id"]))
+        gk = tuple(str(r[k]) for k in keys)
+        att_ext[gk] = att_ext.get(gk, 0.0) + float(r["_ext"] or 0)
+        att_cost[gk] = att_cost.get(gk, 0.0) + cost
+
+    if not attended_ids:
+        return pd.DataFrame(), 0.0, set()
+
+    # Tabela por SNV com a PORÇÃO atendida, preservando colunas de exibição.
+    attended_rows = []
+    for r in snv_table.to_dict("records"):
+        gk = tuple(str(r[k]) for k in keys)
+        if gk not in att_ext:
+            continue
+        row = dict(r)
+        row["Extensão"] = att_ext[gk]
+        row["Custo econômico"] = att_cost[gk]
+        attended_rows.append(row)
+
+    return pd.DataFrame(attended_rows), float(sum(att_ext.values())), attended_ids
+
+
 def _solution_text_color(color: str) -> str:
     return "#f4f7fb" if color.lower() in {"#d71920", "#00a651", "#f2a51a"} else "#061018"
 
@@ -2091,7 +2201,7 @@ def _render_economic_priority_table(
 
     with summary_col:
         if view.empty:
-            st.markdown('<div class="pagination-summary">Nenhum SNV inteiro cabe no orçamento anual selecionado.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="pagination-summary">Nenhum trecho cabe no orçamento anual selecionado.</div>', unsafe_allow_html=True)
         else:
             st.markdown(
                 f'<div class="pagination-summary">Exibindo {len(view)} SNVs · {_format_km(float(view["Extensão"].sum()))} km · {_format_money(float(view["Custo econômico"].sum()))}</div>',
@@ -2187,12 +2297,13 @@ def _attended_segment_ids(segments_df, attended_snv_table) -> set:
     return set(segments_df[segments_df["sre"].astype(str).isin(attended_snvs)]["segment_id"].astype(int))
 
 
-def _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget: int, attended_km: float) -> None:
+def _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget: int, attended_km: float, attended_ids: set | None = None) -> None:
     """Mostra no mapa quais trechos o orçamento anual consegue atender (cinza = fora)."""
     if segments_df is None or segments_df.empty or "sre" not in segments_df:
         return
 
-    attended_ids = _attended_segment_ids(segments_df, attended_snv_table)
+    if attended_ids is None:
+        attended_ids = _attended_segment_ids(segments_df, attended_snv_table)
     total_km = float((segments_df["km_final"] - segments_df["km_inicial"]).clip(lower=0).sum())
 
     st.markdown(
@@ -2255,8 +2366,11 @@ def _render_economic_page(
     scope_snv = int(len(snv_budget_table))
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
     annual_coverage = min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget)
-    attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
+    attended_snv_table, attended_km, attended_ids = _segment_attendance(
+        snv_budget_table, budget_items, annual_budget, prioritized_table
+    )
+    # Fallback (sem dados por segmento): destaca no mapa pelos SNVs atendidos.
+    attended_ids = attended_ids or _attended_segment_ids(segments_df, attended_snv_table)
 
     render_metric_cards(
         [
@@ -2294,7 +2408,7 @@ def _render_economic_page(
             },
         ]
     )
-    _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget, attended_km)
+    _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget, attended_km, attended_ids)
     if budget_items is not None and not budget_items.empty:
         _render_budget_cost_by_year(budget_items)
         _render_budget_cost_by_solution(budget_items)
@@ -2329,6 +2443,7 @@ def _render_economic_page(
         budget_items=budget_items,
         segments_df=segments_df,
         priority_table=prioritized_table,
+        attended_ids=attended_ids,
     )
 
 
@@ -2607,8 +2722,9 @@ def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
         budget_items = budget_items[budget_items["SNV"].astype(str).isin(top_snvs)].copy()
 
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, annual_budget)
-    attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
+    attended_snv_table, attended_km, attended_ids = _segment_attendance(
+        snv_budget_table, budget_items, annual_budget, work
+    )
     annual_coverage = min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0
     faltante = max(total_need - annual_budget * 1_000_000, 0.0)
 
@@ -2698,6 +2814,7 @@ def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
         segments_df=pdf_segments_df,
         priority_table=work,
         class_colors=zona_colors,
+        attended_ids=attended_ids,
         solution_color=lambda label: solucao_iri_color.get(str(label), "#9fb9d9"),
     )
 
@@ -2791,8 +2908,7 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int, atten
     # = tela Cenário Econômico). Comparativo/compare passam anual×horizonte (senão um SNV
     # multi-ano nunca cabe em 1 ano → gerava 0 km na Paragon).
     eff_budget_mi = attended_budget_mi if attended_budget_mi is not None else annual_budget
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, eff_budget_mi)
-    attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
+    attended_tbl, attended_km, _ = _segment_attendance(snv_budget_table, budget_items, eff_budget_mi, prioritized_table)
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
     custo_por_ano = pd.DataFrame()
@@ -2816,6 +2932,12 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int, atten
         "scope_km": scope_km,
         "custo_por_ano": custo_por_ano,
         "custo_por_snv": custo_por_snv,
+        "attended_snv": (
+            [{"snv": str(r["SNV"]), "ext_km": round(float(r["Extensão"]), 2),
+              "custo": float(r["Custo econômico"])}
+             for r in attended_tbl.to_dict("records")]
+            if attended_tbl is not None and not attended_tbl.empty else []
+        ),
         "scenario_label": scenarios[0]["cenario"],
     }
 
@@ -2861,8 +2983,7 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended
     # = tela Cenário Econômico). Comparativo/compare passam anual×horizonte (senão um SNV
     # multi-ano nunca cabe em 1 ano → gerava 0 km na Paragon).
     eff_budget_mi = attended_budget_mi if attended_budget_mi is not None else annual_budget
-    attended_snv_table = _select_snv_attended_by_budget(snv_budget_table, eff_budget_mi)
-    attended_km = float(attended_snv_table["Extensão"].sum()) if not attended_snv_table.empty else 0.0
+    attended_tbl, attended_km, _ = _segment_attendance(snv_budget_table, budget_items, eff_budget_mi, work)
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
     custo_por_ano = pd.DataFrame()
@@ -2886,6 +3007,12 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended
         "scope_km": scope_km,
         "custo_por_ano": custo_por_ano,
         "custo_por_snv": custo_por_snv,
+        "attended_snv": (
+            [{"snv": str(r["SNV"]), "ext_km": round(float(r["Extensão"]), 2),
+              "custo": float(r["Custo econômico"])}
+             for r in attended_tbl.to_dict("records")]
+            if attended_tbl is not None and not attended_tbl.empty else []
+        ),
         "scenario_label": "Matriz Revitaliza DNIT/RO",
     }
 
@@ -3229,9 +3356,13 @@ def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budge
     )
 
 
-def _build_service_order_detail(attended_snv_table, priority_table) -> pd.DataFrame:
+def _build_service_order_detail(attended_snv_table, priority_table, attended_ids: set | None = None) -> pd.DataFrame:
     """Detalhamento por segmento p/ ordem de serviço: trechos contíguos que precisam
-    de intervenção (solução final do IAP), por SNV atendido, em ordem de prioridade."""
+    de intervenção (solução final do IAP), por SNV atendido, em ordem de prioridade.
+
+    Quando `attended_ids` é informado (corte por segmento), restringe aos segmentos
+    efetivamente financiados — assim um SNV parcialmente atendido só lista a porção
+    coberta pelo orçamento."""
     if (
         attended_snv_table is None
         or attended_snv_table.empty
@@ -3239,6 +3370,11 @@ def _build_service_order_detail(attended_snv_table, priority_table) -> pd.DataFr
         or priority_table.empty
     ):
         return pd.DataFrame()
+
+    if attended_ids and "_segment_id" in priority_table.columns:
+        priority_table = priority_table[priority_table["_segment_id"].astype(int).isin(attended_ids)]
+        if priority_table.empty:
+            return pd.DataFrame()
 
     rows = []
     for snv in attended_snv_table["SNV"].astype(str).tolist():
@@ -3284,6 +3420,7 @@ def _render_work_plan_button(
     priority_table=None,
     class_colors: dict | None = None,
     solution_color=None,
+    attended_ids: set | None = None,
 ) -> None:
     """Botão no fim da tela: gera o PDF do plano de trabalho do cenário atual."""
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
@@ -3304,8 +3441,16 @@ def _render_work_plan_button(
             else set()
         )
         plan_budget = budget_items
-        if budget_items is not None and not budget_items.empty and attended_snvs:
-            plan_budget = budget_items[budget_items["SNV"].astype(str).isin(attended_snvs)].copy()
+        if budget_items is not None and not budget_items.empty:
+            if attended_ids:
+                # Corte por segmento: só os segmentos efetivamente financiados.
+                plan_budget = budget_items[budget_items["_segment_id"].astype(int).isin(attended_ids)].copy()
+            elif attended_snvs:
+                plan_budget = budget_items[budget_items["SNV"].astype(str).isin(attended_snvs)].copy()
+        plan_attended_ids = (
+            attended_ids if attended_ids is not None
+            else _attended_segment_ids(segments_df, attended_snv_table)
+        )
         with st.spinner("Gerando plano de trabalho..."):
             st.session_state[state_key] = build_work_plan_pdf(
                 road=road or "Rodovia",
@@ -3321,10 +3466,10 @@ def _render_work_plan_button(
                 attended_km=attended_km,
                 budget_items=plan_budget,
                 segments=seg_records,
-                attended_ids=_attended_segment_ids(segments_df, attended_snv_table),
+                attended_ids=plan_attended_ids,
                 class_colors=class_colors,
                 solution_color=solution_color,
-                segments_detail=_build_service_order_detail(attended_snv_table, priority_table),
+                segments_detail=_build_service_order_detail(attended_snv_table, priority_table, plan_attended_ids),
             )
 
     if st.session_state.get(state_key):
@@ -5262,26 +5407,25 @@ def _iagon_simulate_economic_scenario(
     custo_por_ano = pipe.get("custo_por_ano")
     custo_por_snv = pipe.get("custo_por_snv")
 
-    # Lista SNVs por prioridade — atendidos vs fora. MESMA lógica de
-    # _select_snv_attended_by_budget (ordem estrita: para no 1º que não couber),
-    # para que sum(atendidos.ext) == attended_km do pipeline (carteira de 1 ano).
-    snvs_atendidos: list[dict] = []
+    # Lista SNVs por prioridade — atendidos vs fora. Usa a carteira POR SEGMENTO
+    # do pipeline (_segment_attendance), em que um SNV pode entrar parcialmente,
+    # garantindo sum(atendidos.ext) == attended_km. SNV com porção atendida conta
+    # como atendido (a extensão/custo são apenas a parte coberta pelo orçamento).
+    snvs_atendidos: list[dict] = [
+        {"snv": a["snv"], "ext_km": a["ext_km"], "custo": a["custo"]}
+        for a in pipe.get("attended_snv", [])
+    ]
+    atendidos_set = {a["snv"] for a in snvs_atendidos}
     snvs_fora: list[dict] = []
     if custo_por_snv is not None and not custo_por_snv.empty:
-        remaining = annual_budget_val
-        corte = False
         for _, r in custo_por_snv.iterrows():
-            row = {
+            if str(r["SNV"]) in atendidos_set:
+                continue  # já listado em atendidos (parcial ou total)
+            snvs_fora.append({
                 "snv": str(r["SNV"]),
                 "ext_km": round(float(r["Extensão"]), 2),
                 "custo": float(r["Custo"]),
-            }
-            if corte or row["custo"] > remaining:
-                corte = True
-                snvs_fora.append(row)
-            else:
-                remaining -= row["custo"]
-                snvs_atendidos.append(row)
+            })
 
     return {
         "available": True,
