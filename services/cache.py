@@ -31,8 +31,21 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+# Garante que o .env (com MYSQL_DB) esteja carregado antes de montar o prefixo.
+# Necessário porque este módulo é importado antes do src.database (que também
+# chama load_dotenv) na cadeia de imports do v1. Idempotente.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-_CACHE_PREFIX = os.getenv("CACHE_PREFIX", "sgp:")
+# Prefixo isolado por banco: v1 (sigma_dnitro) e v2/gestao (sigma_dnitro_backup)
+# dividem o mesmo Redis. Sem o nome do banco no prefixo, os caches (chaveados
+# só pelos argumentos) colidiriam e um serviço serviria dados do outro, além de
+# o flush de um zerar o cache do outro. CACHE_PREFIX explícito tem precedência.
+_CACHE_PREFIX = os.getenv("CACHE_PREFIX") or f"sgp:{os.getenv('MYSQL_DB', '')}:"
 _DEFAULT_TTL = int(os.getenv("CACHE_DEFAULT_TTL", "1800"))  # 30 min
 
 _redis_client = None
@@ -155,6 +168,34 @@ def cache_flush_all() -> int:
     except Exception as exc:
         logger.warning(f"Cache: flush_all falhou: {exc!r}")
         return 0
+
+
+def get_meta(key: str) -> str | None:
+    """Lê um valor de metadados (string) do Redis. Sem pickle, sem TTL.
+
+    Usado para guardar a assinatura dos cenários e detectar mudanças no banco.
+    Chave real: ``{prefix}meta:{key}``.
+    """
+    cli = _connect_redis()
+    if cli is None or not _redis_alive:
+        return None
+    try:
+        raw = cli.get(f"{_CACHE_PREFIX}meta:{key}")
+        return raw.decode("utf-8") if raw is not None else None
+    except Exception as exc:
+        logger.warning(f"Cache: get_meta falhou para {key}: {exc!r}")
+        return None
+
+
+def set_meta(key: str, value: str) -> None:
+    """Grava um valor de metadados (string) no Redis, sem TTL."""
+    cli = _connect_redis()
+    if cli is None or not _redis_alive:
+        return
+    try:
+        cli.set(f"{_CACHE_PREFIX}meta:{key}", value.encode("utf-8"))
+    except Exception as exc:
+        logger.warning(f"Cache: set_meta falhou para {key}: {exc!r}")
 
 
 def cache_stats() -> dict:

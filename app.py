@@ -33,6 +33,7 @@ from services.overview_service import (
     get_overview_data,
     get_projection_data,
     get_solutions_data,
+    ensure_fresh_data,
     IAP_META,
     _DNIT_GROUP_COLORS,
     _dnit_solution_group,
@@ -6406,6 +6407,9 @@ def _render_scenario_comparison(road: str) -> None:
 
 
 def main() -> None:
+    # Invalida o cache automaticamente se os cenários mudaram no banco (SIGMA).
+    # Mesma quantidade e mesma data => mantém cache; diferente => recarrega tudo.
+    ensure_fresh_data()
     inject_css()
     page = st.query_params.get("page", "overview")
     if page not in {"visaogeral", "overview", "solucoes", "projecao", "cenario", "risco"}:

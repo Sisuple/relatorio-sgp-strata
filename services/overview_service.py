@@ -10,7 +10,7 @@ from typing import Any
 import pandas as pd
 
 from core.constants import AVAILABLE_ROADS, DEFAULT_ROAD
-from services.cache import cached
+from services.cache import cached, cache_flush_all, get_meta, set_meta
 from src.database import MySQLConnection
 
 
@@ -2408,3 +2408,107 @@ def get_dnit_projection_schedule(selected_road: str | None = None, scenario_key:
         "custo_por_ano": custo_por_ano,
         "group_colors": _DNIT_GROUP_COLORS,
     }
+
+
+# ---------------------------------------------------------------------------
+# Invalidação automática de cache quando os cenários mudam no banco.
+#
+# O SIGMA grava/edita/remove cenários (analise_gerencial_dados_trechos) direto
+# no banco, mas o relatório cacheia de forma agressiva em duas camadas:
+#   - Redis  (sgp:*), compartilhado entre workers;
+#   - lru_cache, em processo, que SOBREVIVE ao flush do Redis e só some no
+#     restart — por isso uma rodovia/cenário novo não aparecia.
+#
+# Em vez de depender de flush manual, a cada entrada no relatório calculamos
+# uma assinatura barata dos cenários (quantidade + última atualização + maior
+# id). Se mudou, invalidamos o cache. Mesma quantidade e mesma data => nada
+# muda. Quantidade diferente ou data mais nova => recarrega tudo.
+# ---------------------------------------------------------------------------
+
+# Funções com cache em processo (lru_cache): precisam ser limpas explicitamente.
+_LOCAL_CACHED_FUNCS = (
+    _get_first_projection_year,
+    _get_iap_scenarios_from_database,
+    _get_available_roads_from_database,
+    _load_dnit_matrix,
+    _get_dnit_analysis_for_road,
+)
+
+# Assinatura já vista POR ESTE processo (cada worker mantém a sua).
+_LAST_SCENARIOS_SIGNATURE: str | None = None
+_SCENARIOS_SIGNATURE_META_KEY = "scenarios_signature"
+
+
+def _compute_scenarios_signature() -> str:
+    """Assinatura barata dos cenários no banco (sem cache).
+
+    Detecta inserção (count/maior id sobem), edição (max updated_at muda) e
+    remoção lógica (count cai, pois conta só deleted_at IS NULL).
+    """
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT
+            COUNT(*)                       AS n,
+            COALESCE(MAX(updated_at), '')  AS u,
+            COALESCE(MAX(id), 0)           AS mx
+        FROM analise_gerencial_dados_trechos
+        WHERE deleted_at IS NULL
+        """
+    ) or []
+    if not rows:
+        return "0::0"
+    r = rows[0]
+    return f"{r['n']}:{r['u']}:{r['mx']}"
+
+
+def _clear_local_caches() -> None:
+    """Limpa os lru_cache em processo deste worker."""
+    for fn in _LOCAL_CACHED_FUNCS:
+        try:
+            fn.cache_clear()
+        except Exception:
+            pass
+
+
+def ensure_fresh_data() -> bool:
+    """Garante que o relatório reflita os cenários atuais do banco.
+
+    Chamada a cada entrada/rerun. Compara a assinatura dos cenários com a
+    última vista por este processo (fast path). Se mudou, limpa o cache em
+    processo (lru_cache) deste worker e, se a assinatura global no Redis também
+    estiver defasada, faz flush do cache compartilhado — assim apenas o
+    primeiro worker a notar a mudança paga o flush, mas todos atualizam o
+    próprio lru_cache.
+
+    Retorna True se invalidou o cache compartilhado.
+    """
+    global _LAST_SCENARIOS_SIGNATURE
+    try:
+        signature = _compute_scenarios_signature()
+    except Exception:
+        # Em falha ao calcular a assinatura, não mexe no cache.
+        return False
+
+    # Fast path: este processo já está atualizado.
+    if signature == _LAST_SCENARIOS_SIGNATURE:
+        return False
+
+    # Mudou (ou é a 1ª execução deste worker): limpa o cache local sempre.
+    _clear_local_caches()
+
+    # A chave de meta é por banco: v1 (sigma_dnitro) e v2/gestao
+    # (sigma_dnitro_backup) compartilham o mesmo Redis/prefixo, então sem o
+    # sufixo do banco eles ficariam invalidando um ao outro a cada acesso.
+    meta_key = f"{_SCENARIOS_SIGNATURE_META_KEY}:{MySQLConnection().database}"
+
+    # Flush do cache compartilhado só se a assinatura global estiver defasada.
+    invalidated = False
+    stored = get_meta(meta_key)
+    if stored != signature:
+        cache_flush_all()
+        set_meta(meta_key, signature)
+        invalidated = True
+
+    _LAST_SCENARIOS_SIGNATURE = signature
+    return invalidated
