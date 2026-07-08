@@ -1,5 +1,14 @@
 """
-Módulo de conexão com MySQL
+Módulo de conexão com MySQL.
+
+Camada fina de acesso ao banco. Oferece dois caminhos:
+- ``get_connection`` -> conexão PyMySQL nova a cada chamada (de propósito NÃO
+  cacheada; ver docstring do método) para SELECT/UPDATE avulsos.
+- ``get_engine`` -> engine SQLAlchemy cacheado (``st.cache_resource``), usado
+  para leituras com pandas (``read_sql``) e reaproveitamento de pool.
+
+As credenciais vêm do .env (MYSQL_HOST/PORT/DB/USER/PASSWORD), carregado no
+import via ``load_dotenv()``.
 """
 import os
 import pymysql
@@ -16,6 +25,7 @@ class MySQLConnection:
     """Classe para gerenciar conexões com MySQL"""
     
     def __init__(self):
+        """Lê as credenciais do .env. O engine SQLAlchemy só é criado sob demanda."""
         self.host = os.getenv('MYSQL_HOST')
         self.port = int(os.getenv('MYSQL_PORT', 3306))
         self.database = os.getenv('MYSQL_DB')
@@ -48,7 +58,14 @@ class MySQLConnection:
     
     @st.cache_resource
     def get_engine(_self):
-        """Retorna um engine SQLAlchemy"""
+        """Retorna um engine SQLAlchemy (cacheado entre reruns do Streamlit).
+
+        O parâmetro é ``_self`` (com underscore) porque ``st.cache_resource``
+        tenta hashear os argumentos; o underscore instrui o Streamlit a ignorar
+        ``self`` no hash. ``pool_pre_ping`` testa a conexão antes de usá-la e
+        ``pool_recycle=1800`` recicla conexões ociosas há 30 min, evitando o
+        erro de sessão MySQL expirada.
+        """
         try:
             connection_url = URL.create(
                 "mysql+pymysql",
@@ -70,7 +87,13 @@ class MySQLConnection:
             return None
     
     def execute_query(self, query, params=None):
-        """Executa uma query e retorna os resultados"""
+        """Executa um SELECT e devolve todas as linhas como lista de dicts.
+
+        Retorna None se a conexão falhar ou a query der erro (o erro aparece na
+        UI via ``st.error``). ``params`` é passado ao driver para binding seguro
+        dos valores (evita SQL injection). O ``with connection`` fecha o socket
+        ao fim — coerente com a política de não cachear conexões.
+        """
         connection = self.get_connection()
         if not connection:
             return None
@@ -86,7 +109,11 @@ class MySQLConnection:
             return None
     
     def execute_update(self, query, params=None):
-        """Executa uma query de UPDATE/INSERT/DELETE"""
+        """Executa INSERT/UPDATE/DELETE com commit. True em sucesso, False em erro.
+
+        Em caso de exceção faz rollback (se a conexão ainda estiver aberta) para
+        não deixar a transação pela metade.
+        """
         connection = self.get_connection()
         if not connection:
             return False
@@ -104,7 +131,7 @@ class MySQLConnection:
             return False
     
     def test_connection(self):
-        """Testa a conexão com o banco"""
+        """Testa a conexão executando um ``SELECT 1``. True se o banco respondeu."""
         connection = self.get_connection()
         if connection:
             try:
@@ -124,11 +151,16 @@ class MySQLConnection:
         return self.execute_query(query)
     
     def get_table_info(self, table_name):
-        """Retorna informações sobre uma tabela"""
+        """Retorna o schema (DESCRIBE) de uma tabela.
+
+        ``table_name`` é interpolado direto na query porque identificadores
+        (nomes de tabela) não podem ir como parâmetro do driver; use apenas com
+        nomes vindos de fonte confiável.
+        """
         query = f"DESCRIBE {table_name}"
         return self.execute_query(query)
     
     def close(self):
-        """Fecha a conexão"""
+        """Descarta o pool do engine SQLAlchemy (libera as conexões abertas)."""
         if self.engine:
             self.engine.dispose()
