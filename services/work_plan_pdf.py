@@ -43,6 +43,7 @@ _CONTENT_W = _PAGE_W - 32 * mm  # margens de 16mm
 
 
 def _money(value: float) -> str:
+    """Formata reais de forma compacta: 'R$ 1.2 mi', 'R$ 350 mil' ou 'R$ 42'."""
     value = float(value or 0)
     if value >= 1_000_000:
         return f"R$ {value / 1_000_000:.1f} mi"
@@ -52,15 +53,18 @@ def _money(value: float) -> str:
 
 
 def _km(value: float) -> str:
+    """Formata uma extensão em km com uma casa decimal (ex.: '12.3 km')."""
     return f"{float(value or 0):.1f} km"
 
 
 def _truncate(text: str, limit: int) -> str:
+    """Limita ``text`` a ``limit`` caracteres, acrescentando '…' se estourar."""
     text = str(text)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _styles() -> dict[str, ParagraphStyle]:
+    """Estilos de parágrafo do relatório: título, subtítulo, H2 e texto pequeno."""
     base = getSampleStyleSheet()
     return {
         "title": ParagraphStyle("wp_title", parent=base["Title"], fontSize=18, textColor=_INK, spaceAfter=2),
@@ -103,9 +107,21 @@ def _map_drawing(
     width: float = _CONTENT_W,
     height: float = 250,
 ) -> Drawing:
+    """Desenha o mapa esquemático (vetorial) dos trechos do cenário.
+
+    Usa a geometria real (lat/lon) de cada segmento e projeta num plano com
+    correção de longitude por ``cos(latitude média)`` (aproximação
+    equirretangular) para não distorcer as distâncias. Os segmentos NÃO
+    atendidos são desenhados primeiro em cinza e os atendidos por cima,
+    coloridos pela classe IAP, para ficarem em destaque.
+
+    ``attended_ids`` é o conjunto de ``segment_id`` atendidos; ``class_colors``
+    mapeia classe IAP -> cor hex.
+    """
     d = Drawing(width, height)
     d.add(Rect(0, 0, width, height, fillColor=HexColor("#fbfdfe"), strokeColor=_LINE, strokeWidth=0.8))
 
+    # Junta todos os pontos (lat, lon) de todos os caminhos para achar a bbox.
     coords = [(la, lo) for seg in segments for path in seg.get("paths", []) for (la, lo) in path]
     if not coords:
         d.add(String(width / 2, height / 2, "Sem geometria para o mapa", fontSize=9, textAnchor="middle", fillColor=_MUTED))
@@ -116,16 +132,19 @@ def _map_drawing(
     lat_min, lat_max = min(lats), max(lats)
     lon_min, lon_max = min(lons), max(lons)
     mean_lat = (lat_min + lat_max) / 2
+    # 1 grau de longitude "encurta" longe do equador; corrige por cos(lat média).
     cos_lat = math.cos(math.radians(mean_lat)) or 1e-6
 
     pad = 16
     dlat = (lat_max - lat_min) or 1e-6
     dlon = ((lon_max - lon_min) or 1e-6) * cos_lat
+    # Escala única (mantém proporção) que faz a bbox caber na área útil c/ padding.
     scale = min((width - 2 * pad) / dlon, (height - 2 * pad) / dlat)
     map_w, map_h = dlon * scale, dlat * scale
-    ox, oy = (width - map_w) / 2, (height - map_h) / 2
+    ox, oy = (width - map_w) / 2, (height - map_h) / 2  # offsets p/ centralizar
 
     def to_xy(la: float, lo: float) -> tuple[float, float]:
+        """Projeta (lat, lon) para coordenadas de tela (x, y) do Drawing."""
         return ox + (lo - lon_min) * cos_lat * scale, oy + (la - lat_min) * scale
 
     # Desenha primeiro os não atendidos (cinza) e depois os atendidos (coloridos).
@@ -147,12 +166,14 @@ def _map_drawing(
 
 
 def _legend_drawing(items: list[tuple[str, str]], width: float = _CONTENT_W) -> Drawing:
+    """Legenda horizontal: para cada (rótulo, cor), um quadradinho + texto lado a lado."""
     height = 16
     d = Drawing(width, height)
     x = 0.0
     for label, color in items:
         d.add(Rect(x, 4, 9, 9, fillColor=HexColor(color), strokeColor=None))
         d.add(String(x + 13, 5, label, fontSize=7.5, fillColor=_MUTED))
+        # Avança x pela largura estimada do item (texto ~4.6px por caractere).
         x += 16 + len(label) * 4.6 + 14
     return d
 
@@ -162,6 +183,12 @@ def _hbar_chart(
     value_fmt: Callable[[float], str],
     width: float = _CONTENT_W,
 ) -> Drawing:
+    """Gráfico de barras horizontais.
+
+    Cada item de ``data`` é (rótulo, valor, cor). Por linha desenha: rótulo à
+    esquerda, uma trilha de fundo, a barra preenchida proporcional ao maior
+    valor e o valor formatado por ``value_fmt`` à direita.
+    """
     rows = len(data)
     row_h = 22
     height = max(rows * row_h + 6, row_h)
@@ -169,6 +196,7 @@ def _hbar_chart(
     if not data:
         return d
 
+    # Barras proporcionais ao maior valor; larguras fixas p/ rótulo e valor.
     max_val = max((v for _, v, _ in data), default=1.0) or 1.0
     label_w = 150.0
     val_w = 110.0
@@ -178,14 +206,16 @@ def _hbar_chart(
     y = height - 18
     for label, value, color in data:
         d.add(String(label_w - 8, y + 3, _truncate(label, 30), fontSize=8, textAnchor="end", fillColor=_INK))
-        d.add(Rect(track_x, y, track_w, 12, fillColor=_PANEL, strokeColor=None))
+        d.add(Rect(track_x, y, track_w, 12, fillColor=_PANEL, strokeColor=None))  # trilha de fundo
+        # Barra preenchida: mínimo de 1px para valores ~0 ainda ficarem visíveis.
         d.add(Rect(track_x, y, max(track_w * float(value) / max_val, 1.0), 12, fillColor=HexColor(color), strokeColor=None))
         d.add(String(track_x + track_w + 8, y + 3, value_fmt(value), fontSize=8, fillColor=_MUTED))
-        y -= row_h
+        y -= row_h  # desce uma linha
     return d
 
 
 def _snv_table(attended: pd.DataFrame) -> Table:
+    """Tabela dos SNV atendidos: ranking, SRE, extensão, IPT, IPE, priorização e custo."""
     header = ["#", "SRE", "Extensão", "IPT", "IPE", "Prioriz.", "Custo"]
     rows: list[list[Any]] = [header]
     for i, r in enumerate(attended.to_dict("records"), start=1):
@@ -267,6 +297,7 @@ def _segments_detail_table(detail: pd.DataFrame) -> Table:
 
 
 def _page_footer(canvas, doc) -> None:
+    """Rodapé de toda página: linha divisória, crédito à esquerda e nº da página à direita."""
     canvas.saveState()
     canvas.setStrokeColor(_LINE)
     canvas.line(16 * mm, 12 * mm, _PAGE_W - 16 * mm, 12 * mm)
@@ -297,6 +328,24 @@ def build_work_plan_pdf(
     solution_color: Callable[[str], str],
     segments_detail: pd.DataFrame | None = None,
 ) -> bytes:
+    """Monta o PDF do Plano de Trabalho e devolve os bytes prontos p/ download.
+
+    Recebe tudo já calculado pela camada de serviço (argumentos keyword-only):
+    - identificação: ``road``, ``scenario_label``, ``generated_at``;
+    - premissas: ``annual_budget_mi`` (orçamento anual em milhões), ``horizon``
+      (anos), ``top_label`` (descrição dos trechos);
+    - números: ``metrics`` (KPIs, ex. total_need), ``annual_coverage`` (%),
+      ``scope_snv``, ``attended_km``;
+    - tabelas (pandas): ``attended_snv_table``, ``budget_items``,
+      ``segments_detail``;
+    - mapa: ``segments`` (geometria), ``attended_ids``, ``class_colors``;
+    - cores: ``solution_color`` (mapeia solução -> cor hex).
+
+    As seções são montadas nesta ordem: cabeçalho, faixa de KPIs, mapa +
+    legenda, gráficos de custo (por solução e por ano), tabela de SNV atendidos
+    e detalhamento por segmento (ordem de serviço). As seções condicionais só
+    aparecem quando os DataFrames correspondentes têm dados.
+    """
     styles = _styles()
     buffer = BytesIO()
     doc = SimpleDocTemplate(

@@ -1,8 +1,30 @@
+"""Aplicação Streamlit do Relatório SGP Strata (camada de apresentação).
+
+Este arquivo é o ponto de entrada e o roteador da UI. `main()` lê o parâmetro
+`?page=` da URL e monta a tela correspondente da jornada de decisão executiva:
+
+    Visão geral → Diagnóstico → Soluções → Cenário econômico → Projeção
+       (rede)      (condição)    (o que fazer)  (quanto custa)   (evolução)
+
+Cada trilha metodológica tem seu par de telas: as funções `_render_*` cobrem a
+metodologia **Paragon** e as `_render_dnit_*` cobrem a **Matriz Cadastrada (DNIT)**.
+O roteamento entre as duas é decidido pelo "Tipo de Matriz" escolhido na top bar.
+
+Papel deste módulo: concentrar as REGRAS DE APRESENTAÇÃO e boa parte das regras de
+negócio hardcoded (cores, custos paramétricos, estratégias, mapeamentos código→nome,
+pesos de priorização). Os dados técnicos já vêm processados pelas camadas `services/`
+e `components/`. As regras hardcoded aqui estão catalogadas no README.md Parte II
+(§11 Terminologia/Cores, §12 Limiares, §13 Priorização, §14 Custos/Econômico/Famílias).
+
+Fora do escopo desta documentação: o assistente IAGON (funções `_iagon_*` e
+`_render_iagon_page`/`_render_screen_iagon`), que é o chat de IA embutido nas telas.
+"""
 from __future__ import annotations
 
 import html
 import json
 import math
+import re
 from datetime import date
 from functools import lru_cache
 from io import BytesIO
@@ -15,6 +37,7 @@ from components.cards.metric_card import render_metric_card
 from components.charts.iap_distribution import render_iap_distribution
 from components.charts.linear_diagram import (
     render_condition_linear,
+    render_iap_linear_multi,
     render_iap_linear_zoomable,
 )
 from components.layout.sidebar import render_sidebar
@@ -36,12 +59,14 @@ from services.overview_service import (
     ensure_fresh_data,
     IAP_META,
     _DNIT_GROUP_COLORS,
+    _DNIT_ORDER,
     _dnit_solution_group,
     _normalize_road_code,
 )
 from services.prioritization import (
     calcular_indice_priorizacao,
     calcular_indice_priorizacao_dnit,
+    calcular_indice_priorizacao_segmento,
     classificar_prioridade,
 )
 from services.cache import cached
@@ -50,7 +75,7 @@ from services import iagon
 
 
 st.set_page_config(
-    page_title="DNIT · Pavimentos",
+    page_title="IAGON · Pavimentos",
     page_icon="●",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -58,6 +83,11 @@ st.set_page_config(
 
 
 def inject_css() -> None:
+    """Injeta o tema visual (CSS) global do painel.
+
+    Define as variáveis de cor (fundo escuro, superfícies, bordas) e estiliza os
+    componentes Streamlit para o visual executivo do relatório. Só aparência.
+    """
     st.markdown(
         """
         <style>
@@ -155,6 +185,24 @@ def inject_css() -> None:
             @media (max-width: 760px) {
               div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker) div[data-testid="stSlider"] { padding-left: 52px; }
             }
+            /* Painel IAGON por tela — botão estilizado, alinhado à direita (sem position:fixed,
+               que quebrava o layout/scroll do Streamlit). */
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark) {
+                border: none !important; background: transparent !important; box-shadow: none !important; padding: 0 !important;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark) > div[data-testid="stVerticalBlock"] {
+                align-items: flex-end;
+            }
+            .iagon-fab-mark { display: none; }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark) [data-testid="stPopover"] button {
+                border-radius: 999px !important; border: none !important;
+                background: linear-gradient(135deg,#00c2e8,#0a6ee0) !important; color: #04121a !important;
+                font-weight: 850 !important; padding: 11px 20px !important; box-shadow: 0 12px 30px rgba(0,194,232,.45) !important;
+            }
+            .iagon-cv-head { font-size: 15px; color: #f4f7fb; }
+            .iagon-cv-sub { font-size: 12px; color: #92a1ad; margin: 2px 0 10px; }
+            .iagon-cv-filtro { font-size: 12.5px; color: #cbd5dd; background: rgba(7,17,25,.55); border: 1px solid rgba(148,163,184,.2); border-radius: 10px; padding: 10px 12px; margin-bottom: 6px; line-height: 1.5; }
+            .iagon-cv-q { font-size: 12.5px; color: #8fd3ff; font-weight: 700; margin: 12px 0 4px; }
             .chart-heading h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .chart-heading p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
             .iap-body { height: 345px; display: grid; grid-template-columns: 1fr 260px 1fr; gap: 28px; align-items: end; }
@@ -190,6 +238,12 @@ def inject_css() -> None:
             .linear-solution-legend { justify-self: end; margin-top: -4px; padding-top: 4px; max-width: none; }
             .linear-legend-item { display: inline-flex; align-items: center; gap: 5px; color: #cbd5dd; font-size: 11px; font-weight: 700; white-space: nowrap; }
             .linear-dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+            /* Legenda combinada (Situação sobre Solução, colunas pareadas pela cor) — diagrama multi-sentido. */
+            .linear-combined-legend { display: flex; justify-content: center; margin-top: 22px; }
+            .lcl-grid { display: inline-grid; grid-template-columns: auto repeat(7, auto); gap: 9px 16px; align-items: center; }
+            .lcl-rowlabel { color: #9aa8b3; font-size: 11px; font-weight: 850; text-align: right; padding-right: 4px; }
+            .lcl-cell { display: inline-flex; align-items: center; gap: 6px; color: #cbd5dd; font-size: 11px; font-weight: 700; white-space: nowrap; }
+            .lcl-dot { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
             .solution-card { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; box-shadow: 0 18px 44px rgba(0,0,0,.24); overflow: hidden; }
             .solution-card-head { padding: 20px 20px 16px; border-bottom: 1px solid rgba(148,163,184,.1); }
             .solution-card-head h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
@@ -204,6 +258,16 @@ def inject_css() -> None:
             .net-road-link { color: #e8f1f8; font-weight: 750; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
             .net-road-link:hover { color: #00c2e8; text-decoration: underline; }
             .net-rank-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; flex: none; }
+            /* Ranking das rodovias como gráfico de barras horizontais. */
+            .net-rank-body { padding: 16px 20px 20px; }
+            .net-rank-row { display: grid; grid-template-columns: 190px 1fr 52px; grid-template-rows: auto auto; align-items: center; column-gap: 14px; row-gap: 2px; margin: 11px 0; }
+            .net-rank-name { grid-row: 1 / span 2; color: #e8f1f8; font-size: 13px; font-weight: 750; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .net-rank-name:hover { color: #00c2e8; }
+            .net-rank-track { height: 16px; border-radius: 5px; background: rgba(148,163,184,.10); overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }
+            .net-rank-bar { height: 100%; border-radius: 5px; background: #00c2e8; position: relative; }   /* extensão (azul Excelente = OK) */
+            .net-rank-interv { position: absolute; left: 0; top: 0; height: 100%; background: #f2a51a; border-radius: 5px 0 0 5px; }  /* precisa de intervenção */
+            .net-rank-val { color: #e5edf3; font-size: 13px; font-weight: 850; text-align: right; }
+            .net-rank-extra { grid-column: 2 / span 2; color: #8f9eaa; font-size: 11px; }
             .iagon-hero { display: flex; gap: 14px; align-items: center; margin: 4px 0 16px; padding: 18px 20px; border-radius: 16px; border: 1px solid #1d3848; background: linear-gradient(120deg, rgba(0,194,232,.10), rgba(11,29,40,.45)); }
             .iagon-avatar { width: 46px; height: 46px; flex: none; display: grid; place-items: center; border-radius: 14px; background: linear-gradient(135deg, #00c2e8, #0a6ee0); color: #04121a; font-size: 22px; font-weight: 800; box-shadow: 0 10px 28px rgba(0,194,232,.35); }
             .iagon-hero h3 { margin: 0; color: var(--text); font-size: 16px; font-weight: 850; }
@@ -287,7 +351,12 @@ def inject_css() -> None:
             .solution-bars { height: 270px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
             .solution-y-axis { position: relative; height: 188px; margin-top: 18px; border-right: 1px solid rgba(148,163,184,.14); }
             .solution-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; }
-            .solution-chart-area { position: relative; padding-top: 18px; overflow-x: auto; overflow-y: visible; }
+            .solution-chart-area { position: relative; padding-top: 18px; overflow-x: auto; overflow-y: visible; scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.5) rgba(148,163,184,.12); }
+            /* Barra de rolagem SEMPRE visível (no macOS o overlay fica oculto e o gráfico parece estourar). */
+            .solution-chart-area::-webkit-scrollbar { height: 10px; }
+            .solution-chart-area::-webkit-scrollbar-track { background: rgba(148,163,184,.10); border-radius: 6px; }
+            .solution-chart-area::-webkit-scrollbar-thumb { background: rgba(148,163,184,.45); border-radius: 6px; }
+            .solution-chart-area::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,.72); }
             .solution-chart-plot { height: 188px; border-bottom: 2px solid rgba(148,163,184,.34); background: repeating-linear-gradient(to top, transparent 0, transparent 48px, rgba(148,163,184,.10) 49px, transparent 50px); }
             .solution-bar-grid { height: 188px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); align-items: end; gap: 26px; padding: 0 16px; min-width: 100%; }
             .solution-bar-item { height: 188px; display: grid; align-items: end; justify-items: center; min-width: 156px; }
@@ -336,6 +405,15 @@ def inject_css() -> None:
             .economic-line { position: absolute; left: 0; right: 0; height: 2px; background: #00c2e8; opacity: .62; }
             .economic-labels { margin: 8px 16px 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(82px, 1fr); gap: 18px; color: #8f9eaa; font-size: 11px; text-align: center; }
             .economic-legend { display: flex; justify-content: center; gap: 16px; color: #cbd5dd; font-size: 11px; margin-top: 16px; flex-wrap: wrap; }
+            /* Rolagem horizontal DENTRO do card (muitos anos) com barra sempre visível. */
+            .economic-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 10px; scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.5) rgba(148,163,184,.12); }
+            .economic-scroll::-webkit-scrollbar { height: 10px; }
+            .economic-scroll::-webkit-scrollbar-track { background: rgba(148,163,184,.10); border-radius: 6px; }
+            .economic-scroll::-webkit-scrollbar-thumb { background: rgba(148,163,184,.45); border-radius: 6px; }
+            .economic-scroll::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,.72); }
+            .economic-scroll .economic-plot { min-width: max-content; }
+            .economic-scroll .economic-bars { position: static; inset: auto; height: 210px; padding: 0 16px; }
+            .economic-scroll .economic-labels { min-width: max-content; }
             .economic-legend span { display: inline-flex; align-items: center; gap: 6px; }
             .economic-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
             .priority-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; margin-right: 7px; }
@@ -356,7 +434,12 @@ def inject_css() -> None:
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers de UI, navegação e top bar (seletores Rodovia / Tipo de Matriz / Cenário)
+# ═══════════════════════════════════════════════════════════════════════════
+
 def _filter_label(label: str) -> None:
+    """Renderiza o rótulo pequeno acima de um filtro da top bar."""
     st.markdown(f'<div class="filter-label">{label}</div>', unsafe_allow_html=True)
 
 
@@ -381,6 +464,36 @@ _DIAGNOSIS_TO_MATRIX = {
 _MATRIX_TO_DIAGNOSIS = {v: k for k, v in _DIAGNOSIS_TO_MATRIX.items()}
 
 
+def _short_scenario_label(s: dict | None) -> str:
+    """Rótulo CURTO do cenário: '<sentido> · <segmentação>' (ex.: 'CR e DE · SH'),
+    em vez do nome longo do banco. Robusto aos dois formatos de `cenario`."""
+    if not s:
+        return ""
+    cen = s.get("cenario") or ""
+    segm = re.search(r"\((SH|Fixa|\d+\s*km)\)", cen, re.I)
+    seg = segm.group(1) if segm else (s.get("segment_type_label") or "")
+    low = cen.lower()
+    # Ordem importa: 'cr e de' antes; 'decrescente' antes de 'crescente'
+    # (pois "deCRESCENTE" contém "crescente").
+    if "cr e de" in low or "cr/de" in low or "ambas" in low:
+        sent = "CR e DE"
+    elif "decrescente" in low:
+        sent = "DECRESCENTE"
+    elif "crescente" in low:
+        sent = "CRESCENTE"
+    elif "todos" in low:
+        sent = "TODOS"
+    else:
+        sent = ""
+    # Sentidos isolados exibidos como pista simples (LE/LD), conforme padrão do usuário.
+    if sent == "DECRESCENTE":
+        return "Pista simples - LE"
+    if sent == "CRESCENTE":
+        return "Pista simples - LD"
+    parts = [p for p in (sent, seg) if p]
+    return " · ".join(parts) if parts else (cen or str(s.get("key", "")))
+
+
 def render_top_bar(
     selected_road: str,
     *,
@@ -389,8 +502,15 @@ def render_top_bar(
     keep_title: bool = False,
     show_filters: bool = True,
     show_scenario: bool = True,
+    multi_scenario: bool = False,
     diagnosis_options: list[str] | None = None,
 ) -> tuple[str, str | None, str | None]:
+    """Monta a barra superior (título + seletores) comum a todas as telas.
+
+    Renderiza os filtros de Rodovia, Tipo de Matriz e Cenário conforme os flags
+    recebidos, e devolve `(diagnóstico, rodovia, chave_cenário)` — o diagnóstico
+    (Paragon / DNIT / Comparativo) é o que decide qual pipeline `main()` chama.
+    """
     options = diagnosis_options or ["Diagnóstico Paragon", "Diagnóstico DNIT"]
     # "Tipo de Matriz" é o seletor único; cada opção mapeia para um diagnóstico interno
     # (Paragon ↔ intervencoes_iap, Matriz Cadastrada ↔ intervencoes_dnit/pipeline DNIT).
@@ -401,6 +521,7 @@ def render_top_bar(
     diagnosis = page_title
 
     def _matrix_selectbox() -> str:
+        # Selectbox de "Tipo de Matriz" (Paragon / Matriz Cadastrada / Comparativo).
         # Evita exceção do Streamlit quando o valor salvo (ex.: Comparativo) não existe
         # nas opções desta página.
         if st.session_state.get("topbar_matrix_type") not in matrix_options:
@@ -455,14 +576,29 @@ def render_top_bar(
                         scenario_key = None
                     else:
                         _filter_label("Cenários")
-                        scenario_keys = [scenario["key"] for scenario in scenarios]
-                        scenario_labels = {scenario["key"]: scenario["cenario"] for scenario in scenarios}
-                        scenario_key = st.selectbox(
-                            "Cenário",
-                            scenario_keys,
-                            format_func=lambda key: scenario_labels.get(key, key),
-                            label_visibility="collapsed",
-                        ) if scenario_keys else None
+                        scenario_keys = [s["key"] for s in scenarios]
+                        scen_by_key = {s["key"]: s for s in scenarios}
+                        _fmt = lambda k: _short_scenario_label(scen_by_key.get(k))
+                        if multi_scenario and scenario_keys:
+                            # Campo ÚNICO de cenários (multi): a 1ª seleção dirige os cards;
+                            # a lista alimenta o comparativo abaixo (sem 2º campo).
+                            sel = st.multiselect(
+                                "Cenários",
+                                scenario_keys,
+                                default=[scenario_keys[0]],
+                                format_func=_fmt,
+                                key=f"topbar_scen_{selected_out}_{matrix_type}",
+                                label_visibility="collapsed",
+                            )
+                            st.session_state["_topbar_selected_scenarios"] = sel
+                            scenario_key = sel[0] if sel else None
+                        else:
+                            scenario_key = st.selectbox(
+                                "Cenário",
+                                scenario_keys,
+                                format_func=_fmt,
+                                label_visibility="collapsed",
+                            ) if scenario_keys else None
             else:
                 scenario_key = None
 
@@ -481,6 +617,7 @@ def render_top_bar(
 
 
 def render_metric_cards(cards: list[dict]) -> None:
+    """Renderiza uma linha de cards de métrica (KPIs) lado a lado."""
     columns = st.columns(len(cards), gap="medium")
     for column, card in zip(columns, cards):
         with column:
@@ -488,18 +625,27 @@ def render_metric_cards(cards: list[dict]) -> None:
 
 
 def _format_km(value: float) -> str:
+    """Formata quilometragem com 2 casas e vírgula decimal (padrão pt-BR)."""
     return f"{value:.2f}".replace(".", ",")
 
 
 def _filter_caption(label: str) -> None:
+    """Renderiza o rótulo pequeno de um filtro na página de Soluções."""
     st.markdown(f'<div class="solution-filter-label">{html.escape(label)}</div>', unsafe_allow_html=True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Página: SOLUÇÕES (Paragon) — "o que fazer" (matriz de priorização + distribuição)
+# ═══════════════════════════════════════════════════════════════════════════
+
 def _render_solution_filters(table_df):
+    """Renderiza os filtros da tela de Soluções (SRE, Conceito IAP, Tipo de solução)
+    e devolve a tabela já filtrada pelas seleções do usuário."""
     if table_df is None or table_df.empty:
         return table_df
 
     sre_options = sorted(str(value) for value in table_df["SNV"].dropna().unique())
+    # Ordem canônica dos conceitos IAP, do melhor ao pior (ver README §11 / §12.1).
     iap_class_order = ["Excelente", "Bom", "++ Regular", "+ Regular", "- Regular", "Mau", "Péssimo"]
     iap_options = [
         label
@@ -550,10 +696,12 @@ def _render_solution_filters(table_df):
 
 
 def _render_solution_filter_panel(table_df):
+    """Alias fino para `_render_solution_filters` (mantido por compatibilidade)."""
     return _render_solution_filters(table_df)
 
 
 def _solution_table_to_excel(table_df) -> bytes:
+    """Serializa a matriz de priorização Paragon num .xlsx estilizado (bytes)."""
     export_columns = [
         "SNV",
         "Km Inicial",
@@ -586,6 +734,7 @@ def _solution_table_to_excel(table_df) -> bytes:
 
 
 def _render_export_button(table_df) -> None:
+    """Botão de download da matriz Paragon em Excel (oculto se não houver dados)."""
     if table_df is None or table_df.empty:
         return
 
@@ -599,29 +748,36 @@ def _render_export_button(table_df) -> None:
 
 
 def _solution_color(label: str) -> str:
+    """Cor (hex) de uma solução Paragon a partir do NOME exibido.
+
+    REGRA HARDCODED (README §11.4): a cor é decidida por SUBSTRING do rótulo, na
+    ordem abaixo (mais específico primeiro). É frágil — renomear uma solução pode
+    quebrar a cor silenciosamente. A paleta é a mesma dos conceitos IAP e está
+    repetida em ≥4 arquivos (overview_service/overview_map/linear_diagram).
+    """
     normalized = label.lower()
     if "sem intervenção" in normalized or "monitor" in normalized:
-        return "#9fb9d9"
+        return "#9fb9d9"  # OK / monitorar — cinza-azulado
     if "reconstrução" in normalized or "reconstrucao" in normalized:
-        return "#d71920"
+        return "#d71920"  # REC — Péssimo (vermelho)
     if "fresagem" in normalized and "reforço" in normalized:
-        return "#f2a51a"
+        return "#f2a51a"  # RPS+REF — Mau (laranja)
     if "fresagem" in normalized:
-        return "#fff200"
+        return "#fff200"  # RPS — - Regular (amarelo)
     if "reparo localizado" in normalized and "reforço" in normalized:
-        return "#f4f1a6"
+        return "#f4f1a6"  # RL+REF — + Regular
     if "microrrevestimento" in normalized and "reparo localizado" in normalized:
-        return "#b6d7a8"
+        return "#b6d7a8"  # RL+RS — ++ Regular
     if "microrrevestimento" in normalized:
         return "#b6d7a8"
     # RL+RS — rótulo Paragon agora exibido como "Recarga Superficial".
     if "recarga superficial" in normalized:
         return "#b6d7a8"
     if "reparo localizado" in normalized or normalized.startswith("rl"):
-        return "#00a651"
+        return "#00a651"  # RL — Bom (verde)
     if "reforço" in normalized:
         return "#f4f1a6"
-    return "#00a651"
+    return "#00a651"  # fallback: verde (Bom)
 
 
 def _render_solution_distribution(
@@ -633,6 +789,7 @@ def _render_solution_distribution(
     subtitle: str = "Engenharia aplicada · catálogo paramétrico Paragon",
     color_fn=None,
 ) -> None:
+    """Gráfico de barras (HTML) com a distribuição de km por tipo de solução na rede."""
     if table_df is None or table_df.empty:
         return
 
@@ -709,6 +866,7 @@ def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type
     Default = CRESCENTE + DECRESCENTE se existirem; senão o cenário do topo."""
     scenarios = get_available_scenarios(road, matrix_type)
     labels = {s["key"]: s["cenario"] for s in scenarios}
+    by_key = {s["key"]: s for s in scenarios}
     keys = [s["key"] for s in scenarios]
     if not keys:
         return ([topbar_key] if topbar_key else []), labels
@@ -719,7 +877,7 @@ def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type
     _filter_caption("Cenários (sentidos) — selecione um ou mais")
     selected = st.multiselect(
         "Cenários (sentidos)", keys, default=default,
-        format_func=lambda k: labels.get(k, k),
+        format_func=lambda k: _short_scenario_label(by_key.get(k)),  # nome curto (igual às outras telas)
         key=f"{widget_key}_{road}", label_visibility="collapsed",
     )
     return (selected or default), labels
@@ -730,7 +888,6 @@ def _combined_solution_data(road, keys, labels):
     Sentido e os segmentos deslocados (uma camada por sentido) para o mapa."""
     tables, segs = [], []
     n = len(keys)
-    delta = 14.0
     for i, k in enumerate(keys):
         d = get_solutions_data(road, scenario_key=k)
         t, s = d.get("table"), d.get("segments")
@@ -741,8 +898,7 @@ def _combined_solution_data(road, keys, labels):
             tables.append(t)
         if s is not None and not s.empty:
             s = s.copy()
-            off = (i - (n - 1) / 2.0) * (2 * delta)
-            s["paths"] = s["paths"].apply(lambda paths: [_offset_path(p, off) for p in paths])
+            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
             s["sentido"] = sent
             segs.append(s)
     return (
@@ -835,11 +991,19 @@ def _render_solution_distribution_by_sentido(table_df) -> None:
 
 
 def _render_solutions_table(table_df) -> None:
+    """Renderiza a tabela HTML da Matriz de Paragon (um trecho por linha, com pill de IAP)."""
     if table_df is None or table_df.empty:
         st.info("Sem trechos para exibir na matriz.")
         return
 
     has_sentido = "Sentido" in table_df.columns
+    # Ordena por sentido e, dentro de cada sentido, por km crescente (início, fim).
+    table_df = table_df.assign(
+        _ki=table_df["Km Inicial"].astype(float),
+        _kf=table_df["Km Final"].astype(float),
+    ).sort_values(
+        (["Sentido"] if has_sentido else []) + ["_ki", "_kf"], kind="stable"
+    )
     rows_markup = []
     for index, row in enumerate(table_df.to_dict("records"), start=1):
         iap_color = html.escape(str(row.get("_cor_iap", "#fff200")))
@@ -856,8 +1020,6 @@ def _render_solutions_table(table_df) -> None:
             f"<td>{_format_km(float(row['Km Final']))}</td>"
             f"<td>{_format_km(float(row['Extensão']))} km</td>"
             f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{iap_color}'></span>{float(row['IAP']):.2f} <span class='muted'>{iap_class}</span></span></td>"
-            f"<td>{float(row['IRI']):.2f}</td>"
-            f"<td>{float(row['IGG']):.2f}</td>"
             f"<td>{html.escape(str(row['Solução recomendada']))}</td>"
             "</tr>"
         )
@@ -866,7 +1028,7 @@ def _render_solutions_table(table_df) -> None:
         """
         <section class="solution-card">
           <div class="solution-card-head">
-            <h3>Matriz de priorização Paragon</h3>
+            <h3>Matriz de Paragon</h3>
             <p>""" + str(len(table_df)) + """ trechos encontrados conforme filtros aplicados</p>
           </div>
           <div class="solution-table-wrap">
@@ -879,8 +1041,6 @@ def _render_solutions_table(table_df) -> None:
                   <th>Km Final</th>
                   <th>Extensão</th>
                   <th>IAP</th>
-                  <th>IRI</th>
-                  <th>IGG</th>
                   <th>Solução recomendada</th>
                 </tr>
               </thead>
@@ -898,6 +1058,8 @@ def _render_solutions_table(table_df) -> None:
 
 
 def _render_solution_table_controls(filtered_table, *, export_fn=None):
+    """Controles da tabela de soluções: botão de exportação + paginação.
+    Devolve (tabela_completa_filtrada, página_atual) para renderização."""
     export_fn = export_fn or _render_export_button
     st.markdown('<div class="solution-panel-spacer"></div>', unsafe_allow_html=True)
     action_col, page_size_col, page_col, summary_col = st.columns([0.72, 0.62, 0.45, 1.35], gap="medium")
@@ -955,7 +1117,12 @@ def _render_solution_table_controls(filtered_table, *, export_fn=None):
     return filtered_table, filtered_table.iloc[start:end].reset_index(drop=True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Página: SOLUÇÕES (DNIT / Matriz Cadastrada) — versão _dnit_* da tela de soluções
+# ═══════════════════════════════════════════════════════════════════════════
+
 def _dnit_group_color(label: str) -> str:
+    """Cor do grupo de solução DNIT (paleta `_DNIT_GROUP_COLORS`; fallback cinza)."""
     return _DNIT_GROUP_COLORS.get(str(label), "#9fb9d9")
 
 
@@ -965,6 +1132,8 @@ def _dnit_core_color(label: str) -> str:
 
 
 def _render_dnit_solution_filters(table_df, zona_order):
+    """Filtros da tela de Soluções DNIT (SRE, Faixa IRI, Tipo de solução) e devolve
+    a tabela filtrada. `zona_order` fixa a ordem das faixas de IRI (ver README §12.4)."""
     if table_df is None or table_df.empty:
         return table_df
 
@@ -1001,6 +1170,7 @@ def _render_dnit_solution_filters(table_df, zona_order):
 
 
 def _dnit_solution_table_to_excel(table_df) -> bytes:
+    """Serializa a matriz Revitaliza DNIT/RO num .xlsx estilizado (bytes)."""
     export_columns = [
         "SNV", "Km Inicial", "Km Final", "Extensão",
         "IRI", "IGG", "Faixa", "Solução recomendada",
@@ -1027,6 +1197,7 @@ def _dnit_solution_table_to_excel(table_df) -> bytes:
 
 
 def _render_dnit_export_button(table_df) -> None:
+    """Botão de download da matriz DNIT em Excel (oculto se não houver dados)."""
     if table_df is None or table_df.empty:
         return
     st.download_button(
@@ -1039,6 +1210,7 @@ def _render_dnit_export_button(table_df) -> None:
 
 
 def _render_dnit_solutions_table(table_df) -> None:
+    """Renderiza a tabela HTML da Matriz Revitaliza DNIT/RO (um trecho por linha)."""
     if table_df is None or table_df.empty:
         st.info("Sem trechos para exibir na matriz DNIT.")
         return
@@ -1097,6 +1269,9 @@ def _render_dnit_solutions_table(table_df) -> None:
 
 
 def _render_dnit_solutions_page(road, scenario_key) -> None:
+    """Monta a página inteira de Soluções DNIT: mapa + distribuição + tabela paginada.
+    Só rodovias processadas com a Matriz Revitaliza DNIT/RO têm esses dados; as demais
+    caem no diagnóstico Paragon (mensagem informativa ao usuário)."""
     data = get_dnit_solutions_data(road, scenario_key=scenario_key)
     if not data or not data.get("available") or data.get("table") is None or data["table"].empty:
         disponiveis = get_dnit_available_roads()
@@ -1129,6 +1304,13 @@ def _render_dnit_solutions_page(road, scenario_key) -> None:
     _render_dnit_solutions_table(paginated_table)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Página: CENÁRIO ECONÔMICO — "quanto custa" (custos, orçamento, simulação, mapa)
+# Regras hardcoded desta seção catalogadas no README §14.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Custo paramétrico por km, por CÓDIGO de solução (README §14.1). É apenas FALLBACK:
+# só é usado quando o trecho não tem orçamento real gravado no banco. R$/km.
 _ECONOMIC_SOLUTION_COST_KM = {
     "OK": 0,
     "RL": 180_000,
@@ -1140,6 +1322,10 @@ _ECONOMIC_SOLUTION_COST_KM = {
     "Sem intervenção": 0,
 }
 
+# Ordem de prioridade das soluções por ESTRATÉGIA (menor número = atendido primeiro
+# quando o orçamento é escasso). Na prática a UI expõe só "Balanceada"; Corretiva
+# (prioriza reconstruir o pior) e Preventiva (prioriza barato/muitos km) existem mas
+# não estão expostas (README §14.2).
 _ECONOMIC_STRATEGY_ORDER = {
     "Corretiva": {"REC": 1, "RPS+REF": 2, "RPS": 3, "RL+REF": 4, "RL+RS": 5, "RL": 6, "OK": 7},
     "Preventiva": {"RL": 1, "RL+RS": 2, "RL+REF": 3, "RPS": 4, "RPS+REF": 5, "REC": 6, "OK": 7},
@@ -1153,16 +1339,20 @@ _ECONOMIC_DEFAULT_HORIZON = 8
 
 
 def _limit_budget_to_horizon(budget_items, horizon: int):
-    """Restringe a programação orçamentária à janela do horizonte selecionado."""
+    """Restringe a programação à janela do horizonte: do PRIMEIRO ano programado
+    (não de um ano-base fixo) até +horizonte-1. Assim horizonte 1 = 1º ano da matriz,
+    horizonte N = os N primeiros anos (sem janela vazia / off-by-one)."""
     if budget_items is None or budget_items.empty or "Ano" not in budget_items:
         return budget_items
 
-    max_year = _ECONOMIC_BASE_YEAR + int(horizon) - 1
     years = pd.to_numeric(budget_items["Ano"], errors="coerce")
-    return budget_items[(years >= _ECONOMIC_BASE_YEAR) & (years <= max_year)].copy()
+    base = int(years.min())  # 1º ano com programação (ex.: 2027)
+    max_year = base + int(horizon) - 1
+    return budget_items[(years >= base) & (years <= max_year)].copy()
 
 
 def _format_money(value: float) -> str:
+    """Formata reais de forma compacta (mi / mil / R$) para KPIs e cards."""
     if value >= 1_000_000:
         return f"R$ {value / 1_000_000:.1f} mi"
     if value >= 1_000:
@@ -1171,6 +1361,7 @@ def _format_money(value: float) -> str:
 
 
 def _format_money_chart(value: float) -> str:
+    """Como `_format_money`, mas com 1 casa em 'mil' e '0' explícito, p/ rótulos de gráfico."""
     if value >= 1_000_000:
         return f"R$ {value / 1_000_000:.1f} mi"
     if value >= 1_000:
@@ -1181,10 +1372,12 @@ def _format_money_chart(value: float) -> str:
 
 
 def _axis_max_10(value: float) -> int:
+    """Arredonda o topo do eixo para o próximo múltiplo de 10 (mínimo 10)."""
     return max(10, ((int(value) + 9) // 10) * 10)
 
 
 def _axis_ticks_10(axis_max: int) -> list[int]:
+    """Ticks do eixo Y de 10 em 10, do topo até 0 (para os gráficos HTML)."""
     return list(range(int(axis_max), -1, -10))
 
 
@@ -1195,6 +1388,12 @@ def _axis_max_headroom(value: float) -> int:
 
 
 def _economic_work_table(table_df) -> pd.DataFrame:
+    """Prepara a tabela base do cenário econômico atribuindo custo a cada trecho.
+
+    Prioriza o custo REAL do banco ("Custo estimado"); quando ausente, cai no custo
+    paramétrico por km (`_ECONOMIC_SOLUTION_COST_KM`, README §14.1). A coluna
+    "Custo origem" marca a proveniência: Banco / Paramétrico / Sem custo.
+    """
     if table_df is None or table_df.empty:
         return pd.DataFrame()
 
@@ -1203,6 +1402,7 @@ def _economic_work_table(table_df) -> pd.DataFrame:
     df["Custo banco"] = pd.to_numeric(df.get("Custo estimado", 0), errors="coerce").fillna(0.0)
     df["Custo econômico"] = df["Custo banco"]
 
+    # Sem custo no banco → aplica o fallback paramétrico (R$/km × extensão).
     missing_cost = df["Custo econômico"] <= 0
     fallback_cost = df["_solucao_codigo"].map(_ECONOMIC_SOLUTION_COST_KM).fillna(0) * df["Extensão"].astype(float)
     df.loc[missing_cost, "Custo econômico"] = fallback_cost.loc[missing_cost]
@@ -1213,11 +1413,13 @@ def _economic_work_table(table_df) -> pd.DataFrame:
 
 
 def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
-    """Calcula a priorização por SNV (IPT, IPE, PRIORIZAÇÃO INVERTIDA) por segmento.
+    """Calcula a priorização por SNV (IPT = nível de prioridade) por segmento.
 
     Segmentos classificados como "Excelente" são excluídos do cálculo — só entram no
-    ranking trechos que precisam de intervenção. Pesos: IRI 50% / DEF 35% / VMDA 15%.
-    A priorização é invertida (0..10, menor = mais crítico).
+    ranking trechos que precisam de intervenção. Metodologia (cliente): o IPT é o
+    próprio nível de prioridade (1 = maior … 10 = menor), com
+    IPT = 10·(0,5·(1 − R_VMDA) + 0,3·R_ICDS + 0,2·R_ICDP), R_VMDA log e ICDS/ICDP
+    lineares (min-max global). Menor IPT = mais crítico.
     """
     if df is None or df.empty:
         return {}
@@ -1236,8 +1438,8 @@ def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
             "snv": (f"{row.get('SNV')}␟{row.get('Sentido')}" if has_sent else str(row.get("SNV"))),
             "extensao_km": row.get("Extensão"),
             "vmda": row.get("VMDA"),
-            "iri": row.get("IRI"),
-            "deflexao": row.get("DEF"),
+            "icds": row.get("ICDS"),
+            "icdp": row.get("ICDP"),
             "custo": row.get("Custo econômico"),
         }
         for _, row in df.iterrows()
@@ -1245,23 +1447,44 @@ def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
     return {item["snv"]: item for item in calcular_indice_priorizacao(segmentos)}
 
 
+def _prioridade_por_segmento(df: pd.DataFrame) -> dict:
+    """Por _segment_id → priorização/IPT calculados POR SEGMENTO (sem agregar no SNV).
+    Segmentos 'Excelente' são excluídos do cálculo (não precisam de intervenção)."""
+    if df is None or df.empty or "_segment_id" not in df.columns:
+        return {}
+    work = df
+    if "_classe_iap" in df.columns:
+        work = df[df["_classe_iap"].astype(str) != "Excelente"]
+        if work.empty:
+            return {}
+    segmentos = [
+        {
+            "id": int(row.get("_segment_id")),
+            "vmda": row.get("VMDA"),
+            "icds": row.get("ICDS"),
+            "icdp": row.get("ICDP"),
+            "extensao_km": row.get("Extensão"),
+            "custo": row.get("Custo econômico"),
+        }
+        for _, row in work.iterrows()
+    ]
+    return {item["id"]: item for item in calcular_indice_priorizacao_segmento(segmentos)}
+
+
 def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
-    """Anexa IPT/IPE/PRIORIZAÇÃO (calculados por SNV) aos segmentos e ordena."""
-    if df is None or df.empty:
+    """Anexa IPT/IPE/PRIORIZAÇÃO calculados POR SEGMENTO aos segmentos e ordena."""
+    if df is None or df.empty or "_segment_id" not in df.columns:
         return df
 
-    prio = _prioridade_por_snv(df)
-    if "Sentido" in df.columns:
-        snv = df["SNV"].astype(str) + "␟" + df["Sentido"].astype(str)
-    else:
-        snv = df["SNV"].astype(str)
-    df["IPT"] = snv.map(lambda s: prio.get(s, {}).get("ip_tecnico", 0.0))
-    df["IPE"] = snv.map(lambda s: prio.get(s, {}).get("ip_economico", 0.0))
-    # SNVs sem entrada no ranking (ex.: só com segmentos Excelente) ficam com 10.0
-    # — menor prioridade na escala invertida (vai pro fim).
-    df["Priorização"] = snv.map(lambda s: prio.get(s, {}).get("priorizacao", 10.0))
-    df["Classe prioridade"] = snv.map(lambda s: prio.get(s, {}).get("classificacao", "Prioridade Baixa"))
-    df["_rank"] = snv.map(lambda s: prio.get(s, {}).get("ranking", len(prio) + 1))
+    prio = _prioridade_por_segmento(df)
+    df = df.copy()
+    sid = df["_segment_id"]
+    df["IPT"] = sid.map(lambda i: prio.get(int(i), {}).get("ip_tecnico", 0.0) if pd.notna(i) else 0.0)
+    df["IPE"] = sid.map(lambda i: prio.get(int(i), {}).get("ip_economico", 0.0) if pd.notna(i) else 0.0)
+    # Segmentos sem entrada no ranking (Excelente / sem intervenção) ficam com 10.0.
+    df["Priorização"] = sid.map(lambda i: prio.get(int(i), {}).get("priorizacao", 10.0) if pd.notna(i) else 10.0)
+    df["Classe prioridade"] = sid.map(lambda i: prio.get(int(i), {}).get("classificacao", "Prioridade Baixa") if pd.notna(i) else "Prioridade Baixa")
+    df["_rank"] = sid.map(lambda i: prio.get(int(i), {}).get("ranking", len(prio) + 1) if pd.notna(i) else len(prio) + 1)
 
     df = df.sort_values(["_rank", "Km Inicial"]).reset_index(drop=True)
     df["Prioridade"] = df["_rank"]
@@ -1269,6 +1492,13 @@ def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, strategy: str) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    """Simula a execução das obras dentro de um orçamento anual e horizonte.
+
+    Ordena os trechos por priorização e vai "gastando" o orçamento ano a ano: cada
+    trecho vira Executa / Backlog / Sem intervenção. Devolve
+    `(métricas, tabela_por_trecho, tabela_anual)` — a tabela anual traz km executado,
+    backlog e IAP médio projetado por ano. Constantes hardcoded no README §14.2.
+    """
     df = _economic_work_table(table_df)
     if df.empty:
         return {}, df, pd.DataFrame()
@@ -1288,6 +1518,8 @@ def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, s
             execution_years.append("")
         elif cost <= remaining_total:
             statuses.append("Executa")
+            # Ano previsto = ano-base 2026 (_ECONOMIC_BASE_YEAR, README §14.2) + nº de
+            # orçamentos anuais já consumidos, limitado ao fim do horizonte.
             execution_year = int((total_budget - remaining_total) // annual_budget) + 2026 if annual_budget else 2026
             execution_years.append(str(min(execution_year, 2025 + int(horizon))))
             remaining_total -= cost
@@ -1322,6 +1554,8 @@ def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, s
         executed_df = pending.loc[list(executed_ids)] if executed_ids else pending.iloc[0:0]
         if not executed_df.empty and df["Extensão"].sum():
             adjusted_iap = df["IAP"].copy()
+            # Trecho executado assume IAP "pós-obra": clip inferior em 4,1 (Excelente).
+            # É premissa hardcoded (README §14.2), não vem do banco.
             adjusted_iap.loc[executed_df.index] = adjusted_iap.loc[executed_df.index].clip(lower=4.1)
             current_iap = float((adjusted_iap * df["Extensão"]).sum() / df["Extensão"].sum())
 
@@ -1347,6 +1581,8 @@ def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, s
         "executed_km": float(executed["Extensão"].sum()),
         "backlog_km": float(backlog["Extensão"].sum()),
         "iap_final": float(annual_rows[-1]["IAP médio"]) if annual_rows else 0,
+        # Custo evitado = 35% do custo executado (premissa hardcoded, README §14.2):
+        # intervir cedo evitaria reconstrução futura mais cara.
         "cost_avoided": executed_cost * 0.35,
         "uses_parametric_cost": bool((df["Custo origem"] == "Paramétrico").any()),
     }
@@ -1367,13 +1603,25 @@ def _necessidade_total(table_df, budget_items, horizon: int) -> float:
 
 
 def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_key: str) -> tuple[int, int, int]:
+    """Sliders do cenário econômico: orçamento anual, horizonte e nível de prioridade.
+    Devolve `(orçamento_mi, horizonte_anos, prioridade_máx)`. O default do orçamento é
+    a necessidade total (cobre 100%) e o horizonte default é o total programado no banco."""
     budget_col, horizon_col, prio_col = st.columns([1, 1, 1], gap="medium")
+
+    # Horizonte TOTAL da análise (ano-base até o último ano programado) — é o default
+    # e o máximo do slider (não fixo em 8/20). O gestor pode reduzir a partir do total.
+    _anos = (
+        pd.to_numeric(budget_items["Ano"], errors="coerce").dropna()
+        if (budget_items is not None and not budget_items.empty and "Ano" in budget_items)
+        else None
+    )
+    full_h = max(1, int(_anos.max()) - int(_anos.min()) + 1) if (_anos is not None and not _anos.empty) else _ECONOMIC_DEFAULT_HORIZON
 
     # Horizonte primeiro: a necessidade total (default do orçamento) depende dele.
     with horizon_col:
         _filter_caption("Horizonte")
         horizon = st.slider(
-            "Horizonte", 1, 20, _ECONOMIC_DEFAULT_HORIZON, 1,
+            "Horizonte", 1, max(full_h, 2), full_h, 1,
             key=f"horizon_{scenario_key}",
             label_visibility="collapsed",
         )
@@ -1411,6 +1659,7 @@ def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_k
 
 
 def _render_cost_by_solution(table_df: pd.DataFrame) -> None:
+    """Gráfico de barras (HTML) do custo (% do total) consumido por tipo de solução."""
     if table_df is None or table_df.empty:
         return
 
@@ -1503,6 +1752,7 @@ def _grouped_bars_html(groups, sentidos, height_of, label_of, color_of, axis_max
 
 
 def _grouped_bars_card(icon, title, subtitle, meta_html, tick, groups_html, labels_html):
+    """Envolve as barras agrupadas de `_grouped_bars_html` no card HTML padrão."""
     return (
         '<div class="solution-distribution"><div class="solution-distribution-head">'
         f'<div class="solution-distribution-title"><div class="solution-distribution-icon">{icon}</div>'
@@ -1517,6 +1767,7 @@ def _grouped_bars_card(icon, title, subtitle, meta_html, tick, groups_html, labe
 
 
 def _render_budget_cost_by_year_sentido(budget_items: pd.DataFrame) -> None:
+    """Custo por ano da programação orçamentária, com barras agrupadas por sentido."""
     g = budget_items.groupby(["Ano", "Sentido"], as_index=False)["Custo"].sum()
     anos = sorted(g["Ano"].unique())
     sentidos = list(dict.fromkeys(budget_items["Sentido"].tolist()))
@@ -1540,6 +1791,7 @@ def _render_budget_cost_by_year_sentido(budget_items: pd.DataFrame) -> None:
 
 
 def _render_budget_cost_by_solution_sentido(budget_items: pd.DataFrame, color_fn) -> None:
+    """Custo (% do total) por solução, com barras agrupadas por sentido."""
     g = budget_items.groupby(["Solução", "Sentido"], as_index=False).agg({"Custo": "sum", "Extensão": "sum"})
     solucoes = list(g.groupby("Solução")["Custo"].sum().sort_values(ascending=False).index)
     sentidos = list(dict.fromkeys(budget_items["Sentido"].tolist()))
@@ -1565,6 +1817,8 @@ def _render_budget_cost_by_solution_sentido(budget_items: pd.DataFrame, color_fn
 
 
 def _render_budget_cost_by_year(budget_items: pd.DataFrame) -> None:
+    """Gráfico de custo por ano da programação. Se houver >1 sentido, delega à versão
+    agrupada por sentido; senão, barras simples por ano."""
     if budget_items is None or budget_items.empty:
         return
     if "Sentido" in budget_items.columns and budget_items["Sentido"].nunique() > 1:
@@ -1602,7 +1856,7 @@ def _render_budget_cost_by_year(budget_items: pd.DataFrame) -> None:
         '</div>'
         '<div class="economic-chart">'
         f'<div class="economic-y-axis">{tick_markup}</div>'
-        '<div>'
+        '<div class="economic-scroll">'
         '<div class="economic-plot">'
         f'<div class="economic-bars">{"".join(bars)}</div>'
         '</div>'
@@ -1615,6 +1869,8 @@ def _render_budget_cost_by_year(budget_items: pd.DataFrame) -> None:
 
 
 def _render_budget_cost_by_solution(budget_items: pd.DataFrame, *, color_fn=None) -> None:
+    """Custo (% do total) por solução com base nos ITENS do orçamento do banco
+    (não só a solução final do IAP). Delega à versão por sentido quando há >1 sentido."""
     if budget_items is None or budget_items.empty:
         return
 
@@ -1672,6 +1928,8 @@ def _render_budget_cost_by_solution(budget_items: pd.DataFrame, *, color_fn=None
 
 
 def _group_priority_by_snv(table_df: pd.DataFrame) -> pd.DataFrame:
+    """Consolida os segmentos por SNV (ou SNV+Sentido) numa tabela de prioridade.
+    O SNV herda o segmento mais crítico (Prioridade = min) e reordena 1..N."""
     if table_df is None or table_df.empty:
         return pd.DataFrame()
 
@@ -1705,6 +1963,8 @@ def _group_priority_by_snv(table_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _group_budget_by_snv(budget_items: pd.DataFrame, priority_table: pd.DataFrame) -> pd.DataFrame:
+    """Consolida a programação do banco por SNV (custo/extensão) e casa com a
+    prioridade calculada. Fallback: se não há orçamento, usa `_group_priority_by_snv`."""
     if budget_items is None or budget_items.empty:
         return _group_priority_by_snv(priority_table)
 
@@ -1758,6 +2018,9 @@ def _group_budget_by_snv(budget_items: pd.DataFrame, priority_table: pd.DataFram
 
 
 def _select_snv_attended_by_budget(snv_table: pd.DataFrame, annual_budget_mi: int) -> pd.DataFrame:
+    """Seleciona os SNVs atendidos por um orçamento, em ordem estrita de prioridade
+    (para no 1º trecho que não couber). Versão por SNV inteiro; a por segmento é
+    `_segment_attendance`."""
     if snv_table is None or snv_table.empty:
         return pd.DataFrame()
 
@@ -1887,7 +2150,51 @@ def _segment_attendance(
     return pd.DataFrame(attended_rows), float(sum(att_ext.values())), attended_ids
 
 
+def _segment_priority_table(prioritized_table: pd.DataFrame, budget_items: pd.DataFrame | None) -> pd.DataFrame:
+    """Tabela POR SEGMENTO (uma linha por _segment_id) com o custo REAL do orçamento.
+    Só segmentos que recebem intervenção (custo > 0), ordenados por prioridade."""
+    if prioritized_table is None or prioritized_table.empty or "_segment_id" not in prioritized_table.columns:
+        return pd.DataFrame()
+    df = prioritized_table.copy()
+    # Custo real por segmento (soma da programação do orçamento); fallback p/ Custo econômico.
+    if budget_items is not None and not budget_items.empty and "_segment_id" in budget_items.columns:
+        real = (
+            budget_items.groupby("_segment_id", as_index=False)["Custo"].sum()
+            .rename(columns={"Custo": "_custo_real"})
+        )
+        df = df.merge(real, on="_segment_id", how="left")
+        usa_real = df["_custo_real"].notna() & (df["_custo_real"] > 0)
+        df["Custo econômico"] = df["_custo_real"].where(usa_real, df["Custo econômico"])
+        df = df.drop(columns=["_custo_real"])
+    df = df[df["Custo econômico"] > 0].copy()
+    df = df.sort_values(["Prioridade", "Km Inicial"]).reset_index(drop=True)
+    df["Prioridade"] = range(1, len(df) + 1)
+    return df
+
+
+def _segment_attendance_seg(seg_table: pd.DataFrame, annual_budget_mi: int) -> tuple[pd.DataFrame, float, set]:
+    """Atende SEGMENTO a segmento em ordem estrita de prioridade até esgotar o orçamento.
+    Retorna (segmentos_atendidos, km_atendido, ids_atendidos)."""
+    if seg_table is None or seg_table.empty:
+        return pd.DataFrame(), 0.0, set()
+    remaining = float(annual_budget_mi) * 1_000_000
+    rows, km, ids = [], 0.0, set()
+    for r in seg_table.to_dict("records"):
+        cost = float(r.get("Custo econômico", 0) or 0)
+        if cost <= 0:
+            continue
+        if cost > remaining:
+            break
+        remaining -= cost
+        ids.add(int(r["_segment_id"]))
+        rows.append(r)
+        km += float(r.get("Extensão", 0) or 0)
+    return pd.DataFrame(rows), km, ids
+
+
 def _solution_text_color(color: str) -> str:
+    """Escolhe texto claro/escuro conforme o fundo da cor da solução (contraste).
+    Fundos escuros (vermelho/verde/laranja) → texto claro; demais → texto escuro."""
     return "#f4f7fb" if color.lower() in {"#d71920", "#00a651", "#f2a51a"} else "#061018"
 
 
@@ -1935,6 +2242,8 @@ def _consolidar_trechos_por_solucao(segments: pd.DataFrame) -> pd.DataFrame:
 
 
 def _snv_segments_table(snv: str, budget_items: pd.DataFrame | None, priority_table: pd.DataFrame | None) -> pd.DataFrame:
+    """Segmentos de um SNV consolidados por solução/ano. Prefere o orçamento do banco;
+    na ausência, usa a tabela priorizada."""
     segments = pd.DataFrame()
     if budget_items is not None and not budget_items.empty:
         source = budget_items[budget_items["SNV"].astype(str) == str(snv)].copy()
@@ -1961,6 +2270,8 @@ def _snv_segments_table(snv: str, budget_items: pd.DataFrame | None, priority_ta
 
 
 def _segment_details_markup(segments: pd.DataFrame) -> str:
+    """Tabela HTML (popover) com os trechos de um SNV: km, solução (chip colorido),
+    custo e ano."""
     if segments is None or segments.empty:
         return '<span class="muted">Sem trechos</span>'
 
@@ -2055,26 +2366,121 @@ def _snv_strip_and_costs(snv: str, budget_items, priority_table):
 
 
 def _snv_detail_chart_markup(snv: str, budget_items, priority_table) -> str:
-    """Detalhe do trecho: barras de custo por solução (com valor e km)."""
-    _faixa, custos, total_km, total_cost = _snv_strip_and_costs(snv, budget_items, priority_table)
-    if not custos:
+    """Detalhe do trecho: solução por FAIXA DE KM (onde exatamente cada solução é
+    aplicada) + custo por solução."""
+    faixa, custos, total_km, total_cost = _snv_strip_and_costs(snv, budget_items, priority_table)
+    if not custos and not faixa:
         return '<span class="muted">Sem trechos</span>'
 
-    max_cost = max((c["custo"] for c in custos), default=1.0) or 1.0
-    barras = "".join(
-        f'<div class="snv-cost-row">'
-        f'<span class="snv-cost-lbl">{html.escape(c["solucao"])}</span>'
-        f'<span class="snv-cost-track"><span class="snv-cost-bar" style="width:{c["custo"] / max_cost * 100:.2f}%;'
-        f'background:{_solution_color(c["solucao"])}"></span></span>'
-        f'<span class="snv-cost-val">{_format_money(c["custo"])} · Extensão: {_format_km(c["km"])} km</span>'
-        f'</div>'
-        for c in custos
-    )
+    head = ('font-size:11px;font-weight:800;letter-spacing:.04em;color:#9aa8b3;'
+            'text-transform:uppercase;margin:12px 0 4px')
+    parts: list[str] = []
+    # Exibe o nome da solução com "/" no lugar de "+" (cor usa o nome original).
+    _sol = lambda s: html.escape(str(s).replace(" + ", " / "))
 
-    return f'<div class="snv-cost-bars">{barras}</div>'
+    # 1) Solução aplicada ao longo do km — só faixas COM intervenção (km exato).
+    _SEM_INTERV = {"sem intervenção", "ok", "", "nan", "none"}
+    _tem = lambda b: str(b["solucao"]).strip().lower() not in _SEM_INTERV
+    blocos = sorted(faixa, key=lambda b: b["km_ini"])
+    interv = [b for b in blocos if _tem(b)]
+    if interv:
+        km_ini = blocos[0]["km_ini"]
+        km_fim = max(b["km_fim"] for b in blocos)
+        span = max(km_fim - km_ini, 0.001)
+        # Barra posicional: intervenções coloridas; trechos sem intervenção = lacuna.
+        segs = "".join(
+            (
+                f'<span style="flex:0 0 {(b["km_fim"] - b["km_ini"]) / span * 100:.3f}%;'
+                f'background:{_solution_color(b["solucao"])}" '
+                f'title="km {_format_km(b["km_ini"])} – {_format_km(b["km_fim"])} · {_sol(b["solucao"])}"></span>'
+                if _tem(b)
+                else f'<span style="flex:0 0 {(b["km_fim"] - b["km_ini"]) / span * 100:.3f}%;background:transparent"></span>'
+            )
+            for b in blocos
+        )
+        linhas = "".join(
+            '<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;'
+            'border-bottom:1px solid rgba(148,163,184,.08)">'
+            f'<span style="width:9px;height:9px;border-radius:999px;flex:none;background:{_solution_color(b["solucao"])}"></span>'
+            f'<span style="color:#e5edf3;font-weight:700;min-width:150px">km {_format_km(b["km_ini"])} – {_format_km(b["km_fim"])}</span>'
+            f'<span style="color:#cbd5dd;flex:1">{_sol(b["solucao"])}</span>'
+            f'<span style="color:#8f9eaa">{_format_km(b["ext"])} km</span>'
+            '</div>'
+            for b in interv
+        )
+        parts.append(
+            f'<div style="{head};margin-top:2px">Solução aplicada ao longo do km</div>'
+            '<div style="display:flex;height:18px;border-radius:6px;overflow:hidden;'
+            f'border:1px solid rgba(148,163,184,.2)">{segs}</div>'
+            '<div style="display:flex;justify-content:space-between;font-size:10px;'
+            f'color:#8f9eaa;margin-top:3px"><span>km {_format_km(km_ini)}</span>'
+            f'<span>km {_format_km(km_fim)}</span></div>'
+            f'<div style="margin-top:8px">{linhas}</div>'
+        )
+
+    # 2) Custo por solução (barras, como antes).
+    if custos:
+        max_cost = max((c["custo"] for c in custos), default=1.0) or 1.0
+        barras = "".join(
+            f'<div class="snv-cost-row">'
+            f'<span class="snv-cost-lbl">{_sol(c["solucao"])}</span>'
+            f'<span class="snv-cost-track"><span class="snv-cost-bar" style="width:{c["custo"] / max_cost * 100:.2f}%;'
+            f'background:{_solution_color(c["solucao"])}"></span></span>'
+            f'<span class="snv-cost-val">{_format_money(c["custo"])} · Extensão: {_format_km(c["km"])} km</span>'
+            f'</div>'
+            for c in custos
+        )
+        parts.append(f'<div style="{head}">Custo por solução</div><div class="snv-cost-bars">{barras}</div>')
+
+    return "".join(parts)
+
+
+def _segment_detail_markup(row: dict, budget_items) -> str:
+    """Detalhe de UM segmento: km, solução(ões) aplicada(s) e custo por solução."""
+    _sol = lambda s: html.escape(str(s).replace(" + ", " / "))
+    km_ini = float(row.get("Km Inicial", 0) or 0)
+    km_fim = float(row.get("Km Final", 0) or 0)
+    sol = str(row.get("Solução recomendada", "") or "")
+    parts = [
+        f'<div style="font-size:13px;color:#e5edf3;margin:2px 0 6px">'
+        f'<b>km {_format_km(km_ini)} – {_format_km(km_fim)}</b> · {_sol(sol)}</div>'
+    ]
+    sid = row.get("_segment_id")
+    if (
+        sid is not None and budget_items is not None and not budget_items.empty
+        and "_segment_id" in budget_items.columns
+    ):
+        src = budget_items[budget_items["_segment_id"] == int(sid)]
+        if not src.empty:
+            # Por ANO + solução, em ordem cronológica (deixa claro o que é manutenção futura).
+            has_ano = "Ano" in src.columns
+            gcols = ["Ano", "Solução"] if has_ano else ["Solução"]
+            by = src.groupby(gcols, as_index=False)["Custo"].sum()
+            by = by.sort_values(["Ano", "Custo"], ascending=[True, False]) if has_ano else by.sort_values("Custo", ascending=False)
+            mx = max(float(by["Custo"].max()), 1.0)
+            bars = "".join(
+                '<div class="snv-cost-row">'
+                + (
+                    f'<span class="snv-cost-lbl"><b style="color:#9fb0bd">{int(r2["Ano"])}</b> · {_sol(r2["Solução"])}</span>'
+                    if has_ano else f'<span class="snv-cost-lbl">{_sol(r2["Solução"])}</span>'
+                )
+                + f'<span class="snv-cost-track"><span class="snv-cost-bar" style="width:{float(r2["Custo"]) / mx * 100:.1f}%;'
+                f'background:{_solution_color(r2["Solução"])}"></span></span>'
+                f'<span class="snv-cost-val">{_format_money(float(r2["Custo"]))}</span>'
+                '</div>'
+                for r2 in by.to_dict("records")
+            )
+            parts.append(
+                '<div style="font-size:10px;letter-spacing:.05em;color:#8f9eaa;'
+                'text-transform:uppercase;margin:6px 0 2px">Programação por ano</div>'
+                f'<div class="snv-cost-bars">{bars}</div>'
+            )
+    return "".join(parts)
 
 
 def _render_solution_segments_map(segments_df, budget_items: pd.DataFrame, selected_snv: str) -> None:
+    """Mapa Leaflet (imagem de satélite Esri) dos segmentos de um SRE, coloridos pela
+    solução dominante do orçamento. Renderizado via `components.html` embutido."""
     if segments_df is None or segments_df.empty:
         st.info("Sem geometria para exibir no mapa.")
         return
@@ -2159,6 +2565,8 @@ def _render_solution_segments_map(segments_df, budget_items: pd.DataFrame, selec
     components.html(map_html, height=372, scrolling=False)
 
 
+# Cor da CLASSE de prioridade (README §13.2: faixas Crítica/Alta/Média/Baixa do IPT).
+# Mesma paleta semáforo (vermelho→amarelo→cinza) usada nas telas.
 _PRIORITY_CLASS_COLORS = {
     "Prioridade Crítica": "#d71920",
     "Prioridade Alta": "#f2a51a",
@@ -2168,7 +2576,66 @@ _PRIORITY_CLASS_COLORS = {
 
 
 def _priority_class_color(classe: str) -> str:
+    """Cor da classe de prioridade (fallback cinza para classe desconhecida)."""
     return _PRIORITY_CLASS_COLORS.get(str(classe or ""), "#7f909c")
+
+
+def _priority_memory_markup(m: dict) -> str:
+    """Memória de cálculo do nível de prioridade (IPT) de um SNV: fórmulas + valores."""
+    if not m:
+        return '<span class="muted">Memória de cálculo indisponível para este trecho.</span>'
+    vmda = float(m.get("vmda") or 0.0)
+    icds = float(m.get("icds") or 0.0)
+    icdp = float(m.get("icdp") or 0.0)
+    rv = float(m.get("vmda_normalizado") or 0.0)
+    rs = float(m.get("icds_normalizado") or 0.0)
+    rp = float(m.get("icdp_normalizado") or 0.0)
+    vmin = float(m.get("vmda_min") or 0.0); vmax = float(m.get("vmda_max") or 0.0)
+    smin = float(m.get("icds_min") or 0.0); smax = float(m.get("icds_max") or 0.0)
+    pmin = float(m.get("icdp_min") or 0.0); pmax = float(m.get("icdp_max") or 0.0)
+    ipt = float(m.get("ip_tecnico") or 0.0)
+    iptmin = float(m.get("ipt_min") or 0.0); iptmax = float(m.get("ipt_max") or 0.0)
+    prio = int(round(float(m.get("priorizacao") or 0)))
+
+    head = ('font-size:11px;font-weight:800;letter-spacing:.04em;color:#9aa8b3;'
+            'text-transform:uppercase;margin:2px 0 4px')
+    th = 'text-align:left;color:#8f9eaa;font-size:10px;text-transform:uppercase;padding:4px 10px;font-weight:700'
+    td = 'padding:5px 10px;border-top:1px solid rgba(148,163,184,.10);color:#cbd5dd'
+    fcss = 'font-family:monospace;font-size:13px;color:#e5edf3;margin:3px 0'
+    rows = (
+        '<tr>'
+        f'<td style="{td};color:#e5edf3;font-weight:700">R<sub>VMDA</sub> (log)</td>'
+        f'<td style="{td}">{vmda:,.0f}</td>'
+        f'<td style="{td};font-family:monospace">(ln&nbsp;{vmda:,.0f} − ln&nbsp;{vmin:,.0f}) / (ln&nbsp;{vmax:,.0f} − ln&nbsp;{vmin:,.0f})</td>'
+        f'<td style="{td};color:#fff;font-weight:800">{rv:.3f}</td>'
+        '</tr>'
+        '<tr>'
+        f'<td style="{td};color:#e5edf3;font-weight:700">R<sub>ICDS</sub></td>'
+        f'<td style="{td}">{icds:.2f}</td>'
+        f'<td style="{td};font-family:monospace">({icds:.2f} − {smin:.2f}) / ({smax:.2f} − {smin:.2f})</td>'
+        f'<td style="{td};color:#fff;font-weight:800">{rs:.3f}</td>'
+        '</tr>'
+        '<tr>'
+        f'<td style="{td};color:#e5edf3;font-weight:700">R<sub>ICDP</sub></td>'
+        f'<td style="{td}">{icdp:.2f}</td>'
+        f'<td style="{td};font-family:monospace">({icdp:.2f} − {pmin:.2f}) / ({pmax:.2f} − {pmin:.2f})</td>'
+        f'<td style="{td};color:#fff;font-weight:800">{rp:.3f}</td>'
+        '</tr>'
+    )
+    return (
+        f'<div style="{head}">Nível de prioridade — memória de cálculo</div>'
+        '<div style="font-size:12px;color:#8f9eaa;margin-bottom:8px">Escala 1 (mais crítico) … 10 (menos crítico). '
+        'Normalização min–máx global (R ∈ [0,1]); valores do segmento mais crítico do SNV. '
+        'O VMDA é inverso (mais tráfego → mais prioritário).</div>'
+        '<table style="border-collapse:collapse;width:100%;font-size:12px">'
+        f'<tr><th style="{th}">Variável</th><th style="{th}">Valor</th>'
+        f'<th style="{th}">Normalização</th><th style="{th}">R</th></tr>{rows}</table>'
+        f'<div style="{fcss};margin-top:10px">IPT = 10 × (0,5·(1 − R<sub>VMDA</sub>) + 0,3·R<sub>ICDS</sub> + 0,2·R<sub>ICDP</sub>)</div>'
+        f'<div style="{fcss}">&nbsp;&nbsp;&nbsp;&nbsp;= 10 × (0,5·(1 − {rv:.3f}) + 0,3·{rs:.3f} + 0,2·{rp:.3f}) = <b>{ipt:.2f}</b></div>'
+        f'<div style="{fcss};margin-top:8px">Nível de prioridade = round( (IPT − IPT<sub>mín</sub>) / (IPT<sub>máx</sub> − IPT<sub>mín</sub>) × 9 + 1 )</div>'
+        f'<div style="{fcss}">&nbsp;&nbsp;&nbsp;&nbsp;= round( ({ipt:.2f} − {iptmin:.2f}) / ({iptmax:.2f} − {iptmin:.2f}) × 9 + 1 ) = <b style="color:#00c2e8">{prio}</b></div>'
+        '<div style="font-size:11px;color:#8f9eaa;margin-top:6px">O IPT é re-normalizado entre os trechos (min–máx) para a escala 1 (mais crítico) … 10 (menos crítico).</div>'
+    )
 
 
 def _render_economic_priority_table(
@@ -2178,48 +2645,75 @@ def _render_economic_priority_table(
     budget_items: pd.DataFrame | None = None,
     priority_table: pd.DataFrame | None = None,
     segments_df=None,
+    prio_memory: dict | None = None,
 ) -> None:
+    """Tabela executiva de priorização do cenário econômico (a "fila" de trechos).
+
+    Duas visões: só os segmentos atendidos pelo orçamento anual, ou todos os
+    priorizados. Cada linha expande a memória de cálculo do IPT e o detalhe de custos.
+    """
     if snv_table is None or snv_table.empty:
         return
 
-    mode_col, summary_col = st.columns([0.55, 1.45], gap="medium")
+    mode_col, sort_col, summary_col = st.columns([0.9, 0.7, 1.4], gap="medium")
     with mode_col:
         _filter_caption("Visualização")
         view_mode = st.selectbox(
             "Visualização da tabela",
-            ["SNVs atendidos pelo orçamento", "Todos os SNVs"],
+            ["Segmentos atendidos pelo orçamento", "Todos os segmentos"],
             label_visibility="collapsed",
         )
+    with sort_col:
+        _filter_caption("Ordenar por")
+        sort_by = st.selectbox(
+            "Ordenar por", ["Km inicial", "Prioridade"], label_visibility="collapsed",
+        )
 
-    if view_mode == "SNVs atendidos pelo orçamento":
+    if view_mode == "Segmentos atendidos pelo orçamento":
         view = attended_snv_table.copy() if attended_snv_table is not None else pd.DataFrame()
-        title = "SNVs atendidos pelo orçamento anual"
+        title = "Segmentos atendidos pelo orçamento anual"
         subtitle = f"Carteira inicial considerando {_format_money((annual_budget_mi or 0) * 1_000_000)} disponíveis no ano"
     else:
         view = snv_table.copy()
         title = "Fila executiva de aplicação do orçamento"
-        subtitle = "SNVs consolidados conforme o cenário selecionado"
+        subtitle = "Segmentos priorizados conforme o cenário selecionado"
 
+    total_seg = int(len(view))
     with summary_col:
         if view.empty:
-            st.markdown('<div class="pagination-summary">Nenhum trecho cabe no orçamento anual selecionado.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="pagination-summary">Nenhum segmento cabe no orçamento anual selecionado.</div>', unsafe_allow_html=True)
         else:
+            extra = "" if total_seg <= 400 else " · exibindo os primeiros 400"
             st.markdown(
-                f'<div class="pagination-summary">Exibindo {len(view)} SNVs · {_format_km(float(view["Extensão"].sum()))} km · {_format_money(float(view["Custo econômico"].sum()))}</div>',
+                f'<div class="pagination-summary">Exibindo {total_seg} segmentos · {_format_km(float(view["Extensão"].sum()))} km · {_format_money(float(view["Custo econômico"].sum()))}{extra}</div>',
                 unsafe_allow_html=True,
             )
 
     if view.empty:
         return
 
-    view = view.head(25).copy()
+    # Ordenação: km inicial (default) ou prioridade.
+    if sort_by == "Prioridade" and "Prioridade" in view.columns:
+        view = view.sort_values("Prioridade")
+    else:
+        _sc = (["Sentido"] if "Sentido" in view.columns else []) + ["Km Inicial", "Km Final"]
+        view = view.sort_values([c for c in _sc if c in view.columns], kind="stable")
+    view = view.head(400).reset_index(drop=True)
     has_sentido = "Sentido" in view.columns
     rows_markup = []
+    cspan = 12 if has_sentido else 11
+    _mem = prio_memory or {}
     for index, row in enumerate(view.to_dict("records"), start=1):
         snv = str(row["SNV"])
+        seg_id = row.get("_segment_id")
         toggle_id = f"snv-detail-{index}"
-        detail_chart = _snv_detail_chart_markup(snv, budget_items, priority_table)
-        sentido_td = f"<td>{html.escape(str(row.get('Sentido', '')))}</td>" if has_sentido else ""
+        prio_id = f"snv-prio-{index}"
+        detail_chart = _segment_detail_markup(row, budget_items)
+        sentido = str(row.get("Sentido", ""))
+        sentido_td = f"<td>{html.escape(sentido)}</td>" if has_sentido else ""
+        # Memória de cálculo do nível de prioridade do SEGMENTO (clique no valor).
+        mem = _mem.get(int(seg_id)) if (seg_id is not None and pd.notna(seg_id)) else {}
+        mem_markup = _priority_memory_markup(mem or {})
         rows_markup.append(
             "<tr class='snv-row'>"
             f"<td class='muted'>{int(row['Prioridade'])}</td>"
@@ -2231,15 +2725,22 @@ def _render_economic_priority_table(
             f"<td>{float(row['IAP']):.2f}</td>"
             f"<td>{float(row.get('IPT', 0) or 0):.2f}</td>"
             f"<td>{float(row.get('IPE', 0) or 0):.2f}</td>"
-            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{int(round(float(row.get('Priorização', 0) or 0)))}</span></td>"
-            f"<td>{html.escape(str(row['Solução recomendada']))}</td>"
+            f"<td><label for='{prio_id}' style='cursor:pointer;display:inline-flex' title='Ver memória de cálculo'>"
+            f"<span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{int(round(float(row.get('Priorização', 0) or 0)))}</span>"
+            "</label></td>"
             f"<td>{_format_money(float(row['Custo econômico']))}</td>"
             "<td class='detail-toggle-cell'>"
-            f"<label class='detail-toggle' for='{toggle_id}'><span class='caret'>▸</span>Ver detalhes</label>"
+            f"<label class='detail-toggle' for='{toggle_id}'><span class='caret'>▸</span>Ver soluções</label>"
             "</td>"
             "</tr>"
             "<tr class='detail-row'>"
-            f"<td class='detail-cell' colspan='{13 if has_sentido else 12}'>"
+            f"<td class='detail-cell' colspan='{cspan}'>"
+            f"<input type='checkbox' id='{prio_id}' class='detail-checkbox'>"
+            f"<div class='detail-content'>{mem_markup}</div>"
+            "</td>"
+            "</tr>"
+            "<tr class='detail-row'>"
+            f"<td class='detail-cell' colspan='{cspan}'>"
             f"<input type='checkbox' id='{toggle_id}' class='detail-checkbox'>"
             f"<div class='detail-content'>{detail_chart}</div>"
             "</td>"
@@ -2266,9 +2767,8 @@ def _render_economic_priority_table(
                   <th>IPT</th>
                   <th>IPE</th>
                   <th>Priorização</th>
-                  <th>Solução recomendada</th>
                   <th>Custo</th>
-                  <th>Detalhes</th>
+                  <th>Soluções</th>
                 </tr>
               </thead>
               <tbody>
@@ -2334,6 +2834,13 @@ def _render_economic_page(
     road: str = "",
     scenario_label: str = "",
 ) -> None:
+    """Monta a página inteira de Cenário econômico (visão do gestor).
+
+    Fluxo: lê os sliders (orçamento/horizonte/prioridade) → roda a simulação →
+    aplica o filtro de nível de prioridade por segmento → renderiza KPIs, mapa do
+    que cabe no orçamento, custos por ano/solução, tabela executiva e botão do
+    plano de trabalho. Ao final publica o contexto para o assistente IAGON da tela.
+    """
     total_snv = 0
     if table_df is not None and not table_df.empty:
         total_snv = int(table_df["SNV"].dropna().astype(str).nunique()) if "SNV" in table_df else int(len(table_df))
@@ -2345,33 +2852,38 @@ def _render_economic_page(
         st.info("Sem dados de intervenção para montar o cenário econômico.")
         return
 
-    # SNVs ordenados por priorização (menor = mais crítico), filtrados pelo nível.
-    snv_budget_table = _group_budget_by_snv(budget_items, prioritized_table)
-    if prio_max < 10 and "Priorização" in snv_budget_table.columns:
-        snv_budget_table = snv_budget_table[snv_budget_table["Priorização"] <= prio_max].reset_index(drop=True)
-    top_snvs = set(snv_budget_table["SNV"].astype(str))
+    # Memória de cálculo da prioridade POR SEGMENTO (mesma base do _simulate).
+    prio_memory = _prioridade_por_segmento(_economic_work_table(table_df))
 
-    # Restringe todo o restante (orçamento, gráficos, mapa) ao escopo prioritário.
+    # Tabela POR SEGMENTO (uma linha por segmento), ordenada por prioridade, custo real.
+    seg_table = _segment_priority_table(prioritized_table, budget_items)
+    # Filtro de nível de prioridade — agora POR SEGMENTO.
+    if prio_max < 10 and "Priorização" in seg_table.columns:
+        seg_table = seg_table[seg_table["Priorização"] <= prio_max].reset_index(drop=True)
+        seg_table["Prioridade"] = range(1, len(seg_table) + 1)
+    top_segments = {int(x) for x in seg_table["_segment_id"]} if not seg_table.empty else set()
+
+    # Restringe orçamento, prioritized_table e mapa ao escopo prioritário (por segmento).
     if budget_items is not None and not budget_items.empty:
-        budget_items = budget_items[budget_items["SNV"].astype(str).isin(top_snvs)].copy()
+        budget_items = budget_items[budget_items["_segment_id"].isin(top_segments)].copy()
     if prioritized_table is not None and not prioritized_table.empty:
-        prioritized_table = prioritized_table[prioritized_table["SNV"].astype(str).isin(top_snvs)].copy()
+        prioritized_table = prioritized_table[prioritized_table["_segment_id"].isin(top_segments)].copy()
+    # Mapa segue a tabela: só os segmentos dentro do nível de prioridade.
+    if segments_df is not None and not segments_df.empty and "segment_id" in segments_df.columns:
+        segments_df = segments_df[segments_df["segment_id"].isin(top_segments)].copy()
 
     if budget_items is not None and not budget_items.empty:
         total_need = float(budget_items["Custo"].sum())
     else:
-        total_need = float(snv_budget_table["Custo econômico"].sum()) if not snv_budget_table.empty else 0.0
+        total_need = float(seg_table["Custo econômico"].sum()) if not seg_table.empty else 0.0
     metrics["total_need"] = total_need
     metrics["deficit"] = max(total_need - metrics["total_budget"], 0.0)
 
-    scope_snv = int(len(snv_budget_table))
-    scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
+    scope_snv = int(len(seg_table))  # nº de segmentos no escopo prioritário
+    scope_km = float(seg_table["Extensão"].sum()) if not seg_table.empty else 0.0
     annual_coverage = min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0
-    attended_snv_table, attended_km, attended_ids = _segment_attendance(
-        snv_budget_table, budget_items, annual_budget, prioritized_table
-    )
-    # Fallback (sem dados por segmento): destaca no mapa pelos SNVs atendidos.
-    attended_ids = attended_ids or _attended_segment_ids(segments_df, attended_snv_table)
+    # `attended_snv_table` agora guarda os SEGMENTOS atendidos (uma linha por segmento).
+    attended_snv_table, attended_km, attended_ids = _segment_attendance_seg(seg_table, annual_budget)
 
     render_metric_cards(
         [
@@ -2416,11 +2928,12 @@ def _render_economic_page(
     else:
         _render_cost_by_solution(prioritized_table)
     _render_economic_priority_table(
-        snv_budget_table,
+        seg_table,
         attended_snv_table,
         annual_budget,
         budget_items,
         prioritized_table,
+        prio_memory=prio_memory,
     )
 
     if metrics["uses_parametric_cost"] and (budget_items is None or budget_items.empty):
@@ -2447,6 +2960,43 @@ def _render_economic_page(
         attended_ids=attended_ids,
     )
 
+    # IAGON desta tela (Cenário econômico — orçamento × cobertura).
+    _nivel = "Todos" if prio_max >= 10 else f"≤ {prio_max}"
+    _eco_dados = (
+        f"Necessidade total (todos os anos do programa): {_format_money(metrics.get('total_need', 0))}\n"
+        f"Orçamento anual selecionado: {_format_money(annual_budget * 1_000_000)} · "
+        f"Horizonte: {horizon} ano(s) · Nível de prioridade: {_nivel}\n"
+        f"Cobertura anual: {annual_coverage:.1f}% · "
+        f"Trechos atendidos: {attended_km:.1f} de {scope_km:.1f} km ({scope_snv} segmentos no escopo)\n"
+        f"Orçamento faltante p/ cobrir 100%: {_format_money(max(metrics.get('total_need', 0) - annual_budget * 1_000_000, 0))}\n"
+        "Use estes números para montar uma resposta executiva ao gestor (o que dá pra fazer com o "
+        "orçamento, o que priorizar primeiro, quanto falta)."
+    )
+    if attended_snv_table is not None and not attended_snv_table.empty:
+        _att = attended_snv_table.sort_values("Prioridade").head(15)
+        _eco_dados += "\n\nSegmentos ATENDIDOS pelo orçamento (ordem de prioridade):\n" + "\n".join(
+            f"- {int(r['Prioridade'])}º {r['SNV']} km {_format_km(float(r['Km Inicial']))}–{_format_km(float(r['Km Final']))} · "
+            f"{float(r['Extensão']):.2f} km · nível {int(round(float(r['Priorização'])))} · "
+            f"{str(r['Solução recomendada']).replace(' + ', ' / ')} · {_format_money(float(r['Custo econômico']))}"
+            for _, r in _att.iterrows())
+    if annual_df is not None and not annual_df.empty and "Ano" in annual_df.columns:
+        _eco_dados += "\n\nProgramação ano a ano (km executado no ano · custo acumulado · IAP médio projetado):\n" + "\n".join(
+            f"- Ano {int(r['Ano'])}: {float(r.get('Km executado', 0) or 0):.1f} km · "
+            f"{_format_money(float(r.get('Custo acumulado', 0) or 0))} acumulado · IAP {float(r.get('IAP médio', 0) or 0):.2f}"
+            for _, r in annual_df.head(12).iterrows())
+    _render_screen_iagon(
+        "cenario", f"Cenário econômico · {road}",
+        f"<b>Rodovia:</b> {road} &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(str(scenario_label))} &nbsp;·&nbsp; "
+        f"<b>Orçamento:</b> {_format_money(annual_budget * 1_000_000)}/ano &nbsp;·&nbsp; "
+        f"<b>Horizonte:</b> {horizon}a &nbsp;·&nbsp; <b>Prioridade:</b> {_nivel}",
+        _screen_ctx("Cenário econômico (orçamento × cobertura)",
+                    {"Rodovia": road, "Cenário": scenario_label,
+                     "Orçamento anual": _format_money(annual_budget * 1_000_000),
+                     "Horizonte": f"{horizon}a", "Nível de prioridade": _nivel},
+                    _eco_dados),
+        sugestoes=["Análise para o gestor", "O que faço no 1º ano?", "Quanto falta p/ 100%?"],
+    )
+
 
 def _combined_economic_data(road, keys, labels):
     """Combina tabela/orçamento/segmentos de vários cenários (sentidos) para o
@@ -2454,13 +3004,14 @@ def _combined_economic_data(road, keys, labels):
     soma) e `per_sentido` traz a necessidade de cada um para o comparativo."""
     tables, budgets, segs, per_sentido = [], [], [], []
     n = len(keys)
-    delta = 14.0
     for i, k in enumerate(keys):
         d = get_solutions_data(road, scenario_key=k)
         t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
         sent = _sentido_faixa(labels.get(k, k))
+        # Necessidade do PROGRAMA COMPLETO por sentido (todos os anos) — bate com a
+        # NECESSIDADE TOTAL (horizonte default = total da análise). 9999 = sem corte.
         per_sentido.append(
-            {"sentido": sent, "need": _necessidade_total(t, b, _ECONOMIC_DEFAULT_HORIZON)}
+            {"sentido": sent, "need": _necessidade_total(t, b, 9999)}
         )
         if t is not None and not t.empty:
             t = t.copy()
@@ -2472,8 +3023,7 @@ def _combined_economic_data(road, keys, labels):
             budgets.append(b)
         if s is not None and not s.empty:
             s = s.copy()
-            off = (i - (n - 1) / 2.0) * (2 * delta)
-            s["paths"] = s["paths"].apply(lambda paths: [_offset_path(p, off) for p in paths])
+            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
             s["sentido"] = sent
             segs.append(s)
     return {
@@ -2501,15 +3051,7 @@ def _render_economic_comparison(per_sentido) -> None:
             f"{_format_money(p['need'])}</div>"
             f"<div style='font-size:12px;color:#7f909c'>{pct:.0f}% do total</div></div>"
         )
-    cells += (
-        "<div style='flex:1;min-width:170px;background:rgba(46,86,106,.25);"
-        "border:1px solid rgba(90,169,230,.35);border-radius:12px;padding:14px 16px'>"
-        "<div style='font-size:11px;letter-spacing:.08em;color:#9aa8b3;"
-        "text-transform:uppercase'>Total (ambos os sentidos)</div>"
-        "<div style='font-size:22px;font-weight:800;color:#5aa9e6;margin-top:4px'>"
-        f"{_format_money(total)}</div>"
-        "<div style='font-size:12px;color:#7f909c'>necessidade combinada</div></div>"
-    )
+    # O total combinado é redundante com o card NECESSIDADE TOTAL abaixo — não repetimos.
     st.markdown(
         "<div style='margin:6px 0 16px'>"
         "<div style='font-weight:700;color:#cbd5df;margin-bottom:8px'>"
@@ -2598,7 +3140,6 @@ def _combined_dnit_economic_data(road, keys, labels):
     necessidade de cada um para o comparativo. Segmentos deslocados (2 camadas)."""
     tables, budgets, segs, per_sentido = [], [], [], []
     n = len(keys)
-    delta = 14.0
     zona_colors = zona_order = ano_base = None
     for i, k in enumerate(keys):
         d = get_dnit_economic_data(road, scenario_key=k)
@@ -2621,8 +3162,7 @@ def _combined_dnit_economic_data(road, keys, labels):
             budgets.append(b)
         if s is not None and not s.empty:
             s = s.copy()
-            off = (i - (n - 1) / 2.0) * (2 * delta)
-            s["paths"] = s["paths"].apply(lambda paths: [_offset_path(p, off) for p in paths])
+            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
             s["sentido"] = sent
             segs.append(s)
     return {
@@ -3096,7 +3636,7 @@ def _render_compare_anual_bars(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
         '</div></div>'
         '<div class="economic-chart">'
         f'<div class="economic-y-axis">{tick_markup}</div>'
-        '<div>'
+        '<div class="economic-scroll">'
         f'<div class="economic-plot"><div class="economic-bars">{"".join(bars)}</div></div>'
         f'<div class="economic-labels">{"".join(labels)}</div>'
         '</div>'
@@ -3483,6 +4023,13 @@ def _render_work_plan_button(
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Página: PROJEÇÃO — "evolução" (curva de condição IAP/IRI ao longo dos anos)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Severidade de solução por SUBSTRING do nome (README §14.4): define qual solução
+# "ganha" a cor do ano quando um trecho recebe mais de uma intervenção no mesmo ano.
+# Ordem = da mais severa (índice 0, Reconstrução) para a mais leve.
 _SOLUTION_SEVERITY = [
     ("reconstru", "Reconstrução"),
     ("fresagem", "Fresagem e recomposição"),
@@ -3550,6 +4097,11 @@ def _render_intervention_table(sre_history: dict) -> None:
 
 
 def _render_projection_chart(series: dict, bands: list, ymax: float, meta: float, sre: str) -> None:
+    """Desenha (SVG) a curva de projeção do IAP de um trecho ao longo dos anos.
+
+    Fundo em faixas de conceito (Excelente…Péssimo), linha de meta tracejada
+    (IAP_META = 2,5, README §12.3) e marcadores azuis nos anos com intervenção.
+    """
     years = series.get("years", [])
     iap = series.get("iap", [])
     interv = series.get("interv", [])
@@ -3795,6 +4347,7 @@ def _chip_text_color(hex_color: str) -> str:
 
 
 def _solution_chips(solucoes: list) -> str:
+    """Renderiza uma lista de soluções como chips coloridos (cor por `_solution_color`)."""
     chips = []
     for nome in solucoes:
         cor = _solution_color(str(nome))
@@ -3836,70 +4389,204 @@ def _render_projection_history(history: list, sre: str) -> None:
     )
 
 
+# ── Projeção "Solução × Vida útil" (Paragon) ─────────────────────────────────
+# Gráfico ILUSTRATIVO: como cada família de solução se comporta no tempo — o IAP
+# degrada após a obra; as soluções mais leves precisam reexecutar em ciclos
+# (dente-de-serra) e a recomendada é destacada. Espessura/vida útil são valores
+# TÍPICOS de engenharia (não há base no banco). A solução RECOMENDADA por trecho
+# é dado REAL (vem da matriz Paragon). Cores: paleta do Paragon (verde→vermelho).
+_PROJ_TOP, _PROJ_FAIL, _PROJ_LIMIT, _PROJ_P = 5.0, 0.85, 3.0, 1.8
+
+# Catálogo hardcoded das 4 famílias (README §14.3): cor, espessura (cm), vida útil
+# (anos) e custo/km TÍPICOS de engenharia. ATENÇÃO: estes custos NÃO batem com o
+# catálogo do cenário econômico (§14.1) — ex.: Reconstrução 2,5 mi aqui vs. 1,25 mi lá.
+_SOL_FAMILIES = [
+    {"key": "micro",    "nome": "Microrrevestimento",      "cor": "#00a651", "espessura": 2.0,  "vida": 5,  "custo_km": 95_000,    "comport": "degradação rápida — ganho funcional"},
+    {"key": "fresagem", "nome": "Fresagem + recomposição", "cor": "#fff200", "espessura": 6.5,  "vida": 8,  "custo_km": 285_000,   "comport": "degradação média — recupera a funcionalidade"},
+    {"key": "reforco",  "nome": "Reforço estrutural",      "cor": "#f2a51a", "espessura": 12.0, "vida": 11, "custo_km": 740_000,   "comport": "degradação lenta — aumenta a capacidade estrutural"},
+    {"key": "recon",    "nome": "Reconstrução",            "cor": "#d71920", "espessura": 30.0, "vida": 18, "custo_km": 2_500_000, "comport": "reset estrutural — vida longa e estável"},
+]
+_SOL_FAM_BY_KEY = {f["key"]: f for f in _SOL_FAMILIES}
+# Código da matriz Paragon → família (intensidade crescente).
+_CODE_TO_FAMILY = {"OK": None, "RL": "micro", "RL+RS": "micro", "RPS": "fresagem",
+                   "RL+REF": "reforco", "RPS+REF": "reforco", "REC": "recon"}
+_SOL_INTENSITY = {"OK": 0, "RL": 1, "RL+RS": 2, "RPS": 3, "RL+REF": 4, "RPS+REF": 5, "REC": 6}
+
+
+@cached(ttl=1800)
+def _recommended_family_by_sre(road: str, scenario_key: str | None) -> dict:
+    """Por SRE → família recomendada = a solução MAIS INTENSA recomendada no trecho
+    (mapeada das 7 soluções Paragon p/ as 4 famílias). Dado REAL da matriz Paragon."""
+    data = get_solutions_data(road, scenario_key=scenario_key)
+    table = data.get("table")
+    out: dict = {}
+    # Na tabela de soluções o trecho é a coluna "SNV" (== SRE da projeção).
+    if table is None or table.empty or "SNV" not in table.columns or "_solucao_codigo" not in table.columns:
+        return out
+    for sre, sub in table.groupby("SNV"):
+        codes = [str(c) for c in sub["_solucao_codigo"].tolist()]
+        best = max(codes, key=lambda c: _SOL_INTENSITY.get(c, 0)) if codes else "OK"
+        out[str(sre)] = _CODE_TO_FAMILY.get(best)
+    return out
+
+
+def _lifecycle_points(vida: int, horizon: int, recommended: bool, steps: int = 6):
+    """Pontos (ano, IAP) ILUSTRATIVOS. Recomendada: declínio único até a falha ao
+    longo da vida útil. Demais: dente-de-serra (reexecuta a cada `vida` anos)."""
+    span = _PROJ_TOP - _PROJ_FAIL
+    pts = []
+    for i in range(horizon * steps + 1):
+        t = i / steps
+        x = min(t / vida, 1.0) if recommended else (t % vida) / vida
+        pts.append((t, _PROJ_TOP - span * (x ** _PROJ_P)))
+    return pts
+
+
+def _render_solution_lifecycle_chart(rec_key: str | None, horizon: int) -> None:
+    """Card (header + gráfico SVG de linhas) das 4 famílias × vida útil, ilustrativo."""
+    W, H = 1200, 340
+    L, R, T, B = 50, 26, 16, 34
+    pw, ph = W - L - R, H - T - B
+    X = lambda t: L + (t / horizon) * pw
+    Y = lambda v: T + (1 - (v - _PROJ_FAIL) / (_PROJ_TOP - _PROJ_FAIL)) * ph
+
+    p: list[str] = []
+    for v in (_PROJ_TOP, _PROJ_LIMIT, _PROJ_FAIL):
+        gy = Y(v)
+        p.append(f'<line x1="{L}" y1="{gy:.1f}" x2="{L + pw}" y2="{gy:.1f}" stroke="rgba(148,163,184,.12)" stroke-width="1"/>')
+        p.append(f'<text x="{L - 8}" y="{gy + 3:.1f}" fill="#8f9eaa" font-size="10" text-anchor="end">{v:.2f}</text>')
+    ly = Y(_PROJ_LIMIT)
+    p.append(f'<line x1="{L}" y1="{ly:.1f}" x2="{L + pw}" y2="{ly:.1f}" stroke="#f2a51a" stroke-width="1.5" stroke-dasharray="6 4"/>')
+    p.append(f'<text x="{L + pw - 4}" y="{ly - 5:.1f}" fill="#f2a51a" font-size="10" font-weight="700" text-anchor="end">Limite mínimo (3,0)</text>')
+    stepx = 1 if horizon <= 12 else 2
+    for a in range(0, horizon + 1, stepx):
+        p.append(f'<text x="{X(a):.1f}" y="{T + ph + 15:.0f}" fill="#8f9eaa" font-size="10" text-anchor="middle">A{a}</text>')
+    # famílias não-recomendadas atrás; recomendada por cima (destaque)
+    ordered = [f for f in _SOL_FAMILIES if f["key"] != rec_key] + [f for f in _SOL_FAMILIES if f["key"] == rec_key]
+    for f in ordered:
+        is_rec = f["key"] == rec_key
+        poly = " ".join(f"{X(t):.1f},{Y(c):.1f}" for t, c in _lifecycle_points(f["vida"], horizon, is_rec))
+        p.append(f'<polyline points="{poly}" fill="none" stroke="{f["cor"]}" stroke-width="{3.6 if is_rec else 1.8}" opacity="{1.0 if is_rec else 0.62}" stroke-linejoin="round" stroke-linecap="round"/>')
+    svg = (f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet" '
+           f'style="display:block;width:100%;height:auto">{"".join(p)}</svg>')
+
+    rec = _SOL_FAM_BY_KEY.get(rec_key)
+    kpis = [
+        ("RECOMENDADA", rec["nome"] if rec else "Sem intervenção", rec["cor"] if rec else "#9aa8b3"),
+        ("ESPESSURA", f"{rec['espessura']:.1f} cm" if rec else "—", "#e5edf3"),
+        ("VIDA ÚTIL", f"{rec['vida']} anos" if rec else "—", "#e5edf3"),
+        ("CUSTO/KM", _format_money(rec["custo_km"]) if rec else "—", "#e5edf3"),
+        ("PRÓX. INTERVENÇÃO", f"Ano {rec['vida']}" if rec else "—", "#e5edf3"),
+    ]
+    head = "".join(
+        f'<div class="kpi"><div class="kl">{l}</div><div class="kv" style="color:{c}">{html.escape(str(v))}</div></div>'
+        for l, v, c in kpis
+    )
+    legend = "".join(
+        f'<span class="leg"><span class="sw" style="background:{f["cor"]}"></span>{html.escape(f["nome"])}'
+        + ('<b class="rec">● recomendada</b>' if f["key"] == rec_key else '') + '</span>'
+        for f in _SOL_FAMILIES
+    )
+    css = (
+        'html,body{margin:0;padding:0;background:#0b1d28;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;}'
+        '.card{padding:18px 20px 16px;color:#f4f7fb;}'
+        '.title{display:flex;align-items:center;gap:10px;}'
+        '.ic{width:34px;height:34px;border-radius:12px;display:grid;place-items:center;background:#00c2e8;color:#031019;font-weight:900;}'
+        '.h3{margin:0;font-size:15px;font-weight:850;}.sub{margin:2px 0 0;font-size:12px;color:#92a1ad;}'
+        '.head{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 4px;}'
+        '.kpi{flex:1;min-width:150px;background:rgba(7,17,25,.5);border:1px solid rgba(148,163,184,.18);border-radius:12px;padding:11px 14px;}'
+        '.kl{font-size:10px;letter-spacing:.1em;color:#8f9eaa;text-transform:uppercase;}'
+        '.kv{font-size:19px;font-weight:850;margin-top:3px;}'
+        '.chart{margin-top:8px;}'
+        '.legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;padding-top:12px;border-top:1px solid rgba(148,163,184,.12);}'
+        '.leg{display:inline-flex;align-items:center;gap:7px;color:#cbd5dd;font-size:12px;font-weight:700;}'
+        '.leg .sw{width:16px;height:4px;border-radius:2px;display:inline-block;}'
+        '.leg .rec{color:#00c2e8;font-size:11px;font-weight:800;}'
+    )
+    doc = (
+        "<!doctype html><html><head><meta charset='utf-8'><style>" + css + "</style></head><body>"
+        "<div class='card'><div class='title'><div class='ic'>🛠️</div>"
+        "<div><div class='h3'>Solução × Vida útil — comportamento físico</div>"
+        "<div class='sub'>Comparativo ilustrativo das 4 famílias de intervenção aplicadas ao mesmo trecho</div></div></div>"
+        f"<div class='head'>{head}</div>"
+        f"<div class='chart'>{svg}</div><div class='legend'>{legend}</div></div></body></html>"
+    )
+    components.html(doc, height=560, scrolling=False)
+
+
 def _render_projection_page(road: str, scenario_key: str | None) -> None:
-    data = get_projection_data(road, scenario_key=scenario_key)
-    if not data or not data.get("years"):
-        st.info("Sem dados de projeção para este cenário.")
+    """Projeção (Paragon) reformulada: Solução × Vida útil — gráfico ILUSTRATIVO que
+    mostra quanto tempo cada família de solução dura no trecho selecionado."""
+    proj = get_projection_data(road, scenario_key=scenario_key)
+    sre_list = (proj or {}).get("sre_list") or []
+    rec_map = _recommended_family_by_sre(road, scenario_key)
+
+    if not sre_list:
+        st.info("Sem trechos com projeção para este cenário.")
         return
 
-    meta = float(data["meta"])
-    render_metric_cards(
-        [
-            {
-                "title": "IAP MÉDIO ATUAL",
-                "value": f"{data['base_avg']:.2f}",
-                "subtitle": f"Ano base {data['base_year']}",
-                "tone": "red" if data["base_avg"] < meta else "green",
-                "icon": "●",
-            },
-            {
-                "title": "IAP PROJETADO",
-                "value": f"{data['final_avg']:.2f}",
-                "subtitle": f"Condição em {data['years'][-1]}",
-                "tone": "green",
-                "icon": "↗",
-            },
-            {
-                "title": "KM ABAIXO DA META",
-                "value": f"{data['base_below_km']:.1f} km",
-                "subtitle": "IAP < 2,5 hoje",
-                "tone": "red",
-                "icon": "△",
-            },
-            {
-                "title": "PIOR IAP PROJETADO",
-                "value": f"{data['worst_future_val']:.2f}",
-                "subtitle": f"Pior trecho em {data['worst_future_year']}",
-                "tone": "orange",
-                "icon": "◎",
-            },
-        ]
-    )
-    st.markdown("<div style='height: 14px'></div>", unsafe_allow_html=True)
-    _render_intervention_table(data.get("sre_history", {}))
+    # Filtros da tela: Trecho (SRE) + horizonte (10/15/20 anos). Rodovia/Matriz/Cenário
+    # vêm da barra do topo (render_top_bar), como nas outras telas.
+    default = proj.get("default_sre")
+    sel_col, hz_col = st.columns([2, 1], gap="large")
+    with sel_col:
+        _filter_caption("Trecho (SRE)")
+        idx = sre_list.index(default) if default in sre_list else 0
+        sre = st.selectbox("Trecho", sre_list, index=idx, label_visibility="collapsed")
+    with hz_col:
+        _filter_caption("Horizonte")
+        horizon = st.radio("Horizonte", [10, 15, 20], index=2, horizontal=True,
+                           format_func=lambda a: f"{a} anos", label_visibility="collapsed")
 
-    sre_list = data.get("sre_list") or []
-    if sre_list:
-        sel_col, _ = st.columns([1, 2], gap="medium")
-        with sel_col:
-            _filter_caption("Trecho (SRE)")
-            default = data.get("default_sre")
-            index = sre_list.index(default) if default in sre_list else 0
-            selected_sre = st.selectbox("Trecho", sre_list, index=index, label_visibility="collapsed")
-        _render_projection_chart(
-            data["sre_series"][selected_sre],
-            data["bands"],
-            float(data["iap_axis_max"]),
-            float(data["meta"]),
-            selected_sre,
+    rec_key = rec_map.get(str(sre)) or "recon"  # fallback: trecho sem código → reconstrução
+
+    _render_solution_lifecycle_chart(rec_key, int(horizon))
+
+    # Tabela das 4 famílias (curva destacada = recomendada).
+    rows = ""
+    for f in _SOL_FAMILIES:
+        badge = ' <span class="sl-badge">RECOMENDADA</span>' if f["key"] == rec_key else ""
+        rows += (
+            "<tr>"
+            f'<td><span class="sl-dot" style="background:{f["cor"]}"></span>{html.escape(f["nome"])}{badge}</td>'
+            f'<td>{f["espessura"]:.1f} cm</td>'
+            f'<td>{f["vida"]} anos</td>'
+            f'<td>{_format_money(f["custo_km"])}/km</td>'
+            f'<td class="sl-beh">{html.escape(f["comport"])}</td>'
+            "</tr>"
         )
-        _render_projection_history(data.get("sre_history", {}).get(selected_sre, []), selected_sre)
+    st.markdown(
+        "<style>"
+        ".sl-table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13px;}"
+        ".sl-table th,.sl-table td{padding:11px 14px;text-align:right;border-bottom:1px solid rgba(148,163,184,.14);}"
+        ".sl-table th{color:#8f9eaa;font-size:10px;letter-spacing:.08em;text-transform:uppercase;}"
+        ".sl-table th:first-child,.sl-table td:first-child{text-align:left;color:#e5edf3;font-weight:700;}"
+        ".sl-table .sl-beh{text-align:left;color:#9aa8b3;font-weight:400;}"
+        ".sl-dot{width:10px;height:10px;border-radius:999px;display:inline-block;margin-right:8px;}"
+        ".sl-badge{margin-left:8px;font-size:9px;font-weight:800;letter-spacing:.06em;color:#00c2e8;border:1px solid rgba(0,194,232,.4);border-radius:6px;padding:1px 6px;}"
+        "</style>"
+        "<table class='sl-table'><thead><tr>"
+        "<th>Solução</th><th>Espessura</th><th>Vida útil</th><th>Custo/km</th><th>Comportamento</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table>",
+        unsafe_allow_html=True,
+    )
+    _rec = _SOL_FAM_BY_KEY.get(rec_key)
+    if _rec:
+        st.caption(
+            f"Curva destacada: **{_rec['nome']}** — espessura típica {_rec['espessura']:.1f} cm, "
+            f"vida útil ~{_rec['vida']} anos. As demais curvas mostram como o MESMO trecho se comportaria "
+            "com soluções alternativas: as mais leves voltam ao limite em ciclos curtos (reexecução = "
+            "dente-de-serra), a reconstrução dura mais. **Gráfico ilustrativo** — espessura e vida útil são "
+            "valores típicos de engenharia; a solução recomendada vem da matriz Paragon do trecho."
+        )
 
 
 # ----------------------------------------------------------------------------
 # Projeção DNIT — cronograma anual de intervenções por trecho
 # ----------------------------------------------------------------------------
 def _render_dnit_projection_page(road: str, scenario_key: str | None) -> None:
+    """Projeção DNIT: cronograma anual de obras por SRE + custo por ano + projeção de IRI.
+    Diferente da Paragon (curvas ilustrativas) — aqui os anos/custos vêm do banco."""
     data = get_dnit_projection_schedule(road, scenario_key)
     if not data.get("available"):
         disponiveis = get_dnit_available_roads()
@@ -3943,6 +4630,8 @@ def _render_dnit_projection_page(road: str, scenario_key: str | None) -> None:
 
     # Tabela cronograma: 1 linha por SRE × ano. Quando há múltiplos segmentos no
     # mesmo (SRE, Ano), a solução MAIS SEVERA dita o núcleo/grupo (e a cor do chip).
+    # Severidade DNIT hardcoded (mesma ideia do §14.4, mas com os grupos DNIT):
+    # 0 = mais severa (Reconstrução) … maior = mais leve.
     severity_order = {
         "Reconstrução": 0,
         "Fresagem + CBUQ": 1,
@@ -4101,6 +4790,10 @@ def _gray_shade(t: float) -> str:
     return f"#{r:02x}{g:02x}{bl:02x}"
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Página: DIAGNÓSTICO / VISÃO GERAL DNIT — condição por IRI/IGG/deflexão
+# ═══════════════════════════════════════════════════════════════════════════
+
 def _render_dnit_linear(segments_df) -> None:
     """Diagrama linear DNIT: faixas de IRI, IGG e deflexão (Dc) por km."""
     if segments_df is None or segments_df.empty:
@@ -4198,6 +4891,25 @@ def _render_dnit_linear(segments_df) -> None:
         )
 
 
+def _dnit_distribution(segments_df, classe_col: str, color_col: str):
+    """Distribuição (classe, percentual, color) ponderada por km — p/ os donuts IRI/IGG."""
+    cols = {classe_col, color_col, "km_inicial", "km_final"}
+    if segments_df is None or segments_df.empty or not cols.issubset(segments_df.columns):
+        return pd.DataFrame(columns=["classe", "percentual", "color"])
+    df = segments_df.copy()
+    df["_ext"] = (df["km_final"].astype(float) - df["km_inicial"].astype(float)).clip(lower=0)
+    df = df[df[classe_col].notna()]
+    if df.empty:
+        return pd.DataFrame(columns=["classe", "percentual", "color"])
+    grp = df.groupby([classe_col, color_col], dropna=False)["_ext"].sum().reset_index()
+    total = float(grp["_ext"].sum()) or 1.0
+    grp["percentual"] = grp["_ext"] / total * 100
+    grp = grp.rename(columns={classe_col: "classe", color_col: "color"})
+    rank = {c: i for i, c in enumerate(_DNIT_ORDER)}
+    grp["_o"] = grp["classe"].map(rank).fillna(999)
+    return grp.sort_values("_o")[["classe", "percentual", "color"]].reset_index(drop=True)
+
+
 def _render_dnit_overview(road: str, scenario_key: str | None) -> None:
     """Visão geral DNIT: KPIs + mapa colorido pela matriz + diagrama linear (IRI/IGG/deflexão)."""
     data = get_dnit_overview_data(road, scenario_key=scenario_key)
@@ -4232,10 +4944,28 @@ def _render_dnit_overview(road: str, scenario_key: str | None) -> None:
     )
     st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
     render_dnit_map(data["segments"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
+    # Donuts de distribuição IRI + IGG (entre o mapa e o diagrama linear).
+    _c_iri, _c_igg = st.columns(2)
+    with _c_iri:
+        render_iap_distribution(
+            _dnit_distribution(data["segments"], "iri_classe", "iri_color"),
+            float(data["iri_avg"]),
+            title="IRI", subtitle="Distribuição por faixa (ponderada por km)",
+            center_label="IRI MÉDIO", value_fmt="{:.2f}",
+        )
+    with _c_igg:
+        render_iap_distribution(
+            _dnit_distribution(data["segments"], "igg_classe", "igg_color"),
+            float(data["igg_avg"]),
+            title="IGG", subtitle="Distribuição por faixa (ponderada por km)",
+            center_label="IGG MÉDIO", value_fmt="{:.1f}",
+        )
     _render_dnit_linear(data["segments"])
 
 
 def _filter_map_segments(segments_df, filtered_table):
+    """Restringe os segmentos geográficos aos que sobraram na tabela filtrada
+    (casando por `_segment_id`), para o mapa acompanhar os filtros da tabela."""
     if segments_df is None or segments_df.empty:
         return segments_df
     if filtered_table is None or filtered_table.empty or "_segment_id" not in filtered_table:
@@ -4244,6 +4974,10 @@ def _filter_map_segments(segments_df, filtered_table):
     selected_ids = set(filtered_table["_segment_id"].astype(int).tolist())
     return segments_df[segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Página: VISÃO GERAL (rede) — painel executivo agregando TODAS as rodovias
+# ═══════════════════════════════════════════════════════════════════════════
 
 @cached(ttl=1800)
 def _build_network_overview(is_dnit: bool) -> dict:
@@ -4272,6 +5006,14 @@ def _build_network_overview(is_dnit: bool) -> dict:
 
         iap_bad_km = float(ext[iap_col < IAP_META].sum())
         iri_bad_km = float(ext[iri_col > 4].sum())
+        # km que precisam de intervenção = têm solução corretiva (≠ Sem intervenção / OK).
+        if "Solução recomendada" in table.columns:
+            _interv_mask = ~table["Solução recomendada"].astype(str).str.strip().isin(
+                ["Sem intervenção", "OK", "", "nan", "None"]
+            )
+            interv_km = float(table.loc[_interv_mask, "Extensão"].astype(float).sum())
+        else:
+            interv_km = 0.0
 
         # Trechos prioritários POR RODOVIA (mesma priorização da tela econômica:
         # IP técnico + IP econômico/IPE, normalizado dentro da própria rodovia).
@@ -4289,6 +5031,7 @@ def _build_network_overview(is_dnit: bool) -> dict:
                 "IRI": float((iri_col * ext).sum() / ext_sum),
                 "IGG": float((igg_col * ext).sum() / ext_sum),
                 "ext_km": ext_sum,
+                "interv_km": interv_km,
                 "iap_bad_pct": iap_bad_km / ext_sum * 100,
                 "iri_bad_pct": iri_bad_km / ext_sum * 100,
                 "custo": _necessidade_total(table, sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON),
@@ -4328,51 +5071,37 @@ def _build_network_overview(is_dnit: bool) -> dict:
 
 
 def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
-    ordered = df.sort_values("iri_bad_pct", ascending=False) if is_dnit else df.sort_values("IAP", ascending=True)
-    crit_col = "iri_bad_pct" if is_dnit else "iap_bad_pct"
-    crit_label = "% IRI > 4" if is_dnit else "% IAP < 2,5"
+    """Rodovias por EXTENSÃO TOTAL. A barra (comprimento ∝ km) mostra, dentro do total,
+    quanto precisa de intervenção (laranja) vs OK (verde). Maior extensão primeiro;
+    clique na rodovia abre o diagnóstico."""
+    ordered = df.sort_values("ext_km", ascending=False)
+    max_ext = max(float(ordered["ext_km"].max()), 1.0)
 
-    rows_markup = []
+    rows = []
     for i, row in enumerate(ordered.to_dict("records"), start=1):
-        rank_tone = "#d71920" if i == 1 else ("#f2a51a" if i == 2 else "#9aa8b3")
-        rows_markup.append(
-            "<tr>"
-            f"<td class='muted'>{i}</td>"
-            f"<td><a class='net-road-link' href='?page=overview&road={html.escape(str(row['_code']))}' target='_self'>"
-            f"<span class='net-rank-dot' style='background:{rank_tone}'></span>{html.escape(str(row['Rodovia']))}</a></td>"
-            f"<td>{row['IAP']:.2f}</td>"
-            f"<td>{row['IRI']:.2f}</td>"
-            f"<td>{row['IGG']:.0f}</td>"
-            f"<td>{row[crit_col]:.0f}%</td>"
-            f"<td>{int(row['prio'])}</td>"
-            f"<td>{_format_money(float(row['custo']))}</td>"
-            "</tr>"
+        total = float(row["ext_km"])
+        interv = min(max(float(row.get("interv_km", 0.0) or 0.0), 0.0), total)
+        ext_pct = total / max_ext * 100
+        interv_frac = (interv / total * 100) if total else 0.0
+        pct = (interv / total * 100) if total else 0.0
+        rows.append(
+            '<div class="net-rank-row">'
+            f'<a class="net-rank-name" href="?page=overview&road={html.escape(str(row["_code"]))}" target="_self">'
+            f'{i}. {html.escape(str(row["Rodovia"]))}</a>'
+            f'<div class="net-rank-track"><div class="net-rank-bar" style="width:{ext_pct:.1f}%">'
+            f'<div class="net-rank-interv" style="width:{interv_frac:.1f}%"></div></div></div>'
+            f'<div class="net-rank-val">{total:.0f} km</div>'
+            f'<div class="net-rank-extra">{interv:.0f} km precisam de intervenção ({pct:.0f}%)</div>'
+            '</div>'
         )
 
     st.markdown(
-        """
-        <section class="solution-card">
-          <div class="solution-card-head">
-            <h3>Ranking das piores rodovias</h3>
-            <p>Pior primeiro · clique na rodovia para abrir o diagnóstico detalhado</p>
-          </div>
-          <div class="solution-table-wrap">
-            <table class="solution-table">
-              <thead>
-                <tr>
-                  <th>#</th><th>Rodovia</th><th>IAP</th><th>IRI</th><th>IGG</th>
-                  <th>""" + crit_label + """</th><th>Trechos prio.</th><th>Custo</th>
-                </tr>
-              </thead>
-              <tbody>
-        """
-        + "".join(rows_markup)
-        + """
-              </tbody>
-            </table>
-          </div>
-        </section>
-        """,
+        '<section class="solution-card"><div class="solution-card-head">'
+        '<h3>Extensão das rodovias</h3>'
+        '<p>Barra = extensão total · <span style="color:#f2a51a;font-weight:800">laranja</span> precisa de '
+        'intervenção · <span style="color:#00c2e8;font-weight:800">azul</span> OK · clique para abrir o diagnóstico</p>'
+        '</div>'
+        f'<div class="net-rank-body">{"".join(rows)}</div></section>',
         unsafe_allow_html=True,
     )
 
@@ -4407,7 +5136,7 @@ def _render_network_cost(df: pd.DataFrame) -> None:
         '</div>'
         '<div class="economic-chart">'
         f'<div class="economic-y-axis">{tick_markup}</div>'
-        '<div>'
+        '<div class="economic-scroll">'
         f'<div class="economic-plot"><div class="economic-bars">{"".join(bars)}</div></div>'
         f'<div class="economic-labels">{"".join(labels)}</div>'
         '</div>'
@@ -4426,11 +5155,10 @@ def _render_network_overview(diagnosis: str) -> None:
         return
 
     df = data["roads_df"]
+    # Na rede, médias de IAP/IRI/IGG não dizem muito (misturam rodovias/metodologias) —
+    # o que importa é o backlog de prioridade e o custo. Mantemos só esses dois.
     render_metric_cards(
         [
-            {"title": "IAP MÉDIO", "value": f"{data['net_iap']:.2f}", "subtitle": "Rede · meta ≥ 2,5", "tone": "cyan", "icon": "◍"},
-            {"title": "IRI MÉDIO", "value": f"{data['net_iri']:.2f}", "subtitle": "Irregularidade (m/km)", "tone": "cyan", "icon": "≈"},
-            {"title": "IGG MÉDIO", "value": f"{data['net_igg']:.0f}", "subtitle": "Gravidade global", "tone": "cyan", "icon": "▦"},
             {"title": "TRECHOS PRIORITÁRIOS", "value": f"{data['prio_total']}", "subtitle": "Prioridade Alta/Crítica (IP)", "tone": "orange", "icon": "▲"},
             {"title": "CUSTO TOTAL", "value": _format_money(data["net_custo"]), "subtitle": f"Necessidade · {data['total_km']:.0f} km", "tone": "green", "icon": "$"},
         ]
@@ -4447,7 +5175,11 @@ def _render_network_overview(diagnosis: str) -> None:
     _render_network_cost(df)
 
 
-# ──────────────────────────── IAGON (assistente de IA) ────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# IAGON — assistente de IA embutido (chat/análise). FORA DO ESCOPO desta
+# documentação (ver README, "Fora de escopo"). Todo o bloco abaixo, até a seção
+# "Roteamento / main()", pertence ao assistente IAGON e não é documentado aqui.
+# ═══════════════════════════════════════════════════════════════════════════
 def _cond_class(v: float) -> str:
     """Classe dos índices estruturais 0–5 (maior = melhor condição) — mesma régua do painel."""
     return ("Excelente" if v >= 4.5 else "Bom" if v >= 3.5 else
@@ -4468,7 +5200,7 @@ def _iagon_enrich_detail(road: str) -> dict:
             t = sol.get("table")
             if t is None or t.empty:
                 continue
-            bi = _limit_budget_to_horizon(sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON)
+            bi = sol.get("budget_items")  # necessidade = TODOS os anos do programa
             out["sentidos"].append({
                 "sentido": _sentido_label(s["cenario"]),
                 "iap": round(float(t["IAP"].mean()), 2) if "IAP" in t.columns else None,
@@ -4500,14 +5232,17 @@ def _iagon_enrich_detail(road: str) -> dict:
     return out
 
 
-def _iagon_road_detail(road: str) -> tuple[list[tuple[int, float]], list[tuple[str, float]], list[dict]]:
-    """Dados Paragon de uma rodovia: (custo por ano, distribuição de soluções, trechos SNV priorizados).
+def _iagon_road_detail(road: str) -> tuple[list[tuple[int, float]], list[tuple[str, float]], list[dict], float]:
+    """Dados Paragon de uma rodovia: (custo por ano, distribuição de soluções, trechos SNV
+    priorizados, NECESSIDADE TOTAL do programa).
 
     Inclui mistura completa de soluções por SNV (não só a dominante) para evitar omissão
     de Reconstrução quando ela aparece em poucos segmentos.
     """
     sol = get_solutions_data(road)
-    bi = _limit_budget_to_horizon(sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON)
+    # Necessidade TOTAL e custo por ano = TODOS os anos do programa (não horizonte fixo de 8 anos).
+    nec_total = float(_necessidade_total(sol.get("table"), sol.get("budget_items"), 9999) or 0.0)
+    bi = sol.get("budget_items")
     if bi is not None and not bi.empty and "Ano" in bi:
         grp = bi.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano")
         cby = [(int(r["Ano"]), float(r["Custo"])) for _, r in grp.iterrows()]
@@ -4553,7 +5288,228 @@ def _iagon_road_detail(road: str) -> tuple[list[tuple[int, float]], list[tuple[s
                 }
             )
         trechos.sort(key=lambda x: x["rank"])
-    return cby, sdist, trechos
+    return cby, sdist, trechos, nec_total
+
+
+def _iagon_road_scenarios(road: str) -> list[dict]:
+    """Cenários Paragon cadastrados para a rodovia, numerados (1..N) com rótulo curto."""
+    out: list[dict] = []
+    try:
+        for i, s in enumerate(get_available_scenarios(road, "Paragon") or [], start=1):
+            out.append({"n": i, "key": s.get("key"), "label": _short_scenario_label(s)})
+    except Exception:
+        pass
+    return out
+
+
+def _iagon_norm_road(token: str) -> str:
+    m = re.search(r"BR[\s-]?0*(\d{2,3})", (token or "").upper())
+    return f"BR-{int(m.group(1)):03d}" if m else ""
+
+
+def _iagon_scenario_gate(user_msg: str, history: list[dict]) -> str | None:
+    """Gate DETERMINÍSTICO (não depende do modelo): se a pergunta é sobre UMA rodovia com
+    >1 cenário sem especificar qual, devolve a pergunta do cenário. Senão None (segue p/ o modelo).
+
+    Garante que a IAGON NUNCA cravе número de um cenário padrão sem o gestor escolher."""
+    low = (user_msg or "").lower()
+    # rede / panorama / comparação entre rodovias → não pergunta cenário (é visão geral)
+    if any(w in low for w in ("todas", "toda a rede", "da rede", "na rede", "panorama",
+                              "ranking", "compare as rodovias", "comparar as rodovias",
+                              "todas as rodovias", "a malha")):
+        return None
+    roads = {r for tok in re.findall(r"BR[\s-]?0*\d{2,3}", (user_msg or "").upper())
+             if (r := _iagon_norm_road(tok))}
+    if len(roads) != 1:
+        return None  # 0 rodovias (genérico) ou 2+ (comparação) → o modelo decide
+    road = next(iter(roads))
+    scs = _iagon_road_scenarios(road)
+    if len(scs) <= 1:
+        return None
+    labels_low = [s["label"].lower() for s in scs]
+    # pedido de COMPARAÇÃO de cenários → deixa o modelo comparar (não pergunta)
+    if "compar" in low and "cen" in low:
+        return None
+    # cenário(s) já especificado(s) na mensagem (nº singular/plural ou rótulo)?
+    if re.search(r"cen[áa]rios?\s*\d|cen[áa]rio\s+(um|dois|tr[êe]s|quatro)", low) or any(l in low for l in labels_low):
+        return None
+    # já perguntado p/ esta rodovia nesta sessão? (não insistir)
+    try:
+        asked = st.session_state.setdefault("_iagon_asked_scen", set())
+    except Exception:
+        asked = set()
+    if road in asked:
+        return None
+    # usuário já escolheu cenário em mensagens anteriores?
+    prev = " ".join(m.get("content", "") for m in history[:-1] if m.get("role") == "user").lower()
+    if re.search(r"cen[áa]rios?\s*\d", prev) or any(l in prev for l in labels_low):
+        return None
+    asked.add(road)
+    linhas = "\n".join(f"- **{s['n']})** {s['label']}" for s in scs)
+    return (
+        f"A **{road}** tem **{len(scs)} cenários** cadastrados — e o resultado muda conforme o cenário "
+        f"(ex.: análise segmentada, fixa, todas as faixas, só crescente ou só decrescente). "
+        f"Por isso, antes de te passar números:\n\n{linhas}\n\n"
+        f"**Qual cenário você quer?** Posso também fazer uma **análise técnica comparando** os cenários."
+    )
+
+
+def _iagon_situacao_text(road: str, cenario: int = 1) -> str:
+    """Situação da rodovia em UM cenário: IAP médio, % crítico, NECESSIDADE TOTAL (soma de
+    TODOS os anos do programa — não um horizonte fixo), km por solução, segmentos críticos."""
+    scs = _iagon_road_scenarios(road)
+    if not scs:
+        return f"Sem cenários Paragon cadastrados para {road}."
+    idx = max(1, min(int(cenario or 1), len(scs))) - 1
+    sc = scs[idx]
+    sol = get_solutions_data(road, scenario_key=sc["key"])
+    table = sol.get("table")
+    if table is None or table.empty:
+        return f"Sem dados Paragon para {road} (cenário {sc['n']}: {sc['label']})."
+    ext = float(table["Extensão"].sum()) or 1.0
+    iap_avg = float((table["IAP"] * table["Extensão"]).sum() / ext)
+    pct_bad = float(table[table["IAP"] < 2.5]["Extensão"].sum() / ext * 100)
+    bi = sol.get("budget_items")
+    nec, anos_txt = 0.0, ""
+    if bi is not None and not bi.empty and "Custo" in bi.columns:
+        nec = float(bi["Custo"].sum())  # TODOS os anos do programa (não 8 anos)
+        anos = pd.to_numeric(bi["Ano"], errors="coerce").dropna()
+        if not anos.empty:
+            anos_txt = f" (programa {int(anos.min())}–{int(anos.max())}, TODOS os anos)"
+    sd = table.groupby("Solução recomendada")["Extensão"].sum().sort_values(ascending=False)
+    sol_txt = " · ".join(f"{str(n).replace(' + ', ' / ')} {km:.1f} km" for n, km in sd.items() if str(n).strip()) or "sem dados"
+    seg = _segment_priority_table(_aplicar_indice_priorizacao(_economic_work_table(table)), bi)
+    crit = int((seg["Priorização"] <= 3).sum()) if not seg.empty else 0
+    alta = int(((seg["Priorização"] > 3) & (seg["Priorização"] <= 5)).sum()) if not seg.empty else 0
+    return (
+        f"Situação — {road} · cenário {sc['n']}: {sc['label']}\n"
+        f"- IAP médio: {iap_avg:.2f} (meta 2,5)\n"
+        f"- % da extensão com IAP < 2,5: {pct_bad:.0f}%\n"
+        f"- Extensão total: {ext:.1f} km\n"
+        f"- NECESSIDADE TOTAL{anos_txt}: {_format_money(nec)}\n"
+        f"- Segmentos prioritários: {crit} Crítica (nível ≤ 3) · {alta} Alta (nível 4–5)\n"
+        f"- Soluções (km): {sol_txt}"
+    )
+
+
+_SCREEN_IAGON_INSTR = (
+    "Você é um engenheiro de pavimentos SÊNIOR analisando UMA tela do relatório para um gestor. "
+    "NÃO se limite a repetir os números que já aparecem na tela — faça uma ANÁLISE TÉCNICA COMPLETA E "
+    "PROFUNDA usando TODOS os dados do contexto abaixo (situação, trechos por segmento, custos, programa):\n"
+    "1. Leitura crítica: o que os números revelam (gravidade, padrões, onde a degradação se concentra).\n"
+    "2. ONDE estão os pontos críticos — cite trechos/SRE e km específicos do contexto e por que são críticos.\n"
+    "3. Implicações de risco e de custo; o que atacar PRIMEIRO e por quê.\n"
+    "4. Recomendações práticas + próximo passo objetivo.\n"
+    "Cite SEMPRE números e trechos concretos do contexto (não generalize). Use markdown (negrito, listas, "
+    "tabela curta quando ajudar). Seja completo, porém objetivo. Responda apenas sobre ESTA tela.\n\nPergunta: "
+)
+
+
+def _scenario_num(road: str, scenario_key: str | None) -> int:
+    for s in _iagon_road_scenarios(road):
+        if s.get("key") == scenario_key:
+            return s["n"]
+    return 1
+
+
+def _screen_ctx(titulo: str, filtros: dict, dados_md: str) -> str:
+    fl = " · ".join(f"{k}: {v}" for k, v in filtros.items() if v)
+    return f"TELA: {titulo}\nFILTROS APLICADOS: {fl}\n\nDADOS EXIBIDOS NESTA TELA:\n{dados_md}"
+
+
+# Assistente IAGON (fora do escopo desta documentação).
+def _render_screen_iagon(screen: str, titulo: str, filtro_md: str, context_fn,
+                         sugestoes: list[str] | None = None) -> None:
+    """Painel da IAGON escopado a UMA tela: detalha o filtro e faz análise técnica dos dados
+    DAQUELA tela. `context_fn` é um callable (ou string) montado SÓ quando há pergunta — assim
+    o contexto pesado (priorização) não roda a cada render."""
+    sugestoes = sugestoes or ["Análise completa", "Pontos críticos", "O que priorizar?"]
+    with st.container(border=True):
+        st.markdown('<span class="iagon-fab-mark"></span>', unsafe_allow_html=True)
+        with st.popover("✦ IAGON", use_container_width=False):
+            st.markdown(
+                f"<div class='iagon-cv-head'>✦ <b>IAGON</b> · {html.escape(titulo)}</div>"
+                "<div class='iagon-cv-sub'>Análise técnica desta tela com os filtros aplicados.</div>"
+                f"<div class='iagon-cv-filtro'>{filtro_md}</div>",
+                unsafe_allow_html=True,
+            )
+            if not iagon.is_configured():
+                st.caption("IAGON indisponível (sem chave de API).")
+                return
+            cols = st.columns(len(sugestoes))
+            clicked = None
+            for i, s in enumerate(sugestoes):
+                if cols[i].button(s, key=f"iagon_sug_{screen}_{i}", use_container_width=True):
+                    clicked = s
+            q = st.text_input("Pergunte sobre esta tela…", key=f"iagon_in_{screen}",
+                              label_visibility="collapsed", placeholder="Pergunte sobre esta tela…")
+            pergunta = (clicked or (q or "").strip())
+            if pergunta and pergunta != st.session_state.get(f"iagon_lastq_{screen}"):
+                st.session_state[f"iagon_lastq_{screen}"] = pergunta
+                with st.spinner("Analisando esta tela…"):
+                    try:
+                        ctx = context_fn() if callable(context_fn) else context_fn
+                        ans = iagon.analisar(ctx, _SCREEN_IAGON_INSTR + pergunta)
+                    except Exception as e:
+                        ans = f"Não consegui responder agora ({type(e).__name__})."
+                st.session_state[f"iagon_ans_{screen}"] = {"q": pergunta, "a": ans}
+            last = st.session_state.get(f"iagon_ans_{screen}")
+            if last:
+                st.markdown(f"<div class='iagon-cv-q'>🧑 {html.escape(last['q'])}</div>", unsafe_allow_html=True)
+                st.markdown(last["a"])
+
+
+def _iagon_trechos_priorizados_text(road: str, cenario: int = 1, top: int = 25, horizonte: int = 1) -> str:
+    """Top trechos prioritários POR SEGMENTO de um CENÁRIO — mesmos números do relatório
+    (extensão por segmento, IPT, nível de prioridade 1–10, solução, custo).
+
+    O CUSTO por trecho depende do `horizonte` (anos): igual ao relatório, o custo é a soma
+    da programação do orçamento DENTRO do horizonte. Default 1 = só a 1ª intervenção (visão
+    'orçamento anual'). Horizonte maior soma a manutenção futura."""
+    scs = _iagon_road_scenarios(road)
+    if not scs:
+        return f"Sem cenários Paragon cadastrados para {road}."
+    idx = max(1, min(int(cenario or 1), len(scs))) - 1
+    sc = scs[idx]
+    sol = get_solutions_data(road, scenario_key=sc["key"])
+    table = sol.get("table")
+    if table is None or table.empty:
+        return f"Sem dados Paragon para {road} (cenário {sc['n']}: {sc['label']})."
+    h = max(1, int(horizonte or 1))
+    bi = _limit_budget_to_horizon(sol.get("budget_items"), h)
+    seg = _segment_priority_table(
+        _aplicar_indice_priorizacao(_economic_work_table(table)), bi
+    )
+    if seg.empty:
+        return f"Sem segmentos com intervenção para {road} (cenário {sc['n']}: {sc['label']})."
+    total = len(seg)
+    seg = seg.sort_values("Prioridade").head(int(top or 25))
+    linhas = "\n".join(
+        f"  {int(r['Prioridade'])}º · {r['SNV']} · km {_format_km(float(r['Km Inicial']))}–{_format_km(float(r['Km Final']))} · "
+        f"{float(r['Extensão']):.2f} km · nível {int(round(float(r['Priorização'])))} · IPT {float(r['IPT']):.2f} · "
+        f"{str(r['Solução recomendada']).replace(' + ', ' / ')} · {_format_money(float(r['Custo econômico']))}"
+        for _, r in seg.iterrows()
+    )
+    return (
+        f"Trechos prioritários POR SEGMENTO — {road} · cenário {sc['n']}: {sc['label']} "
+        f"(top {len(seg)} de {total} segmentos; CUSTO no horizonte de {h} ano(s) — "
+        f"mesmo critério do relatório; nível 1 = mais crítico):\n{linhas}"
+    )
+
+
+def _iagon_full_road_context(road: str, scenario_key: str | None, titulo: str,
+                             filtros: dict, extra: str = "") -> str:
+    """Contexto RICO de uma rodovia+cenário p/ o painel da tela: situação completa +
+    trechos prioritários POR SEGMENTO (top 15) + extra específico da tela. Montado sob
+    demanda (lazy) — só roda quando há pergunta."""
+    num = _scenario_num(road, scenario_key)
+    partes = [
+        _iagon_situacao_text(road, num),
+        _iagon_trechos_priorizados_text(road, num, top=15, horizonte=1),
+    ]
+    if extra:
+        partes.append(str(extra))
+    return _screen_ctx(titulo, filtros, "\n\n".join(partes))
 
 
 def _iagon_dnit_detail(road: str) -> dict | None:
@@ -4682,10 +5638,24 @@ def _build_iagon_context() -> tuple[str, dict]:
     proj_blocks: list[str] = []
     sentido_blocks: list[str] = []
     cond_blocks: list[str] = []
+    cen_lines: list[str] = []
+    nec_by_road: dict[str, float] = {}
+    net_nec = 0.0
 
     for _, r in df.iterrows():
         road = r["Rodovia"]
-        cby, sdist, trechos = _iagon_road_detail(road)
+        cby, sdist, trechos, nec_total = _iagon_road_detail(road)
+        nec_by_road[road] = nec_total
+        net_nec += nec_total
+        scs = _iagon_road_scenarios(road)
+        if len(scs) > 1:
+            cen_lines.append(
+                f"- **{road}**: {len(scs)} cenários — "
+                + " · ".join(f"{s['n']}) {s['label']}" for s in scs)
+                + "  →  PERGUNTE qual cenário antes de listar trechos/extensões."
+            )
+        elif scs:
+            cen_lines.append(f"- {road}: 1 cenário ({scs[0]['label']}).")
         dnit = _iagon_dnit_detail(road) if road in dnit_set else None
         proj = _iagon_projection_summary(road)
 
@@ -4698,7 +5668,7 @@ def _build_iagon_context() -> tuple[str, dict]:
                 "iap_bad_pct": round(float(r["iap_bad_pct"]), 0),
                 "iri_bad_pct": round(float(r["iri_bad_pct"]), 0),
                 "prio": int(r["prio"]),
-                "custo": float(r["custo"]),
+                "custo": float(nec_total),
                 "ext_km": round(float(r["ext_km"]), 1),
             },
             "paragon": {
@@ -4711,13 +5681,13 @@ def _build_iagon_context() -> tuple[str, dict]:
         }
 
         anos = " · ".join(f"{ano} {_format_money(c)}" for ano, c in cby) or "sem programação anual"
-        paragon_cost_lines.append(f"- {road} (total {_format_money(float(r['custo']))}): {anos}")
+        paragon_cost_lines.append(f"- {road} (necessidade total, todos os anos: {_format_money(nec_total)}): {anos}")
         sol_txt = " · ".join(f"{name} {km:.1f} km" for name, km in sdist) or "sem dados"
         paragon_sol_lines.append(f"- {road}: {sol_txt}")
         if trechos:
             tl = "\n".join(
                 f"  {t['rank']}º · {t['snv']} · {t['classe']} · priorização **{t['priorizacao']}** "
-                f"(escala invertida 0–10, menor=pior) · {t['ext']:.0f} km · IAP {t['iap']:.2f} · "
+                f"(escala 1–10, menor=pior) · {t['ext']:.0f} km · IAP {t['iap']:.2f} · "
                 f"mix de soluções: {t['mix_solucoes']}"
                 for t in trechos
             )
@@ -4784,7 +5754,7 @@ def _build_iagon_context() -> tuple[str, dict]:
 
     linhas = "\n".join(
         f"| {r['Rodovia']} | {r['IAP']:.2f} | {r['IRI']:.2f} | {r['IGG']:.0f} | "
-        f"{r['iap_bad_pct']:.0f}% | {r['iri_bad_pct']:.0f}% | {int(r['prio'])} | {_format_money(float(r['custo']))} |"
+        f"{r['iap_bad_pct']:.0f}% | {r['iri_bad_pct']:.0f}% | {int(r['prio'])} | {_format_money(nec_by_road.get(r['Rodovia'], 0.0))} |"
         for _, r in df.sort_values("IAP").iterrows()
     )
     dnit_roads_str = ", ".join(dnit_roads_list) or "nenhuma"
@@ -4792,13 +5762,13 @@ def _build_iagon_context() -> tuple[str, dict]:
     context = f"""# Malha rodoviária (Rondônia) — dados completos
 
 **Rodovias:** {len(df)} · **Extensão total:** {data['total_km']:.0f} km
-**Necessidade total Paragon ({_ECONOMIC_DEFAULT_HORIZON}a):** {_format_money(data['net_custo'])}
+**Necessidade total Paragon (todos os anos do programa):** {_format_money(net_nec)}
 **Trechos prioritários (Paragon, Alta/Crítica):** {data['prio_total']}
 **Médias da rede:** IAP {data['net_iap']:.2f} (meta 2,5) · IRI {data['net_iri']:.2f} · IGG {data['net_igg']:.0f}
 **Rodovias com cálculo DNIT/Revitaliza disponível:** {dnit_roads_str}
 
 ## 1) Diagnóstico — Indicadores por rodovia (pior IAP primeiro)
-| Rodovia | IAP | IRI | IGG | % IAP<2,5 | % IRI>4 | Trechos prio. | Necessidade ({_ECONOMIC_DEFAULT_HORIZON}a) |
+| Rodovia | IAP | IRI | IGG | % IAP<2,5 | % IRI>4 | Trechos prio. | Necessidade total (programa) |
 |---|---|---|---|---|---|---|---|
 {linhas}
 
@@ -4806,14 +5776,19 @@ def _build_iagon_context() -> tuple[str, dict]:
 Nomes Paragon (use EXATAMENTE estes): *Reconstrução, Fresagem e recomposição, Recarga Superficial + Reparo localizado, Sem intervenção*.
 {chr(10).join(paragon_sol_lines)}
 
-## 3) Cenário econômico Paragon — custo por ano (horizonte {_ECONOMIC_DEFAULT_HORIZON} anos)
+## 3) Cenário econômico Paragon — custo por ano (programa completo, todos os anos)
 {chr(10).join(paragon_cost_lines)}
 
-## 4) Trechos (SNV) Paragon — priorização invertida 0–10 (MENOR = mais crítico)
-- Crítica: priorização ≤ 3 · Alta: ≤ 5 · Média: ≤ 7 · Baixa: > 7
-- "Rank" = posição na ordem de prioridade (1 = topo). "Priorização" = valor 0–10.
-- Sempre cite o **mix completo de soluções** (não só a dominante) — se o SNV tem Reconstrução,
-  mencione mesmo que seja minoria em km.
+## 4) Cenários cadastrados e trechos prioritários (Paragon)
+
+### Cenários cadastrados por rodovia
+{chr(10).join(cen_lines) or "_sem cenários listados_"}
+> ⚠️ Cada rodovia pode ter MAIS DE UM cenário Paragon. Quando o usuário pedir trechos prioritários, extensão ou custos POR TRECHO de uma rodovia com **mais de um cenário**, **PERGUNTE primeiro qual cenário** (apresente numerados: 1) …, 2) …) e ofereça uma análise técnica comparando os dois. Para a listagem EXATA (por segmento, do cenário escolhido), chame **`listar_trechos_priorizados(rodovia, cenario)`** — NÃO use a visão geral abaixo para extensões por trecho.
+
+### Visão geral (cenário padrão, agregada por SNV — APROXIMADA)
+- Nível de prioridade **1–10** (escala invertida, MENOR = mais crítico): Crítica ≤ 3 · Alta ≤ 5 · Média ≤ 7 · Baixa > 7.
+- "Rank" = posição (1 = topo). Esta visão é **por SNV e do cenário padrão**; para extensão/priorização exatas POR SEGMENTO e por cenário, use a ferramenta acima.
+- Sempre cite o **mix completo de soluções** (não só a dominante) — se o SNV tem Reconstrução, mencione mesmo que minoria em km.
 {chr(10).join(paragon_trecho_blocks)}
 
 ## 5) Soluções e SREs DNIT (Matriz Revitaliza DNIT/RO)
@@ -4825,7 +5800,7 @@ Não confunda com Paragon. Cada metodologia tem o próprio cálculo de prioriza�
 {chr(10).join(proj_blocks) or "_Sem projeção disponível_"}
 
 ## 6b) Sentidos Paragon — CRESCENTE × DECRESCENTE (por rodovia)
-A matriz processada não tem faixa; cada rodovia foi rodada por sentido. Use quando o usuário perguntar de um sentido específico ou da diferença entre eles. Necessidade no horizonte de {_ECONOMIC_DEFAULT_HORIZON} anos.
+A matriz processada não tem faixa; cada rodovia foi rodada por sentido. Use quando o usuário perguntar de um sentido específico ou da diferença entre eles. Necessidade = total do programa (todos os anos).
 {chr(10).join(sentido_blocks) or "_Sem separação por sentido disponível_"}
 
 ## 6c) Condição estrutural — ICDS/ICDP/ICDE e Deflexão (média ponderada por extensão)
@@ -4834,14 +5809,15 @@ A matriz processada não tem faixa; cada rodovia foi rodada por sentido. Use qua
 
 ## 7) Regras de interpretação
 - **Diagnóstico padrão = Paragon**. Use DNIT só quando o usuário pedir explicitamente "matriz DNIT", "Revitaliza" ou citar nomes DNIT (CBUQ, FR5, Micro(0,8/1,5), Drenagem).
-- **Priorização invertida 0–10**: menor valor = MAIS crítico. NUNCA inverta o sentido — priorização 2 é pior que priorização 8.
-- **"Rank" ≠ "Priorização"**: rank é ordinal (1, 2, 3…); priorização é o valor 0–10. Não troque os dois.
+- **Cenários**: cada rodovia pode ter >1 cenário Paragon (seção 4). Antes de listar trechos/extensões/custos por trecho de uma rodovia com mais de um cenário, **PERGUNTE qual cenário** e ofereça comparar; depois use `listar_trechos_priorizados(rodovia, cenario)` para os números exatos.
+- **Priorização 1–10**: menor valor = MAIS crítico. NUNCA inverta o sentido — priorização 2 é pior que priorização 8.
+- **"Rank" ≠ "Priorização"**: rank é ordinal (1, 2, 3…); priorização é o valor 1–10. Não troque os dois.
 - **Mix de soluções**: ao listar um SNV, cite TODAS as soluções presentes (com km), nunca apenas a dominante.
   Se houver Reconstrução, ela vai SEMPRE primeiro na lista (severidade mais alta).
 - Custos são necessidades cadastradas no banco; cobertura anual depende do orçamento.
 - **Por sentido**: ao citar CRESCENTE/DECRESCENTE, use a seção "6b) Sentidos Paragon". As seções 1–4 trazem o cenário padrão de cada rodovia (em geral um dos sentidos); a 6b traz os dois lado a lado.
 - **Estrutura ≠ superfície**: ICDS/ICDP/ICDE (seção 6c) são índices ESTRUTURAIS (maior = melhor); o IAP tem régua de classe própria. Não troque os dois.
-- **Horizonte**: necessidades e cenário deste resumo usam {_ECONOMIC_DEFAULT_HORIZON} anos. SEMPRE informe o horizonte ao dar um número; para outro horizonte, use as ferramentas (simular/comparar), que recalculam.
+- **Necessidade = TODOS os anos do programa** (não um horizonte fixo). A "Necessidade total" (seções 1–3) já soma todos os anos do cenário padrão, e a seção 3 ("custo por ano") lista a programação ano a ano do programa completo. NUNCA diga "horizonte de 8 anos" para a necessidade. Para o número EXATO de um cenário específico, use `situacao_rodovia(rodovia, cenario)`.
 """
     report_data = {
         "network_df": df,
@@ -5939,6 +6915,7 @@ def _iagon_dynamic_suggestions() -> list[str]:
     return sugs
 
 
+# Assistente IAGON — página dedicada de chat (fora do escopo desta documentação).
 def _render_iagon_page() -> None:
     if not iagon.is_configured():
         st.info("IAGON indisponível: configure a chave **API_OPENAI_KEY** no arquivo .env.")
@@ -6004,6 +6981,24 @@ def _render_iagon_page() -> None:
             if name == "lembrar":
                 iagon.remember(args.get("fato", ""), args.get("categoria", "geral"))
                 return "Memória de longo prazo atualizada."
+            if name == "listar_trechos_priorizados":
+                road = (args.get("rodovia") or "").strip()
+                if not road:
+                    return "Informe a rodovia (ex.: 'BR-421')."
+                try:
+                    return _iagon_trechos_priorizados_text(
+                        road, int(args.get("cenario") or 1), int(args.get("top") or 25), int(args.get("horizonte") or 1)
+                    )
+                except Exception as e:
+                    return f"Não consegui listar os trechos: {e}"
+            if name == "situacao_rodovia":
+                road = (args.get("rodovia") or "").strip()
+                if not road:
+                    return "Informe a rodovia (ex.: 'BR-421')."
+                try:
+                    return _iagon_situacao_text(road, int(args.get("cenario") or 1))
+                except Exception as e:
+                    return f"Não consegui montar a situação: {e}"
             if name == "exportar_relatorio":
                 out = _iagon_export(report_data, args.get("escopo", "rede"), args.get("formato", "pdf"), args.get("titulo"))
                 if not out:
@@ -6209,11 +7204,17 @@ def _render_iagon_page() -> None:
             return "ok"
 
         history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.iagon_messages]
-        try:
-            full = st.write_stream(iagon.run_chat(context_text, history, on_tool))
-        except Exception as exc:  # erro de API/rede — mostra sem derrubar a tela
-            full = f"⚠️ Não consegui responder agora ({type(exc).__name__}). Tente novamente."
+        # Gate determinístico: rodovia com >1 cenário sem cenário escolhido → pergunta antes.
+        gate = _iagon_scenario_gate(prompt, history)
+        if gate:
+            full = gate
             st.markdown(full)
+        else:
+            try:
+                full = st.write_stream(iagon.run_chat(context_text, history, on_tool))
+            except Exception as exc:  # erro de API/rede — mostra sem derrubar a tela
+                full = f"⚠️ Não consegui responder agora ({type(exc).__name__}). Tente novamente."
+                st.markdown(full)
 
         for ai, art in enumerate(artifacts):
             if art[2] == "application/x-iagon-interactive-map":
@@ -6242,6 +7243,11 @@ def _render_iagon_page() -> None:
     st.rerun()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Fim do bloco IAGON. Helpers de geometria/sentido do mapa, comparativo de
+# cenários e o ROTEADOR main() (abaixo).
+# ═══════════════════════════════════════════════════════════════════════════
+
 def _offset_path(coords, meters):
     """Desloca uma polilinha perpendicularmente por `meters` (sinal = lado).
 
@@ -6267,6 +7273,8 @@ def _offset_path(coords, meters):
 
 
 def _sentido_label(nome: str) -> str:
+    """Extrai o sentido PURO (CRESCENTE/DECRESCENTE) do nome do cenário, para LÓGICA.
+    Ordem importa: 'decrescente' antes de 'crescente' (a 2ª é substring da 1ª)."""
     low = str(nome).lower()
     if "decrescente" in low:
         return "DECRESCENTE"
@@ -6276,50 +7284,35 @@ def _sentido_label(nome: str) -> str:
 
 
 def _sentido_faixa(nome: str) -> str:
-    """Rótulo de EXIBIÇÃO do sentido + faixa (pista simples ⇒ Faixa 1).
-    Ex.: 'CRESCENTE - Faixa 1'. Para nomes que não são sentido, devolve o próprio.
+    """Rótulo de EXIBIÇÃO do sentido como pista simples: DECRESCENTE ⇒ 'Pista simples - LE',
+    CRESCENTE ⇒ 'Pista simples - LD'. Para nomes que não são sentido, devolve o próprio.
     NÃO use em lógica/comparação — para isso use _sentido_label (mantém CRESCENTE/DECRESCENTE puros)."""
     s = _sentido_label(nome)
-    return f"{s} - Faixa 1" if s in ("CRESCENTE", "DECRESCENTE") else s
+    if s == "CRESCENTE":
+        return "Pista simples - LD"
+    if s == "DECRESCENTE":
+        return "Pista simples - LE"
+    return s
 
 
-def _paragon_sentido_keys(road: str):
-    """(cr_key, de_key, labels) se a rodovia tem análises Paragon CRESCENTE e
-    DECRESCENTE; senão None. Usado para mostrar mapa, distribuição e segmentação
-    por sentido."""
-    scenarios = get_available_scenarios(road, "Paragon")
-    labels = {s["key"]: s["cenario"] for s in scenarios}
-    cr = next((s["key"] for s in scenarios
-               if "crescente" in s["cenario"].lower()
-               and "decrescente" not in s["cenario"].lower()), None)
-    de = next((s["key"] for s in scenarios if "decrescente" in s["cenario"].lower()), None)
-    return (cr, de, labels) if (cr and de) else None
-
-
-def _two_sentido_map_segments(road: str):
-    """Se a rodovia tem análises Paragon CRESCENTE e DECRESCENTE, devolve os
-    segmentos das duas, levemente deslocados (uma camada por sentido) e marcados
-    com o sentido. Senão devolve None (mapa segue normal, com um cenário)."""
-    scenarios = get_available_scenarios(road, "Paragon")
-    labels = {s["key"]: s["cenario"] for s in scenarios}
-    cr = next((s["key"] for s in scenarios
-               if "crescente" in s["cenario"].lower()
-               and "decrescente" not in s["cenario"].lower()), None)
-    de = next((s["key"] for s in scenarios if "decrescente" in s["cenario"].lower()), None)
-    if not (cr and de):
+def _scenarios_map_segments(road: str, keys, by_key: dict | None = None):
+    """Segmentos dos CENÁRIOS SELECIONADOS no filtro do topo, em camadas deslocadas
+    (offset por pixel, zoom-aware no mapa). Reflete a seleção: 1 cenário → None (o mapa
+    usa a camada única); 2+ → concat com `offset_side` (lado simétrico) e `sentido` (rótulo)."""
+    keys = [k for k in (keys or []) if k]
+    if len(keys) < 2:
         return None
-    delta = 14.0  # metros de deslocamento por sentido
+    if by_key is None:
+        by_key = {s["key"]: s for s in get_available_scenarios(road, "Paragon")}
+    n = len(keys)
     parts = []
-    for i, k in enumerate((cr, de)):
+    for i, k in enumerate(keys):
         seg = get_overview_data(road, scenario_key=k).get("segments")
         if seg is None or seg.empty:
             continue
         seg = seg.copy()
-        offset_m = (i - 0.5) * (2 * delta)  # CRESCENTE -14 m · DECRESCENTE +14 m
-        seg["paths"] = seg["paths"].apply(
-            lambda paths: [_offset_path(p, offset_m) for p in paths]
-        )
-        seg["sentido"] = _sentido_faixa(labels.get(k, k))
+        seg["offset_side"] = i - (n - 1) / 2.0   # lado simétrico; offset em px no mapa
+        seg["sentido"] = _short_scenario_label(by_key.get(k))
         parts.append(seg)
     if len(parts) < 2:
         return None
@@ -6336,35 +7329,20 @@ _CMP_METRICS = [
 ]
 
 
-def _render_scenario_comparison(road: str) -> None:
-    """Comparativo de métricas entre cenários (ex.: CRESCENTE × DECRESCENTE).
-
-    Mostra % crítico, km crítico e custo lado a lado — útil enquanto não há faixa
-    na matriz (o sentido vira o eixo de diferenciação). O estado vem do retorno do
-    `multiselect` (sem escrever em `session_state`), evitando erros de inicialização.
+def _render_scenario_comparison(road: str, selected_keys: list[str] | None = None) -> None:
+    """Comparativo de métricas entre os cenários SELECIONADOS no filtro único do topo
+    (ex.: CRESCENTE × DECRESCENTE, ou SH × Fixa). Aparece quando há 2+ cenários
+    marcados — não há um 2º campo de cenário; o sentido/segmentação vira o eixo.
     """
     scenarios = get_available_scenarios(road, "Paragon")
     if len(scenarios) < 2:
         return
-    labels = {s["key"]: s["cenario"] for s in scenarios}
-    keys = [s["key"] for s in scenarios]
-    cr = next((k for k in keys if "crescente" in labels[k].lower()
-               and "decrescente" not in labels[k].lower()), None)
-    de = next((k for k in keys if "decrescente" in labels[k].lower()), None)
-    default = [k for k in (cr, de) if k] or keys[:2]
+    by_key = {s["key"]: s for s in scenarios}
+    selected = [k for k in (selected_keys or []) if k in by_key]
+    if len(selected) < 2:
+        return  # com 0/1 cenário não há o que comparar (sem campo extra)
 
-    with st.expander("⚖️  Comparar cenários (sentidos / metodologias)", expanded=bool(cr and de)):
-        selected = st.multiselect(
-            "Cenários para comparar",
-            keys,
-            default=default,
-            format_func=lambda k: labels.get(k, k),
-            key=f"cmp_scenarios_{road}",
-        )
-        if len(selected) < 2:
-            st.caption("Selecione ao menos 2 cenários para comparar.")
-            return
-
+    with st.expander("⚖️  Comparar cenários selecionados", expanded=True):
         rows = []
         with st.spinner("Calculando comparativo…"):
             for k in selected:
@@ -6373,7 +7351,7 @@ def _render_scenario_comparison(road: str) -> None:
                 metrics["_custo"] = _necessidade_total(
                     sol.get("table"), sol.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON
                 )
-                metrics["_label"] = labels.get(k, k)
+                metrics["_label"] = _short_scenario_label(by_key[k])
                 rows.append(metrics)
 
         ths = "".join(f"<th>{html.escape(r['_label'])}</th>" for r in rows)
@@ -6407,28 +7385,42 @@ def _render_scenario_comparison(road: str) -> None:
 
 
 def main() -> None:
+    """Ponto de entrada e ROTEADOR da aplicação.
+
+    Lê `?page=` da URL e monta a tela correspondente (overview/visaogeral,
+    solucoes, cenario, projecao, risco=IAGON). Dentro de cada página, o "Tipo de
+    Matriz" escolhido na top bar decide se chama a versão Paragon (`_render_*`) ou
+    DNIT (`_render_dnit_*`). Cada tela publica ao final o contexto do IAGON da tela.
+    """
     # Invalida o cache automaticamente se os cenários mudaram no banco (SIGMA).
     # Mesma quantidade e mesma data => mantém cache; diferente => recarrega tudo.
     ensure_fresh_data()
     inject_css()
+    # Roteamento por query param. `page` fora da lista branca cai em "overview".
     page = st.query_params.get("page", "overview")
     if page not in {"visaogeral", "overview", "solucoes", "projecao", "cenario", "risco"}:
         page = "overview"
     render_sidebar(active_key=page)
 
     default_road = get_available_roads()[0]
+
+    # ─── Página SOLUÇÕES (o que fazer) ───
     if page == "solucoes":
         diagnosis, selected_road, scenario_key = render_top_bar(
             default_road,
             page_title="Soluções",
             show_diagnosis=True,
             keep_title=True,
+            multi_scenario=True,
         )
         if diagnosis == "Diagnóstico DNIT":
             _render_dnit_solutions_page(selected_road, scenario_key)
             return
         st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
-        _sol_keys, _sol_labels = _solutions_sentido_keys(selected_road, scenario_key)
+        # Filtro ÚNICO de cenário (campo do topo) — sem 2º multiselect de sentidos.
+        _sol_labels = {s["key"]: s["cenario"] for s in get_available_scenarios(selected_road, "Paragon")}
+        _sol_sel = st.session_state.get("_topbar_selected_scenarios")
+        _sol_keys = [k for k in (_sol_sel or []) if k in _sol_labels] or ([scenario_key] if scenario_key else [])
         _multi = len(_sol_keys) >= 2
         if _multi:
             _base_table, _base_segments = _combined_solution_data(
@@ -6451,7 +7443,7 @@ def main() -> None:
         render_overview_map(intervention_segments, filtered_extension, color_by="solucao")
         if _multi:
             st.caption(
-                "Mapa com os sentidos em camadas levemente deslocadas (~14 m/lado); "
+                "Mapa com os sentidos em camadas deslocadas (separação constante por zoom); "
                 "clique numa linha para ver o sentido."
             )
         intervention_table = (
@@ -6466,8 +7458,32 @@ def main() -> None:
             _render_solution_distribution(intervention_table)
         _, paginated_table = _render_solution_table_controls(intervention_table)
         _render_solutions_table(paginated_table)
+
+        # IAGON desta tela (Soluções).
+        _sol_by = {s["key"]: s for s in get_available_scenarios(selected_road, "Paragon")}
+        _sol_lbls = " + ".join(_short_scenario_label(_sol_by.get(k)) for k in _sol_keys) or "—"
+        if intervention_table is not None and not intervention_table.empty and "Solução recomendada" in intervention_table.columns:
+            _isd = intervention_table.groupby("Solução recomendada")["Extensão"].sum().sort_values(ascending=False)
+            _sdados = (
+                "Intervenções recomendadas (km por solução, já com os filtros desta tela):\n"
+                + "\n".join(f"- {str(n).replace(' + ', ' / ')}: {km:.1f} km" for n, km in _isd.items() if str(n).strip())
+                + f"\nExtensão total com intervenção exibida: {float(intervention_table['Extensão'].sum()):.1f} km."
+            )
+        else:
+            _sdados = "Nenhuma intervenção no filtro atual desta tela."
+        _sol_first = _sol_keys[0] if _sol_keys else scenario_key
+        _render_screen_iagon(
+            "solucoes", f"Soluções · {selected_road}",
+            f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_sol_lbls)}",
+            lambda: _iagon_full_road_context(
+                selected_road, _sol_first, "Soluções (intervenções recomendadas)",
+                {"Rodovia": selected_road, "Cenário": _sol_lbls},
+                extra="O que está EXIBIDO nesta tela agora (com os filtros aplicados):\n" + _sdados),
+            sugestoes=["Análise das soluções", "Onde concentra obra pesada?", "O que priorizar?"],
+        )
         return
 
+    # ─── Página CENÁRIO ECONÔMICO (quanto custa) ─── Paragon / DNIT / Comparativo
     if page == "cenario":
         diagnosis, selected_road, scenario_key = render_top_bar(
             default_road,
@@ -6516,6 +7532,7 @@ def main() -> None:
             )
         return
 
+    # ─── Página PROJEÇÃO (evolução) ───
     if page == "projecao":
         diagnosis, selected_road, scenario_key = render_top_bar(
             default_road,
@@ -6529,6 +7546,7 @@ def main() -> None:
         _render_projection_page(selected_road, scenario_key)
         return
 
+    # ─── Página VISÃO GERAL (rede) — panorama de todas as rodovias ───
     if page == "visaogeral":
         diagnosis, _, _ = render_top_bar(
             default_road,
@@ -6538,19 +7556,45 @@ def main() -> None:
             show_filters=False,
         )
         _render_network_overview(diagnosis)
+
+        # IAGON desta tela (Visão geral da rede).
+        _is_dnit = diagnosis == "Diagnóstico DNIT"
+        _net = _build_network_overview(is_dnit=_is_dnit)
+        if _net:
+            _ndf = _net["roads_df"]
+            _ndados = (
+                f"Rede ({'DNIT' if _is_dnit else 'Paragon'}): {len(_ndf)} rodovias · {_net['total_km']:.0f} km · "
+                f"necessidade total {_format_money(_net['net_custo'])} · {_net['prio_total']} trechos prioritários (Alta/Crítica). "
+                f"Médias da rede: IAP {_net['net_iap']:.2f} (meta 2,5) · IRI {_net['net_iri']:.2f} · IGG {_net['net_igg']:.0f}.\n"
+                + "\n".join(
+                    f"- {r['Rodovia']}: IAP {r['IAP']:.2f} · {r['iap_bad_pct']:.0f}% crítico · necessidade {_format_money(float(r['custo']))}"
+                    for _, r in _ndf.sort_values("IAP").iterrows())
+            )
+        else:
+            _ndados = "Sem dados de rede."
+        _render_screen_iagon(
+            "visaogeral", "Visão geral da rede",
+            f"<b>Escopo:</b> rede inteira &nbsp;·&nbsp; <b>Matriz:</b> {'DNIT' if _is_dnit else 'Paragon'}",
+            _screen_ctx("Visão geral (panorama executivo da rede)",
+                        {"Matriz": "DNIT" if _is_dnit else "Paragon"}, _ndados),
+            sugestoes=["Análise da rede", "Qual a pior rodovia?", "Onde investir primeiro?"],
+        )
         return
 
+    # ─── Página IAGON (chave interna "risco") — assistente de IA ───
     if page == "risco":
         render_top_bar(default_road, page_title="IAGON", show_diagnosis=False, show_filters=False)
         _render_iagon_page()
         return
 
+    # Salvaguarda: qualquer página não tratada acima (que não seja overview) é um stub.
     if page != "overview":
         _, _, _ = render_top_bar(default_road, page_title="DNIT · Pavimentos", show_diagnosis=False)
         st.info("Este módulo será montado na próxima etapa.")
         return
 
-    diagnosis, selected_road, scenario_key = render_top_bar(default_road)
+    # ─── Página OVERVIEW (default) — DIAGNÓSTICO da rodovia selecionada ───
+    diagnosis, selected_road, scenario_key = render_top_bar(default_road, multi_scenario=True)
 
     if diagnosis == "Diagnóstico DNIT":
         _render_dnit_overview(selected_road, scenario_key)
@@ -6561,49 +7605,57 @@ def main() -> None:
 
     render_metric_cards(data["cards"])
     st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
-    _render_scenario_comparison(selected_road)
+    _render_scenario_comparison(
+        selected_road,
+        st.session_state.get("_topbar_selected_scenarios") or ([scenario_key] if scenario_key else []),
+    )
     st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
-    _two_sentido = _two_sentido_map_segments(selected_road)
-    if _two_sentido is not None and not _two_sentido.empty:
-        render_overview_map(_two_sentido, metrics["extension_km"])
-        st.caption(
-            "Mapa com os dois sentidos (CRESCENTE e DECRESCENTE) em camadas levemente "
-            "deslocadas (~14 m/lado), cada uma colorida pela sua condição. Clique numa "
-            "linha para ver o sentido."
-        )
-    else:
-        render_overview_map(data["segments"], metrics["extension_km"])
-    _sentidos = _paragon_sentido_keys(selected_road)
-    if _sentidos:
-        _cr, _de, _slabels = _sentidos
-        # Distribuição IAP por sentido (lado a lado).
-        _dist_cols = st.columns(2)
-        for _col, _k in zip(_dist_cols, (_cr, _de)):
+
+    # Mapa, distribuição e segmentação seguem os CENÁRIOS SELECIONADOS (filtro do topo):
+    # 1 cenário → camada única; 2+ → uma camada por cenário (deslocada por pixel no zoom).
+    _sel = st.session_state.get("_topbar_selected_scenarios")
+    _sel = [k for k in (_sel or []) if k] or ([scenario_key] if scenario_key else [])
+    _by_key = {s["key"]: s for s in get_available_scenarios(selected_road, "Paragon")}
+
+    if len(_sel) >= 2:
+        _map_segs = _scenarios_map_segments(selected_road, _sel, _by_key)
+        if _map_segs is not None and not _map_segs.empty:
+            render_overview_map(_map_segs, metrics["extension_km"])
+            st.caption(
+                "Mapa com os cenários selecionados em camadas deslocadas (separação "
+                "constante por zoom). Clique numa linha para ver o cenário."
+            )
+        else:
+            render_overview_map(data["segments"], metrics["extension_km"])
+        # Distribuição IAP por cenário selecionado (lado a lado).
+        _dist_cols = st.columns(len(_sel))
+        for _col, _k in zip(_dist_cols, _sel):
             with _col:
                 st.markdown(
                     f"<div style='font-weight:700;color:#cbd5df;margin:4px 0 2px'>"
-                    f"{_sentido_faixa(_slabels[_k])}</div>",
+                    f"{html.escape(_short_scenario_label(_by_key.get(_k)))}</div>",
                     unsafe_allow_html=True,
                 )
                 _d = get_overview_data(selected_road, scenario_key=_k)
                 render_iap_distribution(_d["distribution"], _d["metrics"]["iap_average"])
         st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
-        # Segmentação por sentido (uma faixa por sentido).
-        for _k in (_cr, _de):
-            _d = get_overview_data(selected_road, scenario_key=_k)
-            st.markdown(
-                f"<div style='font-weight:700;color:#cbd5df;margin:8px 0 4px'>"
-                f"Segmentação · {_sentido_faixa(_slabels[_k])}</div>",
-                unsafe_allow_html=True,
-            )
-            _filt, _kmr = render_iap_linear_zoomable(
-                _d["linear_diagram"], key=f"paragon_linear_{_k}"
-            )
-            with st.expander(
-                f"Detalhes técnicos (ICDS, ICDP, ICDE) · {_sentido_faixa(_slabels[_k])}"
-            ):
-                render_condition_linear(_filt, km_range=_kmr)
+        # Segmentação: UM slider de km, barras dos cenários EMPILHADAS e UMA legenda
+        # combinada (estilo v2). Detalhes técnicos num único expander, por cenário.
+        _sentido_dfs = [
+            (_short_scenario_label(_by_key.get(_k)),
+             get_overview_data(selected_road, scenario_key=_k)["linear_diagram"])
+            for _k in _sel
+        ]
+        _kmr = render_iap_linear_multi(_sentido_dfs, key="paragon_linear_multi")
+        with st.expander("Detalhes técnicos (ICDS, ICDP, ICDE)"):
+            for _lbl, _ldf in _sentido_dfs:
+                if _ldf is None or _ldf.empty:
+                    continue
+                st.markdown(f"**{_lbl}**")
+                _f = _ldf[(_ldf["km_final"] >= _kmr[0]) & (_ldf["km_inicial"] <= _kmr[1])] if _kmr else _ldf
+                render_condition_linear(_f, km_range=_kmr)
     else:
+        render_overview_map(data["segments"], metrics["extension_km"])
         render_iap_distribution(data["distribution"], metrics["iap_average"])
         st.markdown("<div style='height: 32px'></div>", unsafe_allow_html=True)
         filtered_diagram, km_range = render_iap_linear_zoomable(
@@ -6611,6 +7663,17 @@ def main() -> None:
         )
         with st.expander("Mostrar detalhes técnicos (ICDS, ICDP, ICDE)"):
             render_condition_linear(filtered_diagram, km_range=km_range)
+
+    # IAGON desta tela (Diagnóstico da rodovia selecionada).
+    _diag_lbl = _short_scenario_label(_by_key.get(scenario_key)) if scenario_key else "—"
+    _render_screen_iagon(
+        "diagnostico", f"Diagnóstico · {selected_road}",
+        f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Matriz:</b> Paragon &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_diag_lbl)}",
+        lambda: _iagon_full_road_context(
+            selected_road, scenario_key, "Diagnóstico (condição da rodovia)",
+            {"Rodovia": selected_road, "Matriz": "Paragon", "Cenário": _diag_lbl}),
+        sugestoes=["Análise completa", "Onde está pior?", "O que priorizar?"],
+    )
 
 
 if __name__ == "__main__":

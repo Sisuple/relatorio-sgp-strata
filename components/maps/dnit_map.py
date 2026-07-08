@@ -1,3 +1,13 @@
+"""Mapa DNIT: rede colorida pela zona de IRI / intervenção da matriz CBUQ.
+
+Variante do mapa Leaflet voltada ao pipeline DNIT (matriz cadastrada). Cada
+segmento é desenhado com a cor que já vem pronta na coluna 'matriz_color' e o
+tooltip traz IRI/IGG. A legenda é montada a partir das zonas presentes: se houver
+agrupamento por 'solucao_grupo', a cor de cada grupo é a da sua categoria de matriz
+DOMINANTE, ordenada por severidade da faixa de IRI (pior primeiro). Reaproveita o
+drawer de Street View (components.maps.streetview). Diferente de overview_map, aqui
+as cores NÃO vêm de um dicionário hardcoded — chegam prontas nos dados/zona_colors.
+"""
 from __future__ import annotations
 
 import json
@@ -10,7 +20,15 @@ from components.maps.streetview import SV_CSS, SV_MODAL_HTML, sv_init_js, road_f
 
 
 def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: list | None = None) -> None:
-    """Mapa DNIT colorido pela intervenção da matriz (faixas de cor da matriz CBUQ)."""
+    """Mapa DNIT colorido pela intervenção da matriz (faixas de cor da matriz CBUQ).
+
+    Parâmetros:
+    - segments_df: segmentos com geometria ('paths') e os campos da matriz DNIT
+      (iri, igg, matriz_categoria, matriz_color; opcionalmente solucao_grupo).
+    - zona_colors: mapa categoria->cor hex para a legenda (fallback #fff200).
+    - zona_order: ordem das zonas do pior IRI ao melhor, usada para ordenar a legenda.
+    Sai cedo com st.info se faltar dados ou geometria real.
+    """
     if segments_df is None or segments_df.empty:
         st.info("Sem segmentos de IRI/IGG para exibir no mapa.")
         return
@@ -26,7 +44,9 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
     df = segments_df.copy()
 
     def _row_detail(r):
+        """Monta o dict de detalhe (título + linhas chave/valor) do drawer para um segmento."""
         ext = max(float(r.get("km_final") or 0) - float(r.get("km_inicial") or 0), 0.0)
+        # Solução exibida: usa 'solucao'; se vazia, cai para 'solucao_grupo'.
         solucao = clean(r.get("solucao"), default=clean(r.get("solucao_grupo")))
         return {
             "title": "Trecho " + clean(r.get("sre")),
@@ -39,29 +59,36 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
         }
 
     df["detail"] = df.apply(_row_detail, axis=1)
+    # Serializa só as colunas necessárias + detalhe; default=str tolera tipos não-JSON.
     segments_json = json.dumps(df[cols + ["detail"]].to_dict("records"), ensure_ascii=False, default=str)
 
+    # Duas formas de montar a legenda:
     if "solucao_grupo" in segments_df.columns:
-        # Severidade por faixa IRI (pior → melhor) para ordenar a legenda.
+        # (A) Agrupando por solucao_grupo. Índice de severidade por faixa IRI
+        # (posição em zona_order): quanto menor o índice, pior a faixa.
         zona_sev = {z: i for i, z in enumerate(zona_order or [])}
         grouped = segments_df.dropna(subset=["solucao_grupo"]).groupby("solucao_grupo")
         legend_pairs = []
         for grupo, sub in grouped:
+            # Categoria dominante do grupo = moda de matriz_categoria (fallback: 1ª ocorrência).
             dominante = sub["matriz_categoria"].mode().iloc[0] if not sub["matriz_categoria"].mode().empty else sub["matriz_categoria"].iloc[0]
             color = (zona_colors or {}).get(dominante, "#fff200")
             legend_pairs.append((grupo, color, zona_sev.get(dominante, len(zona_sev))))
+        # Ordena por severidade decrescente (pior primeiro) e, empatando, pelo nome do grupo.
         legend_pairs.sort(key=lambda t: (-t[2], t[0]))
         legend_items = "".join(
             f'<div class="legend-item"><span class="legend-dot" style="background:{color}"></span>{grupo}</div>'
             for grupo, color, _ in legend_pairs
         )
     else:
+        # (B) Sem agrupamento: lista as categorias de matriz presentes, na ordem de zona_order.
         presentes = [z for z in (zona_order or []) if z in set(segments_df["matriz_categoria"])]
         legend_items = "".join(
             f'<div class="legend-item"><span class="legend-dot" style="background:{(zona_colors or {}).get(z, "#fff200")}"></span>{z}</div>'
             for z in presentes
         )
 
+    # Template HTML/JS do iframe do mapa; placeholders $... preenchidos no .substitute() abaixo.
     html_template = Template(
         """
         <!doctype html>

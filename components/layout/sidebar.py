@@ -1,3 +1,11 @@
+"""Menu lateral (sidebar) do relatório.
+
+Monta a barra lateral com a marca (título/subtítulo de core.constants) e a lista
+de navegação a partir de MENU_ITEMS. Cada item vira um link `?page=<key>` que
+recarrega a página no mesmo alvo (navegação por query param, sem JS). A marcação
+é injetada via st.sidebar.markdown; o visual fica no CSS global (.sidebar-shell,
+.side-item, .side-item.active, etc.).
+"""
 from __future__ import annotations
 
 import html
@@ -7,6 +15,8 @@ import streamlit as st
 from core.constants import MENU_ITEMS, PAGE_SUBTITLE, PAGE_TITLE
 
 
+# Ícones do menu como fragmentos de <path> SVG, indexados pela chave "icon" de
+# cada MENU_ITEMS. Só o traçado interno — o <svg> em volta é montado em _menu_icon.
 _ICON_SVGS = {
     "grid": "<path d='M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z'/>",
     "activity": "<path d='M3 12h4l3-7 4 14 3-7h4'/>",
@@ -19,6 +29,11 @@ _ICON_SVGS = {
 
 
 def _menu_icon(icon: str) -> str:
+    """Envolve o <path> do ícone `icon` num <svg> pronto para o menu.
+
+    Busca o traçado em _ICON_SVGS (caindo no ícone "grid" se a chave não existir)
+    e devolve o markup <svg> completo, estilizado por CSS (stroke=currentColor).
+    """
     path = _ICON_SVGS.get(icon, _ICON_SVGS["grid"])
     return (
         '<svg class="menu-svg" viewBox="0 0 24 24" fill="none" '
@@ -28,8 +43,16 @@ def _menu_icon(icon: str) -> str:
 
 
 def render_sidebar(active_key: str = "overview") -> None:
+    """Renderiza a sidebar inteira (marca + menu de navegação).
+
+    `active_key` é a chave (MENU_ITEMS[i]["key"]) da página atual: o item
+    correspondente recebe a classe .active para ficar destacado. Cada item é um
+    link `?page=<key>` com target=_self (recarrega na mesma aba). Rótulos e
+    descrições são escapados antes de entrarem no HTML.
+    """
     items_html = []
     for item in MENU_ITEMS:
+        # Destaca o item cuja key bate com a página ativa.
         active_class = " active" if item["key"] == active_key else ""
         items_html.append(
             f'<a class="side-item{active_class}" href="?page={html.escape(item["key"])}" target="_self">'

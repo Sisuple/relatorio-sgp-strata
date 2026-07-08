@@ -1,3 +1,33 @@
+"""Camada de acesso a dados (data access) do Relatório SGP.
+
+Este módulo concentra TODO o SQL do relatório e a transformação dos resultados
+em DataFrames / dicionários prontos para consumo. As páginas (app.py e os
+componentes em components/) nunca escrevem SQL: elas chamam as funções públicas
+`get_*` daqui e recebem estruturas já mastigadas. Isso mantém as queries em um só
+lugar e permite cachear de forma agressiva (Redis via @cached e lru_cache em
+processo).
+
+Roteamento por tipo de matriz (ver MEMORY "Matriz vs pipeline de dados"):
+  - Paragon            -> tabela analise_gerencial_intervencoes_iap  (pipeline IAP,
+                          conceito/solução corretiva, projeção contínua de IAP);
+  - "Matriz Cadastrada"-> tabela analise_gerencial_intervencoes_dnit (pipeline DNIT,
+                          Matriz Revitaliza DNIT/RO, eventos discretos de obra).
+As funções `get_dnit_*` atendem o pipeline DNIT; as demais `get_*` atendem o
+Paragon. Quando uma rodovia não tem análise Cadastrada, algumas telas DNIT caem
+no Paragon como fallback (documentado em cada função).
+
+Regras de negócio hardcoded (nomes, cores, limiares, priorização) estão
+catalogadas no README.md Parte II (§11 Terminologia/Cores, §12 Limiares) e no
+doc docs/06 (requisitos-regras-negocio-v2). A v2 propõe migrar isso para tabelas
+rel_* no banco.
+
+ATENÇÃO — pontos frágeis já conhecidos (marcados ao longo do arquivo):
+  - a classificação de IAP existe DUPLICADA: em Python (`_classify_iap`) e em SQL
+    (CASE WHEN em `_get_iap_extraction_from_database`) — manter os dois em sincronia;
+  - `get_overview_data` ainda carrega valores fake/fallback de demonstração
+    (plan_cost_mi=51.8, last_update_minutes=12, distribuição fallback) — remover na v2.
+"""
+
 from __future__ import annotations
 
 import re
@@ -14,10 +44,19 @@ from services.cache import cached, cache_flush_all, get_meta, set_meta
 from src.database import MySQLConnection
 
 
-_ROAD_CODE_RE = re.compile(r"(\d+)")
-_ROAD_UF_RE = re.compile(r"BR[-\s]*(?P<code>\d+)\s*/\s*(?P<uf>[A-Z]{2})", re.IGNORECASE)
-_LINESTRING_RE = re.compile(r"LINESTRING\s*\((?P<coords>.*)\)", re.IGNORECASE)
+# ============================================================================
+# CONSTANTES E MAPEAMENTOS (regras hardcoded — ver README Parte II §11 e §12)
+# ============================================================================
+
+# Regex de parsing de rótulos de rodovia e da geometria WKT.
+_ROAD_CODE_RE = re.compile(r"(\d+)")  # 1º grupo de dígitos = código da BR (ex.: "BR-364" -> 364)
+_ROAD_UF_RE = re.compile(r"BR[-\s]*(?P<code>\d+)\s*/\s*(?P<uf>[A-Z]{2})", re.IGNORECASE)  # extrai UF de "BR-364/RO"
+_LINESTRING_RE = re.compile(r"LINESTRING\s*\((?P<coords>.*)\)", re.IGNORECASE)  # captura os pares de coords do WKT
+# Salto máximo (em graus) tolerado entre pontos de uma LINESTRING; acima disso o
+# traçado é considerado quebrado/deslocado e é descartado (~3,3 km).
 _MAX_MAP_LINE_DEGREES = 0.03
+# Ordem canônica das classes de conceito IAP (melhor -> pior). Usada para ordenar
+# as barras de composição/distribuição. README §11.4 / §12.1.
 _IAP_CLASS_ORDER = [
     "Excelente",
     "Bom",
@@ -27,6 +66,8 @@ _IAP_CLASS_ORDER = [
     "Mau",
     "Péssimo",
 ]
+# Paleta oficial das classes IAP (README §11.4). A MESMA paleta é repetida em
+# overview_map.py e linear_diagram.py — mantê-las em sincronia (candidata a rel_* na v2).
 _IAP_CLASS_COLORS = {
     "Excelente": "#00c2e8",
     "Bom": "#00a651",
@@ -36,6 +77,8 @@ _IAP_CLASS_COLORS = {
     "Mau": "#f2a51a",
     "Péssimo": "#d71920",
 }
+# Ordem canônica dos códigos de solução corretiva (menos -> mais severa). Usada
+# para ordenar as composições por intervenção. README §11.1.
 _IAP_INTERVENTION_ORDER = [
     "OK",
     "RL",
@@ -57,6 +100,9 @@ _IAP_INTERVENTION_COLORS = {
     "REC": "#d71920",
     "Sem intervenção": "#82929d",
 }
+# Código de solução -> conceito IAP correspondente (Quadro 37 DNIT). README §11.3.
+# É o que permite colorir o mapa PELA solução em vez do IAP numérico (ver
+# _classify_iap_for_map e README §11.5).
 _IAP_INTERVENTION_TO_CLASS = {
     "OK": "Excelente",
     "RL": "Bom",
@@ -66,6 +112,7 @@ _IAP_INTERVENTION_TO_CLASS = {
     "RPS+REF": "Mau",
     "REC": "Péssimo",
 }
+# Classes de condição (ICDS/ICDP/ICDE, escala 0-5) — 5 níveis, sem "Regular" duplo. README §12.2.
 _CONDITION_CLASS_ORDER = ["Excelente", "Bom", "Regular", "Mau", "Péssimo"]
 _CONDITION_CLASS_COLORS = {
     "Excelente": "#00c2e8",
@@ -74,10 +121,14 @@ _CONDITION_CLASS_COLORS = {
     "Mau": "#f2a51a",
     "Péssimo": "#d71920",
 }
+# Paleta IAP usada no diagrama linear (herda _IAP_CLASS_COLORS; "Excelente" fixado
+# explicitamente para não depender da ordem de merge).
 _LINEAR_IAP_CLASS_COLORS = {
     **_IAP_CLASS_COLORS,
     "Excelente": "#00c2e8",
 }
+# Código de solução corretiva -> nome legível exibido ao usuário. README §11.1.
+# Fonte primária dos rótulos quando não há JSON de soluções gravado no banco.
 _SOLUTION_LABELS = {
     "OK": "Sem intervenção",
     "RL": "Reparo localizado",
@@ -89,12 +140,20 @@ _SOLUTION_LABELS = {
 }
 
 
+# ============================================================================
+# HELPERS DE FORMATAÇÃO / PARSING (rótulos de rodovia, floats, geometria WKT)
+# ============================================================================
+
+
 def _road_sort_key(label: str) -> tuple[int, str]:
+    """Chave de ordenação de rótulos de rodovia: ordena pelo número da BR (ex.: 364)."""
     match = _ROAD_CODE_RE.search(label)
     return (int(match.group(1)) if match else 9999, label)
 
 
 def _normalize_road_code(value: str | int | None) -> str | None:
+    """Normaliza qualquer forma de rodovia ("BR-364/RO", 364, "364") para o código
+    de 3 dígitos com zeros à esquerda ("364"). Retorna None se vazio."""
     if value is None:
         return None
 
@@ -110,6 +169,8 @@ def _normalize_road_code(value: str | int | None) -> str | None:
 
 
 def _format_road_label(code: str, name: str | None = None) -> str:
+    """Monta o rótulo de exibição "BR-<code>/<UF>" (ou "BR-<code>" se a UF não for
+    encontrada no nome). A UF é extraída do texto de `name` via _ROAD_UF_RE."""
     uf = None
     if name:
         match = _ROAD_UF_RE.search(str(name).upper())
@@ -120,18 +181,32 @@ def _format_road_label(code: str, name: str | None = None) -> str:
 
 
 def _extract_uf_from_road_label(label: str) -> str:
+    """Extrai a sigla da UF do rótulo "BR-364/RO" -> "RO"; retorna "--" se não houver."""
     if "/" not in label:
         return "--"
     return label.rsplit("/", 1)[-1].split()[0].strip() or "--"
 
 
 def _to_float(value: Any, fallback: float = 0.0) -> float:
+    """Converte valor do banco em float, tratando None com `fallback` (default 0.0)."""
     if value is None:
         return fallback
     return float(value)
 
 
+# ============================================================================
+# HELPERS DE CLASSIFICAÇÃO (IAP, condição ICDS/ICDP/ICDE) — README §12
+# ============================================================================
+
+
 def _classify_iap(value: Any) -> str:
+    """IAP numérico (campo `iapa`, gravado ×100) -> classe de conceito. README §12.1.
+
+    ATENÇÃO: estes MESMOS limiares estão DUPLICADOS em SQL, no CASE WHEN de
+    `_get_iap_extraction_from_database` — qualquer ajuste precisa ser feito nos dois
+    lugares. Nota conhecida: esta função numérica nunca retorna "+ Regular"
+    (existe na legenda mas não tem faixa própria aqui) — ver README §12.1.
+    """
     iap = _to_float(value) / 100
     if iap >= 4.01:
         return "Excelente"
@@ -147,6 +222,12 @@ def _classify_iap(value: Any) -> str:
 
 
 def _classify_iap_for_map(value: Any, intervention: str | None) -> str:
+    """Classe usada para COLORIR o mapa/diagrama. README §11.5.
+
+    Se o trecho tem solução corretiva, a cor vem do CONCEITO da solução
+    (_IAP_INTERVENTION_TO_CLASS), não do IAP numérico — é a regra real (um REC com
+    iapa 2.25 vira "Péssimo", não "- Regular"). Sem solução, cai no _classify_iap.
+    """
     if intervention in _IAP_INTERVENTION_TO_CLASS:
         return _IAP_INTERVENTION_TO_CLASS[intervention]
 
@@ -154,6 +235,7 @@ def _classify_iap_for_map(value: Any, intervention: str | None) -> str:
 
 
 def _classify_condition(value: Any) -> str:
+    """Índice de condição (ICDS/ICDP/ICDE, escala 0-5) -> classe. README §12.2."""
     index = _to_float(value)
     if index >= 4.5:
         return "Excelente"
@@ -166,16 +248,28 @@ def _classify_condition(value: Any) -> str:
     return "Péssimo"
 
 
+# ============================================================================
+# HELPERS DE SOLUÇÃO (nome legível e custo a partir do JSON `solucoes`)
+# ============================================================================
+
+
 def _normalize_solution_label(name: str) -> str:
-    """Terminologia do cliente: 'Microrrevestimento' -> 'Recarga Superficial'.
+    """Terminologia do cliente: 'Microrrevestimento' -> 'Recarga Superficial'. README §11.2.
 
     Cobre o nome vindo do código (_SOLUTION_LABELS) e o `tipoNome` gravado no banco,
     com uma ou duas letras 'r' (microrevestimento / microrrevestimento).
+    Obs.: aplicado SÓ no pipeline Paragon; no DNIT o nome permanece "Microrrevestimento".
     """
     return re.sub(r"[Mm]icrorr?evestimento", "Recarga Superficial", name)
 
 
 def _solution_name(solution_code: str | None, solutions_json: Any = None) -> str:
+    """Nome legível da solução de um segmento (Paragon).
+
+    Prefere os `tipoNome` do JSON `solucoes` (concatenados com " + ", sem repetir);
+    se não houver JSON, usa o rótulo de _SOLUTION_LABELS a partir do código corretivo.
+    Sempre passa pela renomeação de terminologia (_normalize_solution_label).
+    """
     if solutions_json:
         try:
             solutions = json.loads(solutions_json) if isinstance(solutions_json, str) else solutions_json
@@ -195,6 +289,7 @@ def _solution_name(solution_code: str | None, solutions_json: Any = None) -> str
 
 
 def _solution_cost(solutions_json: Any = None) -> float:
+    """Soma o campo `orcamento` de todos os itens do JSON `solucoes` (custo do segmento)."""
     if not solutions_json:
         return 0.0
 
@@ -210,7 +305,17 @@ def _solution_cost(solutions_json: Any = None) -> float:
     return total
 
 
+# ============================================================================
+# HELPERS DE GEOMETRIA (WKT -> polylines para o mapa; merge/simplificação)
+# ============================================================================
+
+
 def _parse_linestring_latlon(wkt: str | None) -> list[list[float]]:
+    """Converte um WKT "LINESTRING(lat lon, ...)" numa lista de pares [lat, lon].
+
+    Os pontos vêm de principal_levantamentos via ST_AsText(geometria). Retorna []
+    para WKT vazio/inválido. (Assume ordem lat lon no texto do banco.)
+    """
     if not wkt:
         return []
 
@@ -231,6 +336,11 @@ def _parse_linestring_latlon(wkt: str | None) -> list[list[float]]:
 
 
 def _has_large_coordinate_jump(coords: list[list[float]]) -> bool:
+    """True se algum trecho da polyline dá um salto maior que _MAX_MAP_LINE_DEGREES.
+
+    Usado para descartar geometrias quebradas/deslocadas (que ligariam pontos
+    distantes com uma reta espúria atravessando o mapa).
+    """
     for start, end in zip(coords, coords[1:]):
         lat_delta = abs(end[0] - start[0])
         lon_delta = abs(end[1] - start[1])
@@ -322,6 +432,12 @@ def _simplify_path(coords: list[list[float]], tolerance: float = 0.00012) -> lis
     return [coords[i] for i in range(n) if keep[i]]
 
 
+# ============================================================================
+# PIPELINE PARAGON — rodovias, cenários e extração de IAP
+# (tabela analise_gerencial_intervencoes_iap)
+# ============================================================================
+
+
 def get_available_roads() -> list[str]:
     """Retorna rodovias cadastradas no banco, com fallback local."""
     roads = _get_available_roads_from_database()
@@ -329,6 +445,11 @@ def get_available_roads() -> list[str]:
 
 
 def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") -> list[dict[str, Any]]:
+    """Lista os cenários (análises × ciclos) disponíveis para a rodovia e tipo de matriz.
+
+    Fachada que normaliza a rodovia e delega para _get_iap_scenarios_from_database.
+    `matrix_type` é "Paragon" ou "Matriz Cadastrada".
+    """
     code = _normalize_road_code(selected_road)
     if not code:
         return []
@@ -359,6 +480,15 @@ def _get_iap_extraction_from_database(
     year: int | None,
     scenario_key: str | None = None,
 ) -> dict[str, Any] | None:
+    """Extração Paragon do IAP para um cenário/ano (tabela intervencoes_iap).
+
+    Resolve o cenário (pela key ou o default Paragon) e o ano-base, e roda 3 queries
+    sobre analise_gerencial_intervencoes_iap × analise_gerencial_segmento_pistas:
+      1) médias/totais (iap médio ponderado por extensão, km/percentual crítico);
+      2) composição por solução corretiva final (% sobre trechos com intervenção);
+      3) distribuição por classe de conceito IAP (via CASE WHEN em SQL).
+    Retorna dict com métricas + composição + distribuição, ou None se não houver dados.
+    """
     db = MySQLConnection()
     scenario = _get_iap_scenario_by_key(road_code, scenario_key) or _get_default_iap_scenario(db, road_code)
     if not scenario:
@@ -371,6 +501,9 @@ def _get_iap_extraction_from_database(
         if year is None:
             return None
 
+    # Médias/totais: IAP médio ponderado pela extensão (iapa vem ×100 -> /100); km
+    # crítico = extensão com solução 'RPS+REF'/'REC'; % crítico = km crítico sobre o
+    # km com QUALQUER intervenção (NULLIF evita divisão por zero); extensão e nº seg.
     averages = db.execute_query(
         """
         SELECT
@@ -392,6 +525,8 @@ def _get_iap_extraction_from_database(
         (scenario["analise_id"], scenario["ciclo_id"], year),
     ) or []
 
+    # Composição por solução corretiva: percentual calculado SOMENTE sobre os
+    # trechos que têm intervenção (base filtra solucao_corretiva_final IS NOT NULL).
     composition = db.execute_query(
         """
         WITH base AS (
@@ -434,6 +569,9 @@ def _get_iap_extraction_from_database(
         else len(_IAP_INTERVENTION_ORDER),
     )
 
+    # Distribuição por classe de conceito IAP. ATENÇÃO: este CASE WHEN é a CÓPIA em
+    # SQL dos limiares de _classify_iap (README §12.1) — manter os dois em sincronia.
+    # O percentual usa window function: km da classe / km total (SUM(SUM(...)) OVER ()).
     class_distribution = db.execute_query(
         """
         SELECT
@@ -496,8 +634,16 @@ def _get_iap_map_segments_from_database(
     ciclo_id: int,
     year: int,
 ) -> pd.DataFrame:
+    """Segmentos do mapa IAP (Paragon) com geometria real e cor por conceito.
+
+    Junta o IAP/solução de cada segmento (intervencoes_iap) com a geometria
+    reconstruída a partir dos pontos do levantamento IRI (principal_levantamentos),
+    e devolve um DataFrame com paths simplificados prontos para o mapa. Cada linha
+    traz iap, classe/cor por solução (_classify_iap_for_map) e a polyline do trecho.
+    """
     db = MySQLConnection()
 
+    # IAP e solução corretiva por segmento no ano (para colorir o traçado).
     iap_rows = db.execute_query(
         """
         SELECT segmento_pista_id, iapa, solucao_corretiva_final
@@ -519,7 +665,9 @@ def _get_iap_map_segments_from_database(
     if not iap_by_segment:
         return pd.DataFrame()
 
-    # Segmentos da análise (km + código SNV p/ rótulo), ordenados por km.
+    # Segmentos da análise (km + código SNV p/ rótulo), ordenados por km. O `codigo`
+    # vem de uma subquery correlata: o pista_shape cuja faixa de km CONTÉM o segmento
+    # (o mais recente por km_inicial DESC).
     seg_rows = db.execute_query(
         """
         SELECT
@@ -541,6 +689,7 @@ def _get_iap_map_segments_from_database(
         """,
         (analise_id,),
     ) or []
+    # mantém só os segmentos que têm IAP no ano (os demais não vão pro mapa)
     seg_rows = [r for r in seg_rows if int(r["id_segmento"]) in iap_by_segment]
     if not seg_rows:
         return pd.DataFrame()
@@ -630,7 +779,16 @@ def _get_linear_diagram_segments_from_database(
     ciclo_id: int,
     year: int,
 ) -> pd.DataFrame:
+    """Segmentos para o diagrama linear (Paragon): por segmento, os índices ICDS/ICDP/
+    ICDE e o IAP, já classificados e com cor. Lê intervencoes_iap × segmento_pistas.
+
+    Retorna DataFrame com um registro por segmento (ordenado por km), cada índice
+    com sua classe (_classify_condition) e cor, além da classe/cor de IAP por solução.
+    """
     db = MySQLConnection()
+    # `codigo` = SNV/SRE via subquery correlata pelo range de km (mesmo padrão dos
+    # outros SELECTs). Índices: icdsb=ICDS (superfície), icdpb=ICDP (panela),
+    # icdeb=ICDE (estrutural); iapa vem ×100.
     rows = db.execute_query(
         """
         SELECT
@@ -700,7 +858,19 @@ def _get_solution_table_from_database(
     ciclo_id: int,
     year: int,
 ) -> pd.DataFrame:
+    """Tabela de soluções recomendadas (Paragon): uma linha por segmento com IAP, IRI,
+    IGG, VMDA, deflexão, ICDS/ICDP, solução recomendada e custo estimado.
+
+    Cruza intervencoes_iap (solução) com roughness (IRI), igg (IGG) e desempenho
+    (VMDA) do mesmo ciclo/ano. Ordena da solução MAIS severa (REC) para a menos
+    severa e, dentro do grupo, por pior IAP e km. Retorna DataFrame para a página.
+    """
     db = MySQLConnection()
+    # `codigo` = SNV/SRE por subquery correlata; d0b = deflexão D0 (coluna DEF);
+    # `solucoes` = JSON de itens (nome/custo); IRI/IGG vêm por LEFT JOIN opcional
+    # (roughness/igg) casados por segmento+ciclo+ano; VMDA por subquery em
+    # desempenho_pavimento (ignora soft-delete). O ORDER BY/CASE ordena da solução
+    # mais severa (REC=1) à menos severa (NULL por último) e, no grupo, pior IAP e km.
     rows = db.execute_query(
         """
         SELECT
@@ -721,6 +891,8 @@ def _get_solution_table_from_database(
           i.solucao_corretiva_final,
           i.solucoes,
           i.d0b,
+          i.icdsb,
+          i.icdpb,
           r.iria,
           g.igga,
           (
@@ -780,6 +952,8 @@ def _get_solution_table_from_database(
                 "IGG": _to_float(row.get("igga")),
                 "VMDA": _to_float(row.get("vmda")),
                 "DEF": _to_float(row.get("d0b")),
+                "ICDS": _to_float(row.get("icdsb")),
+                "ICDP": _to_float(row.get("icdpb")),
                 "Solução recomendada": _solution_name(solution_code, row.get("solucoes")),
                 "Custo estimado": _solution_cost(row.get("solucoes")),
                 "_classe_iap": _classify_iap_for_map(row.get("iapa"), solution_code),
@@ -799,7 +973,15 @@ def _get_budget_solution_items_from_database(
     analise_id: int,
     ciclo_id: int,
 ) -> pd.DataFrame:
+    """Itens de orçamento Paragon: lê analise_gerencial_orcamentos e explode o JSON
+    `solucoes` em uma linha por (segmento × ano × item de solução) com custo > 0.
+
+    Cada linha traz SNV, km, extensão, nome/valor/quantidade do item e o custo.
+    Base para o cenário econômico Paragon. Ignora itens sem orçamento positivo.
+    """
     db = MySQLConnection()
+    # `solucoes` = JSON de itens orçados do segmento no ano; `codigo` = SNV/SRE via
+    # subquery correlata pelo range de km.
     rows = db.execute_query(
         """
         SELECT
@@ -852,7 +1034,7 @@ def _get_budget_solution_items_from_database(
                     "Km Inicial": _to_float(row.get("km_inicial")),
                     "Km Final": _to_float(row.get("km_final")),
                     "Extensão": _to_float(row.get("extensao")),
-                    "Solução": str(item.get("tipoNome") or item.get("sigla") or "Sem nome").strip(),
+                    "Solução": _normalize_solution_label(str(item.get("tipoNome") or item.get("sigla") or "Sem nome").strip()),
                     "Custo": budget,
                     "Quantidade": _to_float(item.get("quantidades")),
                     "Unidade": str(item.get("quantidades_formatada") or "").split(" ")[-1] if item.get("quantidades_formatada") else "",
@@ -864,11 +1046,22 @@ def _get_budget_solution_items_from_database(
     return pd.DataFrame(records)
 
 
+# ============================================================================
+# RESOLUÇÃO DE CENÁRIOS E RODOVIAS (metadados: análise, ciclo, ano-base)
+# ============================================================================
+
+
 def _scenario_key(analise_id: Any, ciclo_id: Any) -> str:
+    """Chave estável de um cenário no formato "analise_id:ciclo_id"."""
     return f"{int(analise_id)}:{int(ciclo_id)}"
 
 
 def _scenario_segment_type(name: str | None) -> tuple[str, str, int]:
+    """Deduz o tipo de segmentação do NOME do cenário -> (código, rótulo, ordem).
+
+    "(SH)"/"homogene" = Segmento Homogêneo; "1km" = 1km; senão "Outros".
+    A ordem (1/2/3) é usada para posicionar os cenários no seletor.
+    """
     normalized = str(name or "").lower()
     if "(sh)" in normalized or "homogene" in normalized:
         return "sh", "Segmento Homogêneo", 1
@@ -879,6 +1072,8 @@ def _scenario_segment_type(name: str | None) -> tuple[str, str, int]:
 
 
 def _get_iap_scenario_by_key(road_code: str, scenario_key: str | None) -> dict[str, Any] | None:
+    """Localiza o cenário pela key, procurando nos dois tipos de matriz (Paragon e
+    Matriz Cadastrada). Retorna o dict do cenário ou None."""
     if not scenario_key:
         return None
 
@@ -901,6 +1096,8 @@ def get_scenario_label(selected_road: str, scenario_key: str | None) -> str | No
 
 
 def _get_default_iap_scenario(db: MySQLConnection, road_code: str) -> dict[str, Any] | None:
+    """Cenário Paragon default da rodovia = o primeiro da lista ordenada (SH primeiro,
+    depois mais recente). Retorna None se a rodovia não tiver cenário Paragon."""
     scenarios = _get_iap_scenarios_from_database(road_code, "Paragon")
     if scenarios:
         return scenarios[0]
@@ -910,6 +1107,8 @@ def _get_default_iap_scenario(db: MySQLConnection, road_code: str) -> dict[str, 
 
 @lru_cache(maxsize=128)
 def _get_first_projection_year(ciclo_id: int) -> int | None:
+    """Menor ano de projeção (ano-base) do ciclo em intervencoes_iap. None se vazio.
+    Cacheado em processo (lru_cache) — limpo por _clear_local_caches."""
     db = MySQLConnection()
     rows = db.execute_query(
         "SELECT MIN(ano) AS ano FROM analise_gerencial_intervencoes_iap WHERE gerencial_ciclo_id = %s",
@@ -922,7 +1121,17 @@ def _get_first_projection_year(ciclo_id: int) -> int | None:
 
 @lru_cache(maxsize=64)
 def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[dict[str, Any]]:
+    """Cenários (análise × ciclo) da rodovia para um tipo de matriz.
+
+    Lê analise_gerencial_dados_trechos (só não deletadas) juntando os ciclos. Ordena
+    priorizando SH, depois 1km, depois o resto — e, dentro disso, os mais recentes.
+    Cacheado em processo (lru_cache); invalidado por ensure_fresh_data quando os
+    cenários mudam no banco. Retorna lista de dicts com key/analise_id/ciclo_id/etc.
+    """
     db = MySQLConnection()
+    # ordem_cenario (CASE) prioriza Segmento Homogêneo (SH), depois 1km, depois outros;
+    # deleted_at IS NULL ignora análises com soft-delete; tipo_matriz faz o roteamento
+    # Paragon vs Matriz Cadastrada.
     rows = db.execute_query(
         """
         SELECT
@@ -967,6 +1176,12 @@ def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[d
 
 @lru_cache(maxsize=1)
 def _get_available_roads_from_database() -> list[str]:
+    """Lista de rótulos "BR-xxx/UF" das rodovias com dados no banco.
+
+    Une as rodovias de analise_gerencial_dados_trechos (têm nome -> permitem extrair
+    UF) com as de analise_gerencial_segmento_pistas, dedup por código; prefere o
+    rótulo que traz a UF. Cacheado em processo (lru_cache maxsize=1).
+    """
     db = MySQLConnection()
     roads_by_code: dict[str, str] = {}
 
@@ -1014,6 +1229,8 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
     road = selected_road or get_available_roads()[0]
 
     iap_extraction = get_iap_extraction(road, scenario_key=scenario_key)
+    # Métricas reais vêm da extração; os literais são fallback de DEMONSTRAÇÃO usados
+    # só quando não há extração (rodovia sem cenário) — remover na v2.
     iap_average = iap_extraction["iap_medio"] if iap_extraction else 3.66
     extension_km = iap_extraction["total_km"] if iap_extraction else 90
     critical_km = iap_extraction["critical_km"] if iap_extraction else 14
@@ -1028,8 +1245,9 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
         "critical_km": critical_km,
         "critical_percent": critical_percent,
         "iap_average": iap_average,
-        "plan_cost_mi": 51.8,
-        "last_update_minutes": 12,
+        # FAKE / demonstração — valores fixos ainda não vêm do banco. Remover na v2.
+        "plan_cost_mi": 51.8,        # custo do plano em R$ milhões (placeholder)
+        "last_update_minutes": 12,   # "atualizado há X min" (placeholder)
     }
 
     cards = [
@@ -1081,6 +1299,7 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
     if iap_extraction and iap_extraction["composition"]:
         distribution = pd.DataFrame(iap_extraction["composition"])
     else:
+        # Distribuição FAKE de demonstração (sem extração real). Remover na v2.
         distribution = pd.DataFrame(
             [
                 {"classe": "RL+RS", "km": 51.16, "percentual": 38.2, "color": _IAP_INTERVENTION_COLORS["RL+RS"]},
@@ -1100,6 +1319,12 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
 
 
 def get_solutions_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+    """Dados da página de Soluções (Paragon): geometria do mapa, tabela de soluções
+    recomendadas e itens de orçamento para a rodovia/cenário.
+
+    Agrega _get_iap_map_segments/_get_solution_table/_get_budget_solution_items a
+    partir da extração IAP; devolve DataFrames vazios se não houver cenário.
+    """
     road = selected_road or get_available_roads()[0]
     iap_extraction = get_iap_extraction(road, scenario_key=scenario_key)
 
@@ -1135,13 +1360,21 @@ def get_solutions_data(selected_road: str | None = None, scenario_key: str | Non
     }
 
 
+# Metas de IAP usadas na projeção (README §12.3).
 # Meta mínima de IAP: abaixo disso o trecho está em situação de problema.
 IAP_META = 2.5
 # Margem de atenção: trechos cujo IAP projetado fica abaixo disso entram na lista de alerta.
 IAP_ATENCAO = 3.5
 
 
+# ============================================================================
+# PIPELINE DNIT — constantes e helpers de classificação (Matriz Cadastrada)
+# Limiares IRI/IGG/zona de cor: README §12.4. Roteamento: tabela intervencoes_dnit.
+# ============================================================================
+
+
 # --- Diagnóstico DNIT (IRI / IGG) ---
+# Paleta e ordem dos conceitos DNIT (5 níveis: Ótimo -> Péssimo).
 _DNIT_COLORS = {
     "Ótimo": "#00a651",
     "Bom": "#8bd95a",
@@ -1186,6 +1419,8 @@ def _classify_igg_dnit(value: float) -> str:
 
 
 def _dnit_situacao(value: Any) -> str | None:
+    """Normaliza o texto de situação IGG gravado no banco ("otimo", "péssimo"...) para
+    o rótulo canônico ("Ótimo", "Péssimo"). Retorna None se vazio/desconhecido."""
     if not value:
         return None
     return _DNIT_SITUACAO.get(str(value).strip().lower())
@@ -1242,6 +1477,8 @@ def _load_dnit_matrix() -> dict:
     col_dc: dict[int, list] = {}
     cells: dict[tuple[int, int], list[str]] = {}
 
+    # Cada limite descreve uma célula (posição linha×coluna) da matriz do DNIT.
+    # linha 1 = faixas de IRI, linha 2 = IGG, linha 3 = Dc/Dadm; linha>=4 = Número N.
     for lim in limites:
         cfg = json.loads(lim["config_table"]) if isinstance(lim["config_table"], str) else (lim["config_table"] or {})
         raw_logic = lim["logica_intervencao"]
@@ -1270,6 +1507,10 @@ def _load_dnit_matrix() -> dict:
 
 
 def _dnit_cond_ok(condicoes: list, p: dict) -> bool:
+    """Avalia se o segmento (params em `p`: iri/igg/numero_n/dc/dadm) satisfaz TODAS as
+    condições da célula da matriz (AND). Suporta comparação especial dc<=dadm quando o
+    valor é o select "dadm". Qualquer condição inválida/ausente retorna False.
+    """
     for c in condicoes:
         op = c.get("operador")
         if c.get("tipoValor") == "select" and c.get("valor") == "dadm":
@@ -1349,6 +1590,14 @@ def get_dnit_overview_data(selected_road: str | None = None, scenario_key: str |
 
 @cached(ttl=1800)
 def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) -> dict:
+    """Visão geral DNIT: por segmento, IRI e IGG classificados (faixas DNIT), critério
+    estrutural Dc×Dadm e a zona de cor da matriz DNIT (por faixa de IRI).
+
+    Lê IRI de roughness, IGG de igg, D0 de parametros_iniciais e Dadm de
+    desempenho_pavimento; combina com a geometria (mapa IAP ou geometria DNIT).
+    Retorna dict com o DataFrame de segmentos + médias ponderadas por extensão
+    (IRI/IGG), % com deflexão ruim e % crítico, além das paletas/ordens DNIT.
+    """
     # Paragon usa a geometria do mapa IAP; Cadastrada (sem intervencoes_iap) cai na
     # geometria DNIT, que não depende de IAP e traz as mesmas colunas.
     geo = _get_iap_map_segments_from_database(analise_id, ciclo_id, year)
@@ -1358,10 +1607,12 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
         return {}
 
     db = MySQLConnection()
+    # IRI por segmento no ano (roughness)
     iri_rows = db.execute_query(
         "SELECT segmento_pista_id AS seg, iria FROM analise_gerencial_roughness WHERE gerencial_ciclo_id = %s AND ano = %s",
         (ciclo_id, year),
     ) or []
+    # IGG + situação textual por segmento no ano (igg)
     igg_rows = db.execute_query(
         "SELECT segmento_pista_id AS seg, igga, situacao_igga FROM analise_gerencial_igg WHERE gerencial_ciclo_id = %s AND ano = %s",
         (ciclo_id, year),
@@ -1435,10 +1686,13 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
     if segments.empty:
         return {}
 
+    # Agregados ponderados por extensão (km) do segmento.
     ext = (segments["km_final"] - segments["km_inicial"]).clip(lower=0)
     total = float(ext.sum()) or 1.0
+    # % de km com deficiência estrutural (Dc > Dadm)
     dc_gt = segments["dc"].notna() & segments["dadm"].notna() & (segments["dc"] > segments["dadm"])
     defl_bad = float(ext[dc_gt].sum()) / total * 100
+    # % de km crítico = zonas de IRI pior (4-5,5 e >5,5)
     critico_pct = float(ext[segments["matriz_categoria"].isin(["4 < IRI ≤ 5,5", "IRI > 5,5"])].sum()) / total * 100
     return {
         "segments": segments,
@@ -1453,6 +1707,11 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
         "zona_colors": _DNIT_ZONA_COLORS,
     }
 
+
+# ============================================================================
+# PIPELINE DNIT — Soluções (Matriz Revitaliza DNIT/RO) e geometria
+# Lê analise_gerencial_intervencoes_dnit; nomes/cores hardcoded (candidato a rel_* na v2).
+# ============================================================================
 
 # --- Soluções DNIT (Matriz Revitaliza DNIT/RO) ---
 # Categoria macro da solução DNIT (para a distribuição/cor da barra). A tabela mostra a solução detalhada.
@@ -1529,6 +1788,7 @@ def _dnit_solution_core_label(parsed: list[tuple[int | None, str]]) -> str:
     Classifica pelo `tipoId` gravado (= `intervencao_tipo_id`); cai p/ heurística de nome se faltar.
     """
     def is_comp(tid: int | None, nome: str) -> bool:
+        """True se o item é complementar (conservação) — por tipoId, ou por nome se faltar."""
         return tid in _DNIT_COMPLEMENTARY_TIPOS if tid is not None else _dnit_is_complementar(nome)
 
     core = [nome for tid, nome in parsed if not is_comp(tid, nome)]
@@ -1734,6 +1994,15 @@ def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
 def _get_dnit_solutions_from_database(
     analise_id: int, ciclo_id: int, year: int, all_years: bool = False
 ) -> dict:
+    """Soluções DNIT gravadas (analise_gerencial_intervencoes_dnit) por segmento.
+
+    Combina a geometria DNIT com IRI/IGG e o JSON `solucoes` de cada segmento;
+    calcula a zona de cor por IRI, o texto da solução, o núcleo (sem complementares)
+    e o grupo macro. Retorna segments (mapa) + table (ordenada por severidade de IRI).
+    `all_years=True` amplia o escopo para segmentos tratados em QUALQUER ano do
+    horizonte (usado no cenário econômico); preferindo a solução do ano-base.
+    Só entram segmentos que têm solução DNIT gravada.
+    """
     geo = _get_dnit_geometry_from_database(analise_id)
     if geo is None or geo.empty:
         return {}
@@ -1847,6 +2116,12 @@ def _get_dnit_solutions_from_database(
     }
 
 
+# ============================================================================
+# PIPELINE PARAGON — Projeção de IAP ao longo dos anos
+# (curva contínua de IAP; tabela analise_gerencial_intervencoes_iap)
+# ============================================================================
+
+
 def get_projection_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
     """Série de projeção do IAP ao longo dos anos para a rodovia/cenário."""
     road = selected_road or get_available_roads()[0]
@@ -1870,8 +2145,20 @@ def get_projection_data(selected_road: str | None = None, scenario_key: str | No
 
 @cached(ttl=3600)
 def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
+    """Motor da projeção Paragon: toda a série anual de IAP do ciclo, agregada em
+    várias visões para os gráficos (lê intervencoes_iap de TODOS os anos).
+
+    Percorre cada (segmento, ano) e monta, ponderando por extensão:
+      - por ano: IAP médio antes/depois, IAP mínimo, km abaixo da meta, km com obra
+        e composição por conceito;
+      - por trecho (SRE): série de IAP, anos com intervenção e histórico de soluções;
+      - alertas dos trechos com pior IAP projetado (crítico/atenção) e faixas de
+        conceito (limite = menor IAP observado em cada conceito).
+    Retorna um dict grande com todas essas séries prontas para a página de projeção.
+    """
     db = MySQLConnection()
 
+    # Extensão e código SNV/SRE de cada segmento (rótulo e ponderação por km).
     seg_rows = db.execute_query(
         """
         SELECT
@@ -1896,6 +2183,8 @@ def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
         for r in seg_rows
     }
 
+    # Todos os anos do ciclo. iapa = IAP DEPOIS da intervenção do ano (×100);
+    # iapb = IAP ANTES; conceito_iapa = classe já calculada no pipeline.
     rows = db.execute_query(
         """
         SELECT ano, segmento_pista_id AS seg, iapa, iapb, conceito_iapa, solucao_corretiva_final
@@ -1964,6 +2253,7 @@ def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
     iap_axis_max = max(6.0, math.ceil(max_iap))
 
     def col(key: str) -> list[float]:
+        """Extrai a coluna `key` do bucket de cada ano como lista alinhada a `years`."""
         return [round(per_year[y][key], 3) for y in years]
 
     avg_after = [round(per_year[y]["w_after"] / per_year[y]["ext"], 3) if per_year[y]["ext"] else 0.0 for y in years]

@@ -84,7 +84,12 @@ def is_redis_alive() -> bool:
 
 
 def _make_key(prefix: str, args: tuple, kwargs: dict) -> str:
-    """Chave determinística para args/kwargs (ordenados)."""
+    """Chave determinística para args/kwargs.
+
+    Os kwargs são ordenados para a chave independer da ordem de chamada; o
+    ``repr`` é reduzido a um sha1 de 24 hex para manter a chave do Redis curta.
+    Formato final: ``{prefixo_do_app}{prefix}:{digest}``.
+    """
     raw = repr((args, tuple(sorted(kwargs.items()))))
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
     return f"{_CACHE_PREFIX}{prefix}:{digest}"
@@ -106,6 +111,7 @@ def cached(ttl: int | None = None, key_prefix: str | None = None) -> Callable:
 
         @wraps(func)
         def wrapper(*args, **kwargs):
+            # Ordem de resolução: Redis (se vivo) -> cache local -> executa func.
             cli = _connect_redis()
             key = _make_key(prefix, args, kwargs)
 

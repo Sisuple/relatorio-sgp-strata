@@ -1,3 +1,12 @@
+"""Mapa Leaflet da rede, colorido por conceito IAP ou por solução corretiva.
+
+Renderiza um mapa interativo (Leaflet dentro de um iframe via components.html) com
+as polilinhas reais dos segmentos, tooltip por trecho, seletor de camada base,
+tela cheia e o drawer de Street View (components.maps.streetview). A cor de cada
+linha vem de _CLASS_COLORS (color_by="iap") ou _SOLUTION_COLORS (color_by="solucao").
+Quando há sentidos sobrepostos, o JS desloca cada linha alguns pixels (offset_side)
+para não se cobrirem. Segmentos "não atendidos" (fora do orçamento) ficam esmaecidos.
+"""
 from __future__ import annotations
 
 import json
@@ -9,6 +18,9 @@ import streamlit.components.v1 as components
 from components.maps.streetview import SV_CSS, SV_MODAL_HTML, sv_init_js, road_from_sre, clean
 
 
+# Paleta hardcoded conceito IAP -> cor hex (7 níveis). Mesma paleta semântica
+# repetida em vários arquivos (linear_diagram, dnit_map...). Ver README.md Parte II
+# §11.4. Usada como legenda e passada ao JS para colorir as linhas por classe_iap.
 _CLASS_COLORS = {
     "Excelente": "#00c2e8",
     "Bom": "#00a651",
@@ -19,6 +31,10 @@ _CLASS_COLORS = {
     "Péssimo": "#d71920",
 }
 
+# Ordem (pior→melhor na legenda) e paleta hardcoded das soluções corretivas.
+# _SOLUTION_ORDER define quais rótulos aparecem na legenda e em que sequência;
+# "OK"/"Sem intervenção" existem no mapa de cores mas não na legenda. Mesma paleta
+# de linear_diagram._SOLUTION_LEGEND. Ver README.md Parte II §11.4.
 _SOLUTION_ORDER = ["RL", "RL+RS", "RL+REF", "RPS", "RPS+REF", "REC"]
 _SOLUTION_COLORS = {
     "OK": "#00c2e8",
@@ -40,10 +56,25 @@ def render_overview_map(
     legend_foot: str | None = None,
     color_by: str = "iap",
 ) -> None:
+    """Renderiza o mapa Leaflet da rede no Streamlit.
+
+    Parâmetros:
+    - segments_df: DataFrame com os segmentos (precisa das colunas de geometria
+      'paths' e dos campos de condição; ver base_columns).
+    - extent_km: extensão total (recebida por assinatura; o enquadramento real é
+      feito pelo fitBounds no JS a partir das coordenadas).
+    - attended_ids: ids atendidos pelo orçamento; os demais são desenhados
+      esmaecidos/tracejados. None => todos atendidos.
+    - legend_foot: rodapé customizado da legenda (senão usa o padrão do modo).
+    - color_by: "iap" (cor por conceito) ou "solucao" (cor pela solução corretiva).
+
+    Sai cedo com st.info se não houver dados ou faltar geometria real.
+    """
     if segments_df is None or segments_df.empty:
         st.info("Sem segmentos para exibir no mapa.")
         return
 
+    # Colunas mínimas exigidas; no modo "solucao" também é preciso intervencao_iap.
     base_columns = {"segment_id", "sre", "km_inicial", "km_final", "iap", "classe_iap", "paths"}
     if color_by == "solucao":
         required_columns = base_columns | {"intervencao_iap"}
@@ -64,18 +95,26 @@ def render_overview_map(
     ]
     if color_by == "solucao":
         selected_cols.append("intervencao_iap")
+    # Colunas opcionais: só entram se existirem (sentido/offset_side controlam o
+    # deslocamento em pixels das linhas de sentidos sobrepostos no JS).
     if "sentido" in segments_df.columns:
         selected_cols.append("sentido")
+    if "offset_side" in segments_df.columns:
+        selected_cols.append("offset_side")
     records = segments_df[selected_cols].copy()
+    # Marca cada segmento como atendido (dentro do orçamento) ou não. Sem lista de
+    # atendidos, considera todos atendidos (mapa "cheio").
     if attended_ids is not None:
         attended = {int(value) for value in attended_ids}
         records["attended"] = records["segment_id"].astype(int).isin(attended)
     else:
         records["attended"] = True
 
+    # Rótulos legíveis das soluções (código -> texto) reusados do serviço.
     from services.overview_service import _SOLUTION_LABELS
 
     def _row_detail(r):
+        """Monta o dict de detalhe (título + linhas chave/valor) do drawer para um segmento."""
         ext = max(float(r.get("km_final") or 0) - float(r.get("km_inicial") or 0), 0.0)
         cod = clean(r.get("intervencao_iap"), default="")
         solucao = _SOLUTION_LABELS.get(cod, cod) if cod else "—"
@@ -91,9 +130,12 @@ def render_overview_map(
 
     records["detail"] = segments_df.apply(_row_detail, axis=1)
 
+    # Serializa os segmentos (com geometria e detalhe) para injetar no JS do mapa.
     segments = records.to_dict("records")
     segments_json = json.dumps(segments, ensure_ascii=False)
 
+    # Seleciona a paleta, a coluna de cor (color_key_js), os textos e a legenda
+    # conforme o modo. A legenda lista só os valores realmente presentes ('present').
     if color_by == "solucao":
         colors_json = json.dumps(_SOLUTION_COLORS, ensure_ascii=False)
         color_key_js = "intervencao_iap"
@@ -121,6 +163,8 @@ def render_overview_map(
 
     legend_foot_html = legend_foot or legend_foot_default
 
+    # Template HTML/JS completo do iframe do mapa. Os placeholders $... são
+    # preenchidos no .substitute() lá embaixo (dados, cores, textos e o Street View).
     html_template = Template(
         """
         <!doctype html>
@@ -217,6 +261,7 @@ $sv_modal
           <script>
             const segments = $segments_json;
             const colors = $colors_json;
+            const GAP_PX = $gap_px;   // separação (px) entre sentidos vizinhos — constante em qualquer zoom
             const map = L.map('map', {
               zoomControl: false,
               attributionControl: true,
@@ -264,7 +309,27 @@ $sv_modal
             let currentBaseLayer = baseLayers.satellite.addTo(map);
 
             const latLngs = [];
+            const drawn = [];   // { polyline, coords (originais), sidePx }
             const formatKm = (value) => Number(value).toFixed(2);
+
+            // Desloca a polilinha perpendicularmente por `sidePx` PIXELS no zoom atual
+            // (separação constante em qualquer zoom — técnica portada da v2).
+            function offsetPathPixels(coords, sidePx) {
+              if (coords.length < 2 || !sidePx) return coords;
+              const z = map.getZoom();
+              const pts = coords.map((c) => map.project(L.latLng(c[0], c[1]), z));
+              const out = [];
+              for (let i = 0; i < pts.length; i++) {
+                const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const len = Math.hypot(dx, dy) || 1e-9;
+                const px = -dy / len, py = dx / len;     // perpendicular unitária (px)
+                const p = pts[i];
+                const ll = map.unproject(L.point(p.x + px * sidePx, p.y + py * sidePx), z);
+                out.push([ll.lat, ll.lng]);
+              }
+              return out;
+            }
 
             segments.forEach((segment) => {
               const attended = segment.attended !== false;
@@ -273,13 +338,14 @@ $sv_modal
               const opacity = attended ? 0.96 : 0.45;
               const weight = attended ? 5 : 3;
               const dashArray = attended ? null : '4 7';
+              const sidePx = (Number(segment.offset_side) || 0) * GAP_PX;
 
               segment.paths.forEach((path) => {
                 const coordinates = path.map((coord) => [Number(coord[0]), Number(coord[1])]);
                 if (coordinates.length < 2) return;
 
                 coordinates.forEach((coord) => latLngs.push(coord));
-                L.polyline(coordinates, {
+                const pl = L.polyline(coordinates, {
                   color,
                   weight,
                   opacity,
@@ -296,11 +362,19 @@ $sv_modal
                   ' · $tooltip_label ' + colorKey +
                   (attended ? '' : ' · Fora do orçamento')
                 ).on('click', (e) => window.__openTrecho(e.latlng.lat, e.latlng.lng, segment.detail));
+                drawn.push({ polyline: pl, coords: coordinates, sidePx });
               });
             });
 
             const bounds = L.latLngBounds(latLngs);
             map.fitBounds(bounds, { padding: [34, 34] });
+
+            // Reaplica o offset em pixels a cada zoom (mantém a separação constante).
+            function redrawOffsets() {
+              drawn.forEach((d) => { if (d.sidePx) d.polyline.setLatLngs(offsetPathPixels(d.coords, d.sidePx)); });
+            }
+            redrawOffsets();
+            map.on('zoomend', redrawOffsets);
 
             document.querySelector('[data-zoom="in"]').addEventListener('click', () => map.zoomIn());
             document.querySelector('[data-zoom="out"]').addEventListener('click', () => map.zoomOut());
@@ -341,6 +415,7 @@ $sv_modal
             legend_items_html=legend_items_html,
             color_key_js=color_key_js,
             tooltip_label=tooltip_label,
+            gap_px=12,  # separação em px entre sentidos vizinhos (constante em qualquer zoom)
             sv_css=SV_CSS,
             sv_modal=SV_MODAL_HTML,
             sv_js=sv_init_js(),

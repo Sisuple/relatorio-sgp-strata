@@ -49,3 +49,6 @@ Thumbs.db
 # Backups locais e cache de runtime
 *.bak-*
 .cache/
+
+# Prompts — arquivos pessoais de treinamento, não versionar
+prompts/*.md

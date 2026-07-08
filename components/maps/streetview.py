@@ -19,6 +19,10 @@ import os
 import re
 
 
+# Fragmento de CSS do drawer + Street View, injetado em $sv_css no <style> de cada
+# mapa. Classes .td-* : backdrop (fundo), drawer (painel deslizante), head/rows
+# (dados do trecho) e sv-wrap/frame (iframe do Street View). A animação de abrir
+# é o transform translateX(-100% -> 0) em .td-drawer.open.
 SV_CSS = """
             .td-backdrop { display: none; position: absolute; inset: 0; z-index: 1190; background: rgba(3,8,12,.35); }
             .td-backdrop.open { display: block; }
@@ -37,6 +41,9 @@ SV_CSS = """
             .td-empty { display: grid; place-items: center; height: 100%; color: #9aa8b3; font-size: 12px; text-align: center; padding: 0 18px; }
 """
 
+# Marcação HTML do drawer, injetada em $sv_modal dentro de .map-card. É a casca
+# vazia (título, lista de linhas e iframe) — preenchida em runtime pelo JS de
+# sv_init_js quando um segmento é clicado. IDs td-* são os hooks usados pelo JS.
 SV_MODAL_HTML = """
             <div id="td-backdrop" class="td-backdrop"></div>
             <aside id="td-drawer" class="td-drawer" role="dialog" aria-modal="true" aria-label="Detalhes do trecho">
@@ -54,6 +61,11 @@ SV_MODAL_HTML = """
 
 
 def get_api_key() -> str:
+    """Lê a chave do Google Maps de GOOGLE_MAPS_API_KEY no ambiente (.env).
+
+    Devolve string vazia se não estiver configurada — nesse caso o drawer mostra
+    um aviso no lugar do Street View (ver sv_init_js).
+    """
     return (os.getenv("GOOGLE_MAPS_API_KEY", "") or "").strip()
 
 
@@ -76,7 +88,10 @@ def road_from_sre(sre: str | None) -> str:
 def sv_init_js(api_key: str | None = None) -> str:
     """JS que define window.__openTrecho(lat, lng, detail) e fecha o drawer."""
     key = api_key if api_key is not None else get_api_key()
+    # json.dumps serializa a chave como literal JS já com aspas e escapes seguros.
     key_literal = json.dumps(key)
+    # IIFE que fecha sobre os elementos do drawer e expõe window.__openTrecho.
+    # As linhas abaixo são concatenação implícita de literais → string JS única.
     return (
         "(function(){"
         "  var KEY = " + key_literal + ";"
@@ -87,7 +102,10 @@ def sv_init_js(api_key: str | None = None) -> str:
         "  var frame = document.getElementById('td-frame');"
         "  var empty = document.getElementById('td-empty');"
         "  if (!drawer) return;"
+        # esc(): escapa HTML no lado JS antes de injetar detail.title/rows via innerHTML.
         "  function esc(v){ return String(v == null ? '' : v).replace(/[&<>\"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]; }); }"
+        # Entrada global chamada no .on('click') das polylines de cada mapa:
+        # recebe (lat, lng, detail) e abre o drawer preenchido no ponto clicado.
         "  window.__openTrecho = function(lat, lng, detail){"
         "    detail = detail || {};"
         "    titleEl.textContent = detail.title || 'Trecho';"
@@ -95,17 +113,21 @@ def sv_init_js(api_key: str | None = None) -> str:
         "    rowsEl.innerHTML = rows.map(function(r){"
         "      return '<div class=\"td-row\"><span class=\"td-k\">' + esc(r[0]) + '</span><span class=\"td-v\">' + esc(r[1]) + '</span></div>';"
         "    }).join('');"
+        # Coordenada "lat,lng" com 6 casas para a URL do Street View.
         "    var loc = Number(lat).toFixed(6) + ',' + Number(lng).toFixed(6);"
+        # Sem chave: esconde o iframe e mostra o aviso de configuração (empty state).
         "    if (!KEY){"
         "      frame.style.display = 'none'; frame.removeAttribute('src');"
         "      empty.style.display = 'grid';"
         "      empty.textContent = 'Configure GOOGLE_MAPS_API_KEY no .env (Maps Embed API) para o Street View.';"
         "    } else {"
+        # Com chave: aponta o iframe para a Maps Embed API (streetview) no ponto; fov=90 = zoom padrão.
         "      empty.style.display = 'none'; frame.style.display = 'block';"
         "      frame.src = 'https://www.google.com/maps/embed/v1/streetview?key=' + KEY + '&location=' + loc + '&fov=90';"
         "    }"
         "    drawer.classList.add('open'); backdrop.classList.add('open');"
         "  };"
+        # Fecha o drawer e limpa o src do iframe (para o Street View parar de carregar).
         "  function closeTrecho(){ drawer.classList.remove('open'); backdrop.classList.remove('open'); frame.removeAttribute('src'); }"
         "  document.getElementById('td-close').addEventListener('click', closeTrecho);"
         "  backdrop.addEventListener('click', closeTrecho);"
