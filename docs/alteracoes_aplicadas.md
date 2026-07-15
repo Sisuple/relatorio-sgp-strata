@@ -2,6 +2,15 @@
 
 Este documento foi feito em linguagem simples, para registrar o que já foi ajustado no painel até agora.
 
+### Como este resumo deve ser usado
+
+Este arquivo deve destacar principalmente:
+- correções relevantes do dashboard;
+- melhorias percebidas na lógica, nos filtros e na leitura das telas;
+- pontos que ajudam a demonstrar o retrabalho real do produto.
+
+Erros técnicos intermediários surgidos durante a implementação não precisam virar itens separados aqui, a menos que expliquem uma fragilidade importante do próprio dashboard.
+
 ## 13/07/2026
 
 ### 1. Melhoria de velocidade na troca de telas
@@ -288,3 +297,17 @@ Impacto prático:
 - os elementos deixam de parecer colados no subtítulo;
 - os cards passam a ter um ritmo visual mais consistente entre si;
 - a navegação fica mais agradável sem alterar os dados ou cálculos.
+
+### Atualização de 2026-07-15 2
+
+Foi reorganizado o filtro da tela `Cenário econômico`.
+
+Em linguagem simples:
+- saiu o filtro antigo com linguagem de `sentidos`;
+- entrou um filtro de `Cenários`, no mesmo estilo de seleção múltipla usado em outras telas;
+- também foi incluído o filtro de `Ano`.
+
+Impacto prático:
+- a tela fica mais padronizada com o restante do dashboard;
+- a escolha de cenários fica mais clara para o usuário;
+- o recorte econômico passa a poder considerar também o ano escolhido.

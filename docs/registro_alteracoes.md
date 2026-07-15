@@ -24,6 +24,19 @@ Para cada alteração no código, este documento deve ser atualizado com:
 9. Como validar
 10. Pendências, se existirem
 
+### Critério deste registro
+
+Este documento deve dar prioridade para:
+- problemas reais encontrados no dashboard original;
+- correções de lógica, filtros, leitura visual ou comportamento da aplicação;
+- mudanças que ajudam a demonstrar o retrabalho necessário no produto.
+
+Não é objetivo deste registro transformar cada ajuste técnico interno em uma alteração separada.
+
+Em linguagem simples:
+- se o problema existia no dashboard e afetava a entrega, vale registrar;
+- se foi apenas um erro intermediário surgido durante a implementação de uma correção, isso deve aparecer no máximo como observação curta dentro da alteração principal, quando realmente ajudar a explicar o retrabalho.
+
 ## Modelo de registro
 
 ### Alteração 001
@@ -693,3 +706,31 @@ Para cada alteração no código, este documento deve ser atualizado com:
   2. comparar a distância entre subtítulo e conteúdo visual;
   3. confirmar que os elementos já não ficam colados no texto acima.
 - Pendências: se você quiser depois, eu também posso fazer uma segunda passada fina só de ritmo vertical entre cards da página inteira.
+
+### Alteração 031
+
+- Data: 2026-07-15
+- Problema encontrado: a tela `Cenário econômico` ainda usava um filtro antigo com linguagem de `sentidos`, diferente do padrão das outras telas, e também não tinha filtro de `Ano`.
+- Causa identificada: essa página ainda dependia de um bloco específico mais antigo, separado da lógica mais nova de filtros aplicada nas demais telas.
+- Arquivos alterados: `app.py`, `services/overview_service.py`, `docs/registro_alteracoes.md`, `docs/alteracoes_aplicadas.md`
+- O que foi adicionado:
+  - filtro de `Cenários` em multiseleção, com rótulo simples e placeholder `Selecione um ou mais`;
+  - filtro de `Ano` na tela `Cenário econômico`;
+  - suporte do fluxo econômico DNIT para respeitar o ano selecionado.
+- O que foi removido:
+  - o texto antigo `Cenários (sentidos)` nessa parte da tela;
+  - a dependência do seletor antigo para montar o recorte econômico.
+- O que foi ajustado:
+  - a página `Cenário econômico` agora usa um painel de filtros mais alinhado ao padrão das outras telas;
+  - a leitura dos cenários passou a usar o mesmo tipo de nome curto já aplicado em outros pontos do dashboard;
+  - os textos visíveis de comparação e custo nessa área deixaram de falar em `sentido` e passaram a falar em `cenário`.
+- Observação complementar:
+  - junto dessa mudança, foi necessário estabilizar referências internas da versão `Matriz Cadastrada` para o novo recorte `cenários + ano`, evitando erro ao abrir a tela.
+- Impacto esperado: a navegação da página econômica fica mais clara, padronizada e coerente com o restante do painel.
+- Como validar:
+  1. abrir a tela `Cenário econômico`;
+  2. observar que o filtro antigo de `sentidos` não aparece mais;
+  3. confirmar que existe o filtro `Cenários` com multiseleção;
+  4. confirmar que existe o filtro `Ano`;
+  5. trocar cenários e ano e verificar que a tela continua carregando normalmente.
+- Pendências: se você quiser depois, eu também posso revisar os rótulos internos de colunas e tabelas dessa página para trocar `Sentido` por `Cenário` onde ainda fizer sentido visualmente.

@@ -2540,8 +2540,10 @@ def get_dnit_economic_data(
         return {"road": road, "available": False, "table": pd.DataFrame(),
                 "budget_items": pd.DataFrame(), "segments": pd.DataFrame()}
 
+    selected_year = int(year if year is not None else analysis["ano"])
+
     sol_data = _get_dnit_solutions_from_database(
-        analysis["analise_id"], analysis["ciclo_id"], analysis["ano"], all_years=True
+        analysis["analise_id"], analysis["ciclo_id"], selected_year, all_years=True
     )
     if not sol_data:
         return {"road": road, "available": False, "table": pd.DataFrame(),
@@ -2571,7 +2573,7 @@ def get_dnit_economic_data(
         "zona_colors": sol_data.get("zona_colors"),
         "analise_id": analysis["analise_id"],
         "ciclo_id": analysis["ciclo_id"],
-        "ano_base": analysis["ano"],
+        "ano_base": selected_year,
     }
 
 

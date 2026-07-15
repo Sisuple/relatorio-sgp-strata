@@ -1044,6 +1044,77 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, str | None, in
     return diagnosis, selected_road, scenario_key, selected_year
 
 
+def _render_filter_placeholder(text: str) -> None:
+    st.markdown(
+        '<div class="filter-placeholder">'
+        f'<span class="filter-placeholder-text">{html.escape(text)}</span>'
+        '<span class="filter-placeholder-caret">▾</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _collect_local_year_options(road: str, matrix_type: str, scenario_keys: list[str] | None) -> list[int]:
+    years: set[int] = set()
+    keys = [str(key) for key in (scenario_keys or []) if key]
+    if keys:
+        for scenario_key in keys:
+            years.update(get_available_years(road, matrix_type, scenario_key))
+    else:
+        years.update(get_available_years(road, matrix_type, None))
+    return sorted(years)
+
+
+def _render_economic_master_filters(
+    road: str,
+    *,
+    matrix_type: str,
+    widget_prefix: str,
+) -> tuple[list[str], dict[str, str], int | None]:
+    scenarios = get_available_scenarios(road, matrix_type)
+    labels = {str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"]) for s in scenarios}
+    keys = [str(s["key"]) for s in scenarios]
+    storage_key = f"{widget_prefix}_scenario_values"
+
+    current = [str(value) for value in (st.session_state.get(storage_key) or []) if str(value) in keys]
+    if not current:
+        current = keys[:1]
+        if current:
+            st.session_state[storage_key] = current
+
+    scenario_col, year_col = st.columns([1.6, 0.8], gap="medium")
+    with scenario_col:
+        _filter_caption("Cenários")
+        selected_keys = st.multiselect(
+            "Cenários",
+            keys,
+            default=current,
+            key=storage_key,
+            format_func=lambda k: labels.get(str(k), str(k)),
+            placeholder="Selecione um ou mais",
+            label_visibility="collapsed",
+        )
+
+    year_options = _collect_local_year_options(road, matrix_type, selected_keys)
+    year_key = f"{widget_prefix}_year_value"
+    if st.session_state.get(year_key) not in year_options:
+        st.session_state.pop(year_key, None)
+    selected_year: int | None = None
+    with year_col:
+        _filter_caption("Ano")
+        if year_options:
+            selected_year = st.selectbox(
+                "Ano",
+                year_options,
+                key=year_key,
+                label_visibility="collapsed",
+            )
+        else:
+            _render_filter_placeholder("Sem anos")
+
+    return [str(value) for value in selected_keys], labels, selected_year
+
+
 def render_metric_cards(cards: list[dict]) -> None:
     """Renderiza uma linha de cards de métrica (KPIs) lado a lado."""
     columns = st.columns(len(cards), gap="medium")
@@ -1420,7 +1491,7 @@ def _combined_solution_data(road, keys, labels):
     for i, k in enumerate(keys):
         d = get_solutions_data(road, scenario_key=k)
         t, s = d.get("table"), d.get("segments")
-        sent = _sentido_faixa(labels.get(k, k))
+        sent = str(labels.get(k, k))
         if t is not None and not t.empty:
             t = t.copy()
             t["Sentido"] = sent
@@ -2304,7 +2375,7 @@ def _grouped_bars_card(icon, title, subtitle, meta_html, tick, groups_html, labe
 
 
 def _render_budget_cost_by_year_sentido(budget_items: pd.DataFrame) -> None:
-    """Custo por ano da programação orçamentária, com barras agrupadas por sentido."""
+    """Custo por ano da programação orçamentária, com barras agrupadas por cenário."""
     g = budget_items.groupby(["Ano", "Sentido"], as_index=False)["Custo"].sum()
     anos = sorted(g["Ano"].unique())
     sentidos = list(dict.fromkeys(budget_items["Sentido"].tolist()))
@@ -2322,13 +2393,13 @@ def _render_budget_cost_by_year_sentido(budget_items: pd.DataFrame) -> None:
     )
     meta = f'<span>Total · <strong>{_format_money(total_cost)}</strong></span>{legend}'
     st.markdown(
-        _grouped_bars_card("$", "Custo por ano", "Programação orçamentária por sentido", meta, tick, gh, lh),
+        _grouped_bars_card("$", "Custo por ano", "Programação orçamentária por cenário", meta, tick, gh, lh),
         unsafe_allow_html=True,
     )
 
 
 def _render_budget_cost_by_solution_sentido(budget_items: pd.DataFrame, color_fn) -> None:
-    """Custo (% do total) por solução, com barras agrupadas por sentido."""
+    """Custo (% do total) por solução, com barras agrupadas por cenário."""
     g = budget_items.groupby(["Solução", "Sentido"], as_index=False).agg({"Custo": "sum", "Extensão": "sum"})
     solucoes = list(g.groupby("Solução")["Custo"].sum().sort_values(ascending=False).index)
     sentidos = list(dict.fromkeys(budget_items["Sentido"].tolist()))
@@ -2348,7 +2419,7 @@ def _render_budget_cost_by_solution_sentido(budget_items: pd.DataFrame, color_fn
         f'<span>Trecho · <strong>{total_km:.1f} km</strong></span>{legend}'
     )
     st.markdown(
-        _grouped_bars_card("$", "Custos por solução", "Itens do orçamento por sentido", meta, tick, gh, lh),
+        _grouped_bars_card("$", "Custos por solução", "Itens do orçamento por cenário", meta, tick, gh, lh),
         unsafe_allow_html=True,
     )
 
@@ -3535,16 +3606,16 @@ def _render_economic_page(
     )
 
 
-def _combined_economic_data(road, keys, labels):
+def _combined_economic_data(road, keys, labels, year: int | None = None):
     """Combina tabela/orçamento/segmentos de vários cenários (sentidos) para o
     módulo econômico: a simulação roda sobre os dois juntos (necessidade total =
     soma) e `per_sentido` traz a necessidade de cada um para o comparativo."""
     tables, budgets, segs, per_sentido = [], [], [], []
     n = len(keys)
     for i, k in enumerate(keys):
-        d = get_solutions_data(road, scenario_key=k)
+        d = get_solutions_data(road, scenario_key=k, year=year)
         t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
-        sent = _sentido_faixa(labels.get(k, k))
+        sent = str(labels.get(k, k))
         # Necessidade do PROGRAMA COMPLETO por sentido (todos os anos) — bate com a
         # NECESSIDADE TOTAL (horizonte default = total da análise). 9999 = sem corte.
         per_sentido.append(
@@ -3572,7 +3643,7 @@ def _combined_economic_data(road, keys, labels):
 
 
 def _render_economic_comparison(per_sentido) -> None:
-    """Cards comparando a necessidade total de cada sentido + o total combinado."""
+    """Cards comparando a necessidade total de cada cenário + o total combinado."""
     if not per_sentido:
         return
     total = sum(p["need"] for p in per_sentido)
@@ -3592,7 +3663,7 @@ def _render_economic_comparison(per_sentido) -> None:
     st.markdown(
         "<div style='margin:6px 0 16px'>"
         "<div style='font-weight:700;color:#cbd5df;margin-bottom:8px'>"
-        "⚖️ Necessidade total por sentido</div>"
+        "⚖️ Necessidade total por cenário</div>"
         f"<div style='display:flex;gap:12px;flex-wrap:wrap'>{cells}</div></div>",
         unsafe_allow_html=True,
     )
@@ -3671,7 +3742,7 @@ def _render_dnit_economic_controls(total_need: float, scenario_key: str) -> tupl
     return annual_budget, horizon, prio_max
 
 
-def _combined_dnit_economic_data(road, keys, labels):
+def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
     """Combina os dados econômicos DNIT de vários cenários (sentidos): a simulação
     roda sobre os dois juntos (necessidade total = soma) e `per_sentido` traz a
     necessidade de cada um para o comparativo. Segmentos deslocados (2 camadas)."""
@@ -3679,7 +3750,7 @@ def _combined_dnit_economic_data(road, keys, labels):
     n = len(keys)
     zona_colors = zona_order = ano_base = None
     for i, k in enumerate(keys):
-        d = get_dnit_economic_data(road, scenario_key=k)
+        d = get_dnit_economic_data(road, scenario_key=k, year=year)
         if not d.get("available"):
             continue
         t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
@@ -3714,19 +3785,24 @@ def _combined_dnit_economic_data(road, keys, labels):
     }
 
 
-def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
+def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_year: int | None) -> None:
     """Cenário econômico DNIT — usa orçamentos gravados em analise_gerencial_orcamentos
     e priorização IRI+IGG. Espelha estrutura visual do Paragon."""
-    st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
-    _dnit_keys, _dnit_labels = _solutions_sentido_keys(
-        road, scenario_key, widget_key="dnit_eco_scen", matrix_type="Matriz Cadastrada"
-    )
+    _dnit_keys = [str(key) for key in scenario_keys if key]
+    if not _dnit_keys:
+        st.info("Selecione ao menos um cenário para continuar.")
+        return
+    scenario_scope_key = f"{road}:{'|'.join(_dnit_keys)}:{selected_year if selected_year is not None else 'all'}"
     _dnit_multi = len(_dnit_keys) >= 2
     if _dnit_multi:
-        data = _combined_dnit_economic_data(road, _dnit_keys, _dnit_labels)
+        _dnit_labels = {
+            str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
+            for s in get_available_scenarios(road, "Matriz Cadastrada")
+        }
+        data = _combined_dnit_economic_data(road, _dnit_keys, _dnit_labels, year=selected_year)
     else:
-        _dkey = _dnit_keys[0] if _dnit_keys else scenario_key
-        data = get_dnit_economic_data(road, _dkey)
+        _dkey = _dnit_keys[0]
+        data = get_dnit_economic_data(road, _dkey, year=selected_year)
     if not data.get("available") or data.get("table") is None or data["table"].empty:
         disponiveis = get_dnit_available_roads()
         if disponiveis:
@@ -3747,7 +3823,7 @@ def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
     budget_items = data["budget_items"]
     total_need = float(table["Custo estimado"].sum())
 
-    annual_budget, horizon, prio_max = _render_dnit_economic_controls(total_need, scenario_key)
+    annual_budget, horizon, prio_max = _render_dnit_economic_controls(total_need, scenario_scope_key)
 
     # Limita budget_items ao horizonte selecionado a partir do ano-base.
     ano_base = int(data.get("ano_base") or 2027)
@@ -3877,7 +3953,7 @@ def _render_dnit_economic_page(road: str, scenario_key: str) -> None:
 
     zona_colors = data.get("zona_colors") or {}
     _render_work_plan_button(
-        scenario_key=scenario_key,
+        scenario_key=scenario_scope_key,
         road=road,
         scenario_label="Matriz Revitaliza DNIT/RO",
         annual_budget=annual_budget,
@@ -8237,15 +8313,17 @@ def main() -> None:
         if diagnosis == "Comparativo Paragon × DNIT":
             _render_comparativo_page(selected_road, scenario_key)
             return
-        if diagnosis == "Diagnóstico DNIT":
-            _render_dnit_economic_page(selected_road, scenario_key)
-            return
         st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
-        _eco_keys, _eco_labels = _solutions_sentido_keys(
-            selected_road, scenario_key, widget_key="eco_scen"
+        _eco_keys, _eco_labels, selected_year = _render_economic_master_filters(
+            selected_road,
+            matrix_type="Matriz Cadastrada" if diagnosis == "Diagnóstico DNIT" else "Paragon",
+            widget_prefix="dnit_eco" if diagnosis == "Diagnóstico DNIT" else "eco",
         )
+        if diagnosis == "Diagnóstico DNIT":
+            _render_dnit_economic_page(selected_road, _eco_keys, selected_year)
+            return
         if len(_eco_keys) >= 2:
-            _ec = _combined_economic_data(selected_road, _eco_keys, _eco_labels)
+            _ec = _combined_economic_data(selected_road, _eco_keys, _eco_labels, year=selected_year)
             _render_economic_comparison(_ec["per_sentido"])
             _render_economic_page(
                 _ec["table"],
@@ -8253,11 +8331,11 @@ def main() -> None:
                 _ec["segments"],
                 scenario_key=f"{selected_road}:multi",
                 road=selected_road,
-                scenario_label="Paragon · CR + DE",
+                scenario_label="Paragon · múltiplos cenários",
             )
         else:
             _ekey = _eco_keys[0] if _eco_keys else scenario_key
-            data = get_solutions_data(selected_road, scenario_key=_ekey)
+            data = get_solutions_data(selected_road, scenario_key=_ekey, year=selected_year)
             scenario_label = get_scenario_label(selected_road, _ekey) or "Paragon"
             _render_economic_page(
                 data["table"],
