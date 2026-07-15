@@ -19,6 +19,55 @@ import streamlit.components.v1 as components
 from components.maps.streetview import SV_CSS, SV_MODAL_HTML, sv_init_js, road_from_sre, clean
 
 
+def _render_empty_dnit_map(message: str) -> None:
+    """Mantém o espaço do mapa DNIT visível mesmo sem segmentos."""
+    empty_html = Template(
+        """
+        <!doctype html>
+        <html lang="pt-BR">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+          <style>
+            html, body { margin: 0; padding: 0; background: #061018; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+            .map-card { position: relative; height: 456px; border-radius: 14px; overflow: hidden; background: #0b1d28; border: 1px solid #1d3848; }
+            #map { height: 100%; width: 100%; }
+            .empty-note {
+              position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+              z-index: 720; min-width: 280px; max-width: 420px; padding: 14px 16px;
+              border-radius: 12px; border: 1px solid rgba(148,163,184,.20);
+              background: rgba(7,17,25,.88); color: #dbe5ec; text-align: center;
+              box-shadow: 0 18px 40px rgba(0,0,0,.34); font-size: 13px; line-height: 1.45;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="map-card">
+            <div id="map"></div>
+            <div class="empty-note">$message</div>
+          </div>
+          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+          <script>
+            const map = L.map('map', { zoomControl: false, attributionControl: true, scrollWheelZoom: true });
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+              maxZoom: 22,
+              maxNativeZoom: 17,
+              attribution: 'Tiles &copy; Esri'
+            }).addTo(map);
+            map.setView([-10.9, -63.3], 6);
+          </script>
+        </body>
+        </html>
+        """
+    )
+    components.html(
+        empty_html.substitute(message=message),
+        height=456,
+        scrolling=False,
+    )
+
+
 def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: list | None = None) -> None:
     """Mapa DNIT colorido pela intervenção da matriz (faixas de cor da matriz CBUQ).
 
@@ -27,10 +76,10 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
       (iri, igg, matriz_categoria, matriz_color; opcionalmente solucao_grupo).
     - zona_colors: mapa categoria->cor hex para a legenda (fallback #fff200).
     - zona_order: ordem das zonas do pior IRI ao melhor, usada para ordenar a legenda.
-    Sai cedo com st.info se faltar dados ou geometria real.
+    Mantém o card do mapa visível mesmo sem dados, usando uma base vazia com aviso discreto.
     """
     if segments_df is None or segments_df.empty:
-        st.info("Sem segmentos de IRI/IGG para exibir no mapa.")
+        _render_empty_dnit_map("Sem segmentos de IRI/IGG para desenhar neste filtro.")
         return
 
     cols = [
@@ -38,7 +87,7 @@ def render_dnit_map(segments_df, zona_colors: dict | None = None, zona_order: li
         "iri", "igg", "matriz_categoria", "matriz_color", "paths",
     ]
     if not set(cols).issubset(set(segments_df.columns)):
-        st.info("Sem geometria real para exibir no mapa.")
+        _render_empty_dnit_map("Sem geometria disponível para desenhar neste filtro.")
         return
 
     df = segments_df.copy()

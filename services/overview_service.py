@@ -222,15 +222,12 @@ def _classify_iap(value: Any) -> str:
 
 
 def _classify_iap_for_map(value: Any, intervention: str | None) -> str:
-    """Classe usada para COLORIR o mapa/diagrama. README §11.5.
+    """Classe usada no mapa/diagrama, derivada diretamente do IAP numérico.
 
-    Se o trecho tem solução corretiva, a cor vem do CONCEITO da solução
-    (_IAP_INTERVENTION_TO_CLASS), não do IAP numérico — é a regra real (um REC com
-    iapa 2.25 vira "Péssimo", não "- Regular"). Sem solução, cai no _classify_iap.
+    Mantido como fachada para preservar chamadas existentes no projeto.
+    A solução recomendada continua existindo como informação separada, mas não
+    define mais a classe visual do trecho.
     """
-    if intervention in _IAP_INTERVENTION_TO_CLASS:
-        return _IAP_INTERVENTION_TO_CLASS[intervention]
-
     return _classify_iap(value)
 
 
@@ -457,15 +454,63 @@ def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") ->
     return _get_iap_scenarios_from_database(code, matrix_type)
 
 
+def get_available_years(
+    selected_road: str | None,
+    matrix_type: str = "Paragon",
+    scenario_key: str | None = None,
+) -> list[int]:
+    """Lista os anos disponíveis para a rodovia/cenário informado.
+
+    A lista é buscada no ciclo resolvido para o cenário selecionado. Se não houver
+    cenário explícito, usa o cenário default da metodologia pedida.
+    """
+    code = _normalize_road_code(selected_road)
+    if not code:
+        return []
+
+    db = MySQLConnection()
+    if matrix_type == "Matriz Cadastrada":
+        analysis = _get_dnit_analysis_for_road(code, scenario_key)
+        if not analysis:
+            return []
+        rows = db.execute_query(
+            """
+            SELECT DISTINCT ano
+            FROM analise_gerencial_intervencoes_dnit
+            WHERE gerencial_ciclo_id = %s
+              AND ano IS NOT NULL
+            ORDER BY ano
+            """,
+            (analysis["ciclo_id"],),
+        ) or []
+    else:
+        scenario = _get_iap_scenario_by_key(code, scenario_key) or _get_default_iap_scenario(db, code)
+        if not scenario:
+            return []
+        rows = db.execute_query(
+            """
+            SELECT DISTINCT ano
+            FROM analise_gerencial_intervencoes_iap
+            WHERE gerencial_ciclo_id = %s
+              AND ano IS NOT NULL
+            ORDER BY ano
+            """,
+            (scenario["ciclo_id"],),
+        ) or []
+
+    return [int(row["ano"]) for row in rows if row.get("ano") is not None]
+
+
 def get_iap_extraction(
     selected_road: str,
     year: int | None = None,
     scenario_key: str | None = None,
 ) -> dict[str, Any] | None:
-    """Extrai IAP médio e composição IAP para uso nas telas do relatório.
+    """Extrai IAP médio, composição por solução e distribuição por classe IAP.
 
-    A composição replica o relatório Paragon: agrupa por solucao_corretiva_final
-    e calcula o percentual somente sobre os trechos com intervenção final.
+    A extração devolve duas leituras diferentes:
+    - `composition`: agrupamento por solução corretiva final;
+    - `class_distribution`: agrupamento por classe derivada do IAP numérico.
     """
     code = _normalize_road_code(selected_road)
     if not code:
@@ -487,7 +532,8 @@ def _get_iap_extraction_from_database(
       1) médias/totais (iap médio ponderado por extensão, km/percentual crítico);
       2) composição por solução corretiva final (% sobre trechos com intervenção);
       3) distribuição por classe de conceito IAP (via CASE WHEN em SQL).
-    Retorna dict com métricas + composição + distribuição, ou None se não houver dados.
+    Retorna dict com métricas + composição por solução + distribuição por classe,
+    ou None se não houver dados.
     """
     db = MySQLConnection()
     scenario = _get_iap_scenario_by_key(road_code, scenario_key) or _get_default_iap_scenario(db, road_code)
@@ -502,8 +548,8 @@ def _get_iap_extraction_from_database(
             return None
 
     # Médias/totais: IAP médio ponderado pela extensão (iapa vem ×100 -> /100); km
-    # crítico = extensão com solução 'RPS+REF'/'REC'; % crítico = km crítico sobre o
-    # km com QUALQUER intervenção (NULLIF evita divisão por zero); extensão e nº seg.
+    # crítico = extensão com solução 'RPS+REF'/'REC'; % crítico = km crítico sobre a
+    # EXTENSÃO TOTAL do recorte; extensão e nº seg.
     averages = db.execute_query(
         """
         SELECT
@@ -511,7 +557,7 @@ def _get_iap_extraction_from_database(
           ROUND(SUM(CASE WHEN i.solucao_corretiva_final IN ('RPS+REF', 'REC') THEN sp.extensao ELSE 0 END), 2) AS critical_km,
           ROUND(
             SUM(CASE WHEN i.solucao_corretiva_final IN ('RPS+REF', 'REC') THEN sp.extensao ELSE 0 END)
-            / NULLIF(SUM(CASE WHEN i.solucao_corretiva_final IS NOT NULL THEN sp.extensao ELSE 0 END), 0) * 100,
+            / NULLIF(SUM(sp.extensao), 0) * 100,
             1
           ) AS critical_percent,
           ROUND(SUM(sp.extensao), 2) AS total_km,
@@ -621,7 +667,7 @@ def _get_iap_extraction_from_database(
         "total_km": _to_float(average.get("total_km")),
         "critical_km": _to_float(average.get("critical_km")),
         "critical_percent": _to_float(average.get("critical_percent")),
-        "critical_rule": "SUM(extensao) where solucao_corretiva_final in ('RPS+REF', 'REC') over intervention total",
+        "critical_rule": "SUM(extensao) where solucao_corretiva_final in ('RPS+REF', 'REC') over total extension",
         "segmentos": int(average.get("segmentos") or 0),
         "composition": composition,
         "class_distribution": class_distribution,
@@ -639,7 +685,7 @@ def _get_iap_map_segments_from_database(
     Junta o IAP/solução de cada segmento (intervencoes_iap) com a geometria
     reconstruída a partir dos pontos do levantamento IRI (principal_levantamentos),
     e devolve um DataFrame com paths simplificados prontos para o mapa. Cada linha
-    traz iap, classe/cor por solução (_classify_iap_for_map) e a polyline do trecho.
+    traz iap, classe/cor derivada do valor numérico e a polyline do trecho.
     """
     db = MySQLConnection()
 
@@ -705,12 +751,12 @@ def _get_iap_map_segments_from_database(
         """
         SELECT pt.km_inicial AS km, ST_AsText(pt.geometria) AS wkt
         FROM principal_levantamentos pt
-        WHERE pt.levantamento_importacao_id = (
-            SELECT MIN(li.id) FROM levantamento_importacoes li
+        WHERE pt.levantamento_importacao_id IN (
+            SELECT li.id FROM levantamento_importacoes li
             WHERE li.nome_arquivo LIKE CONCAT('BR-', %s, '%%IRI%%')
           )
           AND pt.rodovia = %s
-        ORDER BY pt.km_inicial
+        ORDER BY pt.km_inicial, pt.levantamento_importacao_id
         """,
         (rodovia, rodovia),
     ) or []
@@ -783,7 +829,7 @@ def _get_linear_diagram_segments_from_database(
     ICDE e o IAP, já classificados e com cor. Lê intervencoes_iap × segmento_pistas.
 
     Retorna DataFrame com um registro por segmento (ordenado por km), cada índice
-    com sua classe (_classify_condition) e cor, além da classe/cor de IAP por solução.
+    com sua classe (_classify_condition) e cor, além da classe/cor de IAP pelo valor numérico.
     """
     db = MySQLConnection()
     # `codigo` = SNV/SRE via subquery correlata pelo range de km (mesmo padrão dos
@@ -1220,7 +1266,11 @@ def _get_available_roads_from_database() -> list[str]:
     return sorted(roads_by_code.values(), key=_road_sort_key)
 
 
-def get_overview_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_overview_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Monta os dados fake da tela de visão geral.
 
     O contrato já separa métricas, segmentos e distribuição para facilitar a
@@ -1228,7 +1278,7 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
     """
     road = selected_road or get_available_roads()[0]
 
-    iap_extraction = get_iap_extraction(road, scenario_key=scenario_key)
+    iap_extraction = get_iap_extraction(road, year=year, scenario_key=scenario_key)
     # Métricas reais vêm da extração; os literais são fallback de DEMONSTRAÇÃO usados
     # só quando não há extração (rodovia sem cenário) — remover na v2.
     iap_average = iap_extraction["iap_medio"] if iap_extraction else 3.66
@@ -1240,6 +1290,7 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
     metrics = {
         "road": road,
         "uf": _extract_uf_from_road_label(road),
+        "ano": iap_extraction["ano"] if iap_extraction else None,
         "segment_count": segment_count,
         "extension_km": extension_km,
         "critical_km": critical_km,
@@ -1261,7 +1312,7 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
         {
             "title": "% TRECHOS CRÍTICOS",
             "value": f"{critical_percent:.1f}%",
-            "subtitle": "Mau + Péssimo",
+            "subtitle": "Percentual da extensão total em Mau + Péssimo",
             "tone": "red",
             "icon": "△",
         },
@@ -1296,15 +1347,18 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
         segments = pd.DataFrame()
         linear_diagram = pd.DataFrame()
 
-    if iap_extraction and iap_extraction["composition"]:
-        distribution = pd.DataFrame(iap_extraction["composition"])
+    if iap_extraction and iap_extraction["class_distribution"]:
+        distribution = pd.DataFrame(iap_extraction["class_distribution"])
     else:
-        # Distribuição FAKE de demonstração (sem extração real). Remover na v2.
+        # Distribuição FAKE de demonstração por classe IAP (sem extração real). Remover na v2.
         distribution = pd.DataFrame(
             [
-                {"classe": "RL+RS", "km": 51.16, "percentual": 38.2, "color": _IAP_INTERVENTION_COLORS["RL+RS"]},
-                {"classe": "RPS", "km": 81.18, "percentual": 60.7, "color": _IAP_INTERVENTION_COLORS["RPS"]},
-                {"classe": "REC", "km": 1.50, "percentual": 1.1, "color": _IAP_INTERVENTION_COLORS["REC"]},
+                {"classe": "Excelente", "km": 22.60, "percentual": 25.1, "color": _IAP_CLASS_COLORS["Excelente"]},
+                {"classe": "Bom", "km": 31.40, "percentual": 34.9, "color": _IAP_CLASS_COLORS["Bom"]},
+                {"classe": "++ Regular", "km": 18.10, "percentual": 20.1, "color": _IAP_CLASS_COLORS["++ Regular"]},
+                {"classe": "- Regular", "km": 10.30, "percentual": 11.4, "color": _IAP_CLASS_COLORS["- Regular"]},
+                {"classe": "Mau", "km": 5.40, "percentual": 6.0, "color": _IAP_CLASS_COLORS["Mau"]},
+                {"classe": "Péssimo", "km": 2.20, "percentual": 2.5, "color": _IAP_CLASS_COLORS["Péssimo"]},
             ]
         )
 
@@ -1318,7 +1372,11 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
     }
 
 
-def get_solutions_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_solutions_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Dados da página de Soluções (Paragon): geometria do mapa, tabela de soluções
     recomendadas e itens de orçamento para a rodovia/cenário.
 
@@ -1326,7 +1384,7 @@ def get_solutions_data(selected_road: str | None = None, scenario_key: str | Non
     partir da extração IAP; devolve DataFrames vazios se não houver cenário.
     """
     road = selected_road or get_available_roads()[0]
-    iap_extraction = get_iap_extraction(road, scenario_key=scenario_key)
+    iap_extraction = get_iap_extraction(road, year=year, scenario_key=scenario_key)
 
     if iap_extraction:
         segments = _get_iap_map_segments_from_database(
@@ -1555,7 +1613,11 @@ def _eval_dnit_matrix(matrix: dict, iri: float, igg: float, numero_n: float, dc:
     return []
 
 
-def get_dnit_overview_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_dnit_overview_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Dados da visão geral DNIT: segmentos com IRI e IGG classificados (faixas DNIT)."""
     road = selected_road or get_available_roads()[0]
     code = _normalize_road_code(road)
@@ -1566,9 +1628,10 @@ def get_dnit_overview_data(selected_road: str | None = None, scenario_key: str |
     # tiver matriz Cadastrada, cai no Paragon (intervencoes_iap) — comportamento anterior.
     analysis = _get_dnit_analysis_for_road(code, scenario_key)
     if analysis:
-        analise_id, ciclo_id, year = analysis["analise_id"], analysis["ciclo_id"], analysis["ano"]
+        analise_id, ciclo_id = analysis["analise_id"], analysis["ciclo_id"]
+        year = int(year if year is not None else analysis["ano"])
     else:
-        extraction = get_iap_extraction(road, scenario_key=scenario_key)
+        extraction = get_iap_extraction(road, year=year, scenario_key=scenario_key)
         if not extraction:
             return {}
         analise_id, ciclo_id, year = extraction["analise_id"], extraction["ciclo_id"], extraction["ano"]
@@ -1941,12 +2004,12 @@ def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
         """
         SELECT pt.km_inicial AS km, ST_AsText(pt.geometria) AS wkt
         FROM principal_levantamentos pt
-        WHERE pt.levantamento_importacao_id = (
-            SELECT MIN(li.id) FROM levantamento_importacoes li
+        WHERE pt.levantamento_importacao_id IN (
+            SELECT li.id FROM levantamento_importacoes li
             WHERE li.nome_arquivo LIKE CONCAT('BR-', %s, '%%IRI%%')
           )
           AND pt.rodovia = %s
-        ORDER BY pt.km_inicial
+        ORDER BY pt.km_inicial, pt.levantamento_importacao_id
         """,
         (rodovia, rodovia),
     ) or []
@@ -2460,7 +2523,11 @@ def _get_dnit_budget_items(ciclo_id: int, analise_id: int) -> pd.DataFrame:
     return pd.DataFrame(items)
 
 
-def get_dnit_economic_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_dnit_economic_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Cenário econômico DNIT — mesma shape de get_solutions_data (Paragon).
 
     Devolve table (segmentos com Custo estimado), budget_items (por seg×ano×solução)

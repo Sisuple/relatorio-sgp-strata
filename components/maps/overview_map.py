@@ -48,6 +48,56 @@ _SOLUTION_COLORS = {
 }
 
 
+def _render_empty_overview_map(message: str) -> None:
+    """Mantém o card do mapa visível mesmo sem segmentos para desenhar."""
+    empty_html = Template(
+        """
+        <!doctype html>
+        <html lang="pt-BR">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+          <style>
+            html, body { margin: 0; padding: 0; background: #061018; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+            .map-card { position: relative; height: 456px; border-radius: 14px; overflow: hidden; background: #0b1d28; border: 1px solid #1d3848; }
+            #map { height: 100%; width: 100%; }
+            .empty-note {
+              position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+              z-index: 720; min-width: 280px; max-width: 420px; padding: 14px 16px;
+              border-radius: 12px; border: 1px solid rgba(148,163,184,.20);
+              background: rgba(7,17,25,.88); color: #dbe5ec; text-align: center;
+              box-shadow: 0 18px 40px rgba(0,0,0,.34); font-size: 13px; line-height: 1.45;
+            }
+            .map-card:after { content: ""; position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,.03), inset 0 -60px 80px rgba(6,16,24,.12); }
+          </style>
+        </head>
+        <body>
+          <div class="map-card">
+            <div id="map"></div>
+            <div class="empty-note">$message</div>
+          </div>
+          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+          <script>
+            const map = L.map('map', { zoomControl: false, attributionControl: true, scrollWheelZoom: true });
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+              maxZoom: 22,
+              maxNativeZoom: 17,
+              attribution: 'Tiles &copy; Esri'
+            }).addTo(map);
+            map.setView([-10.9, -63.3], 6);
+          </script>
+        </body>
+        </html>
+        """
+    )
+    components.html(
+        empty_html.substitute(message=message),
+        height=456,
+        scrolling=False,
+    )
+
+
 def render_overview_map(
     segments_df,
     extent_km: int | float,
@@ -68,10 +118,10 @@ def render_overview_map(
     - legend_foot: rodapé customizado da legenda (senão usa o padrão do modo).
     - color_by: "iap" (cor por conceito) ou "solucao" (cor pela solução corretiva).
 
-    Sai cedo com st.info se não houver dados ou faltar geometria real.
+    Mantém o card do mapa mesmo sem dados, usando uma base vazia com aviso discreto.
     """
     if segments_df is None or segments_df.empty:
-        st.info("Sem segmentos para exibir no mapa.")
+        _render_empty_overview_map("Sem segmentos para desenhar neste filtro.")
         return
 
     # Colunas mínimas exigidas; no modo "solucao" também é preciso intervencao_iap.
@@ -81,7 +131,7 @@ def render_overview_map(
     else:
         required_columns = base_columns
     if not required_columns.issubset(set(segments_df.columns)):
-        st.info("Sem geometria real para exibir no mapa.")
+        _render_empty_overview_map("Sem geometria disponível para desenhar neste filtro.")
         return
 
     selected_cols = [

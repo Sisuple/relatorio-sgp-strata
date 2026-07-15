@@ -41,22 +41,36 @@ except Exception:
     pass
 
 _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+_REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 # Prefixo isolado por banco: v1 (sigma_dnitro) e v2/gestao (sigma_dnitro_backup)
 # dividem o mesmo Redis. Sem o nome do banco no prefixo, os caches (chaveados
 # só pelos argumentos) colidiriam e um serviço serviria dados do outro, além de
 # o flush de um zerar o cache do outro. CACHE_PREFIX explícito tem precedência.
 _CACHE_PREFIX = os.getenv("CACHE_PREFIX") or f"sgp:{os.getenv('MYSQL_DB', '')}:"
 _DEFAULT_TTL = int(os.getenv("CACHE_DEFAULT_TTL", "1800"))  # 30 min
+_REDIS_RETRY_COOLDOWN_SECONDS = int(os.getenv("REDIS_RETRY_COOLDOWN_SECONDS", "30"))
 
 _redis_client = None
 _redis_alive = False
+_redis_retry_after = 0.0
 
 
 def _connect_redis():
-    """Conecta no Redis uma vez. Em falha, marca `_redis_alive = False`."""
-    global _redis_client, _redis_alive
+    """Conecta no Redis com cooldown após falha.
+
+    Quando o Redis está fora do ar, tentar reconectar a cada uso do cache gera
+    atraso acumulado no app. Para evitar isso, depois de uma falha este módulo
+    espera alguns segundos antes de tentar de novo.
+    """
+    global _redis_client, _redis_alive, _redis_retry_after
+    if not _REDIS_ENABLED:
+        _redis_alive = False
+        return None
     if _redis_client is not None:
         return _redis_client
+    now = __import__("time").monotonic()
+    if _redis_retry_after and now < _redis_retry_after:
+        return None
     try:
         import redis
         client = redis.Redis.from_url(
@@ -68,11 +82,13 @@ def _connect_redis():
         client.ping()
         _redis_client = client
         _redis_alive = True
+        _redis_retry_after = 0.0
         logger.info(f"Cache: conectado ao Redis em {_REDIS_URL}")
     except Exception as exc:
         logger.warning(f"Cache: Redis indisponível ({exc!r}), usando lru_cache local")
         _redis_alive = False
         _redis_client = None
+        _redis_retry_after = now + _REDIS_RETRY_COOLDOWN_SECONDS
     return _redis_client
 
 
