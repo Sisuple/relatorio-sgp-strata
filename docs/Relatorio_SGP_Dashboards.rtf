@@ -1,0 +1,260 @@
+{\rtf1\ansi\deff0{\fonttbl{\f0 Calibri;}}
+\fs22
+\pard\sa180\b\fs36 Relat\u243?rio SGP - Dashboards\b0\fs22\par
+\par
+\pard\sa120 Data: 10/07/2026\par
+\pard\sa120 Uso: diagn\u243?stico inicial e guia de corre\u231?\u245?es\par
+\pard\sa120 P\u250?blico: gest\u227?o, opera\u231?\u227?o e equipe t\u233?cnica\par
+\par
+\pard\sb260\sa120\b\fs28 1. Objetivo\b0\fs22\par
+\par
+\pard\sa120 Este documento registra minha leitura inicial do dashboard SGP.\par
+\par
+\pard\sa120 A ideia \u233? separar o que j\u225? existe, o que est\u225? funcionando como prot\u243?tipo e o que precisa ser corrigido para o painel virar uma ferramenta confi\u225?vel de an\u225?lise.\par
+\par
+\pard\sa120 O dashboard tem uma proposta boa: juntar diagn\u243?stico t\u233?cnico, solu\u231?\u245?es, proje\u231?\u227?o, risco, cen\u225?rio econ\u244?mico e apoio do IAGON em uma jornada s\u243?.\par
+\par
+\pard\sa120 Mas, olhando com calma, ficou claro que algumas partes ainda estavam fr\u225?geis. N\u227?o era s\u243? quest\u227?o visual. Em v\u225?rios pontos, filtros, c\u225?lculos e mapas n\u227?o estavam totalmente alinhados.\par
+\par
+\pard\sb260\sa120\b\fs28 2. Leitura geral\b0\fs22\par
+\par
+\pard\sa120 O painel j\u225? tem bastante coisa pronta:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab conex\u227?o com banco;\par
+\pard\li360\fi-180\sa80 \bullet\tab filtros;\par
+\pard\li360\fi-180\sa80 \bullet\tab mapas;\par
+\pard\li360\fi-180\sa80 \bullet\tab gr\u225?ficos;\par
+\pard\li360\fi-180\sa80 \bullet\tab cards;\par
+\pard\li360\fi-180\sa80 \bullet\tab simula\u231?\u227?o econ\u244?mica;\par
+\pard\li360\fi-180\sa80 \bullet\tab telas para Paragon e Matriz Cadastrada;\par
+\pard\li360\fi-180\sa80 \bullet\tab m\u243?dulo IAGON.\par
+\par
+\pard\sa120 O problema \u233? que algumas regras importantes estavam misturadas ou concentradas em poucos arquivos.\par
+\par
+\pard\sa120 Tamb\u233?m encontrei situa\u231?\u245?es em que a tela parecia permitir uma an\u225?lise, mas a l\u243?gica por tr\u225?s ainda n\u227?o acompanhava completamente. O exemplo mais claro foi a separa\u231?\u227?o entre `Paragon` e `Matriz Cadastrada`: visualmente parecia s\u243? trocar o tipo de matriz, mas internamente parte da tela ainda seguia o caminho errado.\par
+\par
+\pard\sa120 Por isso, o trabalho de corre\u231?\u227?o precisa ser tratado como revis\u227?o de l\u243?gica do produto, n\u227?o s\u243? como melhoria de interface.\par
+\par
+\pard\sb260\sa120\b\fs28 3. Prioridades\b0\fs22\par
+\par
+\pard\sa120 Usei tr\u234?s n\u237?veis simples:\par
+\par
+\pard\sa120 | Prioridade | Como estou entendendo |\par
+\pard\sa120 | --- | --- |\par
+\pard\sa120 | Alta | Pode gerar leitura errada, tela sem dado falso, c\u225?lculo inconsistente ou problema para produ\u231?\u227?o. |\par
+\pard\sa120 | M\u233?dia | Melhora clareza, uso e manuten\u231?\u227?o, mas n\u227?o bloqueia tudo sozinha. |\par
+\pard\sa120 | Baixa | Melhoria desej\u225?vel, mas que pode esperar. |\par
+\par
+\pard\sb260\sa120\b\fs28 4. Vis\u227?o geral\b0\fs22\par
+\par
+\pard\sa120 A `Vis\u227?o geral` deveria ser a tela de entrada para entender rapidamente a situa\u231?\u227?o da malha.\par
+\par
+\pard\sa120 O principal problema encontrado foi que ela n\u227?o tinha todos os filtros necess\u225?rios e, em alguns casos, misturava regras de metodologias diferentes.\par
+\par
+\pard\sa120 Pontos que precisavam de aten\u231?\u227?o:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab filtro de rodovia;\par
+\pard\li360\fi-180\sa80 \bullet\tab filtro de cen\u225?rio;\par
+\pard\li360\fi-180\sa80 \bullet\tab filtro de ano;\par
+\pard\li360\fi-180\sa80 \bullet\tab filtro de tipo de matriz;\par
+\pard\li360\fi-180\sa80 \bullet\tab custo coerente com o ano selecionado;\par
+\pard\li360\fi-180\sa80 \bullet\tab mapa coerente com cen\u225?rio e pista;\par
+\pard\li360\fi-180\sa80 \bullet\tab nomes de cen\u225?rio mais curtos;\par
+\pard\li360\fi-180\sa80 \bullet\tab cuidado para n\u227?o somar pista `Todos` junto com `Crescente` ou `Decrescente`.\par
+\par
+\pard\sa120 Tamb\u233?m ficou claro que a tela precisava abrir com um recorte v\u225?lido. Quando ela abre sem ano ou sem cen\u225?rio, a leitura fica estranha e alguns n\u250?meros podem n\u227?o bater com a expectativa.\par
+\par
+\pard\sb180\sa100\b\fs24 Prioriza\u231?\u227?o\b0\fs22\par
+\par
+\pard\sa120 A regra de prioriza\u231?\u227?o tamb\u233?m merece cuidado.\par
+\par
+\pard\sa120 O dashboard atual e a refer\u234?ncia anterior do Power BI n\u227?o usam exatamente a mesma l\u243?gica.\par
+\par
+\pard\sa120 Diferen\u231?as observadas:\par
+\par
+\pard\sa120 | Ponto | Power BI | Streamlit atual |\par
+\pard\sa120 | --- | --- | --- |\par
+\pard\sa120 | \u205?ndice t\u233?cnico | usa VMDA, IRI e DEF | usa VMDA, ICDS e ICDP |\par
+\pard\sa120 | \u205?ndice econ\u244?mico | usa normaliza\u231?\u227?o logar\u237?tmica | usa normaliza\u231?\u227?o linear |\par
+\pard\sa120 | Prioriza\u231?\u227?o final | combina IPT e IPE | usa principalmente IPT reescalado |\par
+\pard\sa120 | Unidade | c\u243?digo/SNV | segmento, com SNV herdando pior trecho |\par
+\par
+\pard\sa120 Essa diferen\u231?a precisa ser validada antes de algu\u233?m tratar o ranking como \u8220?igual ao Power BI\u8221?.\par
+\par
+\pard\sb260\sa120\b\fs28 5. Diagn\u243?stico\b0\fs22\par
+\par
+\pard\sa120 A tela `Diagn\u243?stico` deve explicar a condi\u231?\u227?o do pavimento.\par
+\par
+\pard\sa120 O que precisava ser corrigido era a coer\u234?ncia entre mapa, gr\u225?ficos e filtros.\par
+\par
+\pard\sa120 No Paragon, a l\u243?gica correta \u233?:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab o valor num\u233?rico do IAP define a classe;\par
+\pard\li360\fi-180\sa80 \bullet\tab a classe ajuda a indicar a solu\u231?\u227?o;\par
+\pard\li360\fi-180\sa80 \bullet\tab mapa e distribui\u231?\u227?o precisam usar a mesma leitura.\par
+\par
+\pard\sa120 Antes, havia mistura entre conceito de condi\u231?\u227?o e solu\u231?\u227?o corretiva. Isso fazia a rosca de distribui\u231?\u227?o n\u227?o conversar bem com o mapa.\par
+\par
+\pard\sa120 Na Matriz Cadastrada, a leitura muda:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab IRI;\par
+\pard\li360\fi-180\sa80 \bullet\tab IGG;\par
+\pard\li360\fi-180\sa80 \bullet\tab deflex\u227?o;\par
+\pard\li360\fi-180\sa80 \bullet\tab solu\u231?\u245?es cadastradas.\par
+\par
+\pard\sa120 Ent\u227?o a tela precisa respeitar essa metodologia e n\u227?o reaproveitar regra do Paragon como se fosse igual.\par
+\par
+\pard\sa120 Tamb\u233?m foi identificado que, ao selecionar mais de um cen\u225?rio, os diagramas lineares n\u227?o deveriam misturar os dados. O ideal \u233? escolher qual cen\u225?rio alimenta o diagrama.\par
+\par
+\pard\sb260\sa120\b\fs28 6. Solu\u231?\u245?es\b0\fs22\par
+\par
+\pard\sa120 A tela `Solu\u231?\u245?es` precisa focar nos trechos que realmente t\u234?m interven\u231?\u227?o.\par
+\par
+\pard\sa120 Pontos importantes:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab filtros devem depender do recorte escolhido;\par
+\pard\li360\fi-180\sa80 \bullet\tab `SRE`, conceito/faixa e tipo de solu\u231?\u227?o precisam conversar entre si;\par
+\pard\li360\fi-180\sa80 \bullet\tab se um SRE n\u227?o tem certa solu\u231?\u227?o, essa solu\u231?\u227?o n\u227?o deve aparecer como op\u231?\u227?o v\u225?lida;\par
+\pard\li360\fi-180\sa80 \bullet\tab quando n\u227?o houver interven\u231?\u227?o, a tela deve avisar claramente.\par
+\par
+\pard\sa120 Tamb\u233?m \u233? importante separar Paragon e Matriz Cadastrada:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab no Paragon, a solu\u231?\u227?o vem da l\u243?gica ligada ao IAP;\par
+\pard\li360\fi-180\sa80 \bullet\tab na Matriz, a solu\u231?\u227?o vem da matriz cadastrada, ligada a IRI/IGG/deflex\u227?o.\par
+\par
+\pard\sb260\sa120\b\fs28 7. Comparativo entre cen\u225?rios\b0\fs22\par
+\par
+\pard\sa120 O comparativo n\u227?o deveria ficar escondido dentro de `Cen\u225?rio econ\u244?mico`.\par
+\par
+\pard\sa120 Ele \u233? uma an\u225?lise pr\u243?pria.\par
+\par
+\pard\sa120 O desenho mais correto \u233? ter uma tela separada, com:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab Compara\u231?\u227?o A;\par
+\pard\li360\fi-180\sa80 \bullet\tab Compara\u231?\u227?o B;\par
+\pard\li360\fi-180\sa80 \bullet\tab tipo de matriz em cada lado;\par
+\pard\li360\fi-180\sa80 \bullet\tab um ou mais cen\u225?rios em cada lado;\par
+\pard\li360\fi-180\sa80 \bullet\tab mapas lado a lado;\par
+\pard\li360\fi-180\sa80 \bullet\tab resumo econ\u244?mico comparativo.\par
+\par
+\pard\sa120 Isso permite comparar:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab Paragon contra Matriz;\par
+\pard\li360\fi-180\sa80 \bullet\tab Paragon contra Paragon;\par
+\pard\li360\fi-180\sa80 \bullet\tab Matriz contra Matriz;\par
+\pard\li360\fi-180\sa80 \bullet\tab dois conjuntos de cen\u225?rios.\par
+\par
+\pard\sa120 Tamb\u233?m \u233? importante impedir compara\u231?\u227?o do mesmo recorte contra ele mesmo, porque isso n\u227?o agrega informa\u231?\u227?o.\par
+\par
+\pard\sb260\sa120\b\fs28 8. Cen\u225?rio econ\u244?mico\b0\fs22\par
+\par
+\pard\sa120 A tela `Cen\u225?rio econ\u244?mico` deve analisar uma metodologia por vez.\par
+\par
+\pard\sa120 Ela precisa deixar claro:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab qual cen\u225?rio est\u225? sendo avaliado;\par
+\pard\li360\fi-180\sa80 \bullet\tab qual horizonte est\u225? sendo usado;\par
+\pard\li360\fi-180\sa80 \bullet\tab se o c\u225?lculo \u233? acumulado ou apenas do ano selecionado;\par
+\pard\li360\fi-180\sa80 \bullet\tab qual or\u231?amento foi considerado;\par
+\pard\li360\fi-180\sa80 \bullet\tab o que foi atendido e o que ficou de fora.\par
+\par
+\pard\sa120 O filtro de `Horizonte` deve trabalhar com anos reais da base, e n\u227?o com um intervalo fixo.\par
+\par
+\pard\sa120 Tamb\u233?m faz sentido mostrar:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab custo por ano;\par
+\pard\li360\fi-180\sa80 \bullet\tab custo por solu\u231?\u227?o;\par
+\pard\li360\fi-180\sa80 \bullet\tab cronograma por segmento;\par
+\pard\li360\fi-180\sa80 \bullet\tab mapa com o que cabe ou n\u227?o cabe no or\u231?amento.\par
+\par
+\pard\sa120 Quando houver mais de um cen\u225?rio, a tela deve mostrar o total geral e a abertura por cen\u225?rio sem poluir o layout.\par
+\par
+\pard\sb260\sa120\b\fs28 9. Proje\u231?\u227?o\b0\fs22\par
+\par
+\pard\sa120 A tela de `Proje\u231?\u227?o` precisa ser tratada com cuidado porque ela sugere futuro.\par
+\par
+\pard\sa120 O painel deve deixar claro:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab qual regra de evolu\u231?\u227?o est\u225? sendo usada;\par
+\pard\li360\fi-180\sa80 \bullet\tab se a curva \u233? estimativa;\par
+\pard\li360\fi-180\sa80 \bullet\tab qual interven\u231?\u227?o influencia a proje\u231?\u227?o;\par
+\pard\li360\fi-180\sa80 \bullet\tab quais dados est\u227?o sustentando aquela leitura.\par
+\par
+\pard\sa120 Sem isso, o usu\u225?rio pode interpretar a proje\u231?\u227?o como certeza, quando ela depende da qualidade dos dados e das premissas.\par
+\par
+\pard\sb260\sa120\b\fs28 10. IAGON\b0\fs22\par
+\par
+\pard\sa120 O IAGON \u233? \u250?til como apoio de interpreta\u231?\u227?o, mas depende de configura\u231?\u227?o externa.\par
+\par
+\pard\sa120 Pontos importantes:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab precisa de chave da API da OpenAI;\par
+\pard\li360\fi-180\sa80 \bullet\tab essa chave deve ser corporativa, n\u227?o pessoal;\par
+\pard\li360\fi-180\sa80 \bullet\tab precisa estar no `.env`, n\u227?o no c\u243?digo;\par
+\pard\li360\fi-180\sa80 \bullet\tab o usu\u225?rio precisa entender que o IAGON apoia a an\u225?lise, mas n\u227?o substitui valida\u231?\u227?o t\u233?cnica.\par
+\par
+\pard\sa120 Tamb\u233?m \u233? importante registrar quais arquivos de apoio e contexto o IAGON usa, para n\u227?o quebrar quando o projeto for instalado em outro ambiente.\par
+\par
+\pard\sb260\sa120\b\fs28 11. Google Maps e Street View\b0\fs22\par
+\par
+\pard\sa120 O mapa anal\u237?tico principal n\u227?o depende da chave do Google.\par
+\par
+\pard\sa120 A chave do Google \u233? usada para Street View.\par
+\par
+\pard\sa120 Mesmo com chave preenchida, o recurso pode falhar se:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab a API correta n\u227?o estiver habilitada;\par
+\pard\li360\fi-180\sa80 \bullet\tab n\u227?o houver faturamento ativo;\par
+\pard\li360\fi-180\sa80 \bullet\tab a chave n\u227?o permitir o dom\u237?nio/local onde o painel est\u225? rodando;\par
+\pard\li360\fi-180\sa80 \bullet\tab a restri\u231?\u227?o da chave estiver errada.\par
+\par
+\pard\sa120 Ent\u227?o n\u227?o basta \u8220?ter a chave\u8221?. Precisa validar a configura\u231?\u227?o no Google Cloud.\par
+\par
+\pard\sb260\sa120\b\fs28 12. Pontos estruturais\b0\fs22\par
+\par
+\pard\sa120 O projeto ainda concentra muita coisa no `app.py`.\par
+\par
+\pard\sa120 Isso funciona para prot\u243?tipo, mas dificulta manuten\u231?\u227?o quando as regras crescem.\par
+\par
+\pard\sa120 O ideal \u233? evoluir aos poucos para:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab telas mais separadas;\par
+\pard\li360\fi-180\sa80 \bullet\tab servi\u231?os cuidando de regra e consulta;\par
+\pard\li360\fi-180\sa80 \bullet\tab componentes cuidando s\u243? da apresenta\u231?\u227?o;\par
+\pard\li360\fi-180\sa80 \bullet\tab regras de classifica\u231?\u227?o centralizadas;\par
+\pard\li360\fi-180\sa80 \bullet\tab testes para c\u225?lculos importantes.\par
+\par
+\pard\sa120 Essa organiza\u231?\u227?o n\u227?o precisa acontecer toda de uma vez, mas precisa ser considerada para produ\u231?\u227?o.\par
+\par
+\pard\sb260\sa120\b\fs28 13. Riscos se n\u227?o corrigir\b0\fs22\par
+\par
+\pard\sa120 Os principais riscos s\u227?o:\par
+\par
+\pard\li360\fi-180\sa80 \bullet\tab usu\u225?rio confiar em n\u250?mero de recorte errado;\par
+\pard\li360\fi-180\sa80 \bullet\tab filtro mostrar op\u231?\u227?o que n\u227?o pertence ao cen\u225?rio;\par
+\pard\li360\fi-180\sa80 \bullet\tab mapa e gr\u225?fico contarem hist\u243?rias diferentes;\par
+\pard\li360\fi-180\sa80 \bullet\tab Paragon e Matriz Cadastrada se misturarem;\par
+\pard\li360\fi-180\sa80 \bullet\tab dificuldade para implantar em outro ambiente;\par
+\pard\li360\fi-180\sa80 \bullet\tab depend\u234?ncia demais de quem conhece o c\u243?digo hoje;\par
+\pard\li360\fi-180\sa80 \bullet\tab retrabalho sempre que a base mudar.\par
+\par
+\pard\sb260\sa120\b\fs28 14. Pr\u243?ximos passos recomendados\b0\fs22\par
+\par
+\pard\sa120 Minha sugest\u227?o de caminho:\par
+\par
+\pard\sa120 1. estabilizar filtros, mapas e c\u225?lculos principais;\par
+\pard\sa120 2. validar as regras de prioriza\u231?\u227?o com a \u225?rea respons\u225?vel;\par
+\pard\sa120 3. separar melhor Paragon e Matriz Cadastrada;\par
+\pard\sa120 4. padronizar legenda, cores e nomes;\par
+\pard\sa120 5. validar a tela econ\u244?mica com exemplos conhecidos;\par
+\pard\sa120 6. documentar as regras que forem aprovadas;\par
+\pard\sa120 7. s\u243? depois pensar em refatora\u231?\u227?o maior.\par
+\par
+\pard\sb260\sa120\b\fs28 15. Conclus\u227?o\b0\fs22\par
+\par
+\pard\sa120 O painel tem uma base \u250?til, mas ainda precisava de bastante ajuste para ser confi\u225?vel.\par
+\par
+\pard\sa120 A maior parte do trabalho n\u227?o \u233? simplesmente \u8220?deixar bonito\u8221?. \u201? fazer as telas conversarem entre si, garantir que os filtros realmente mudem os dados certos e evitar que o usu\u225?rio tome decis\u227?o olhando um recorte errado.\par
+\par
+\pard\sa120 O caminho mais seguro \u233? corrigir por partes, validar cada regra com dados reais e manter a documenta\u231?\u227?o simples o suficiente para qualquer pessoa entender o que foi feito.\par
+}

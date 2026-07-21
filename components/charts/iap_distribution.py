@@ -43,10 +43,14 @@ def _donut_percent_labels(distribution_df) -> str:
     cursor = 0.0  # posição angular acumulada, em % (0..100)
     labels = []
     donut_center_px = 95   # centro do donut em px (metade do tamanho do elemento)
-    label_radius_px = 116  # raio onde os rótulos são colocados (fora do anel)
+    label_radius_px = 108  # raio onde os rótulos são colocados (fora do anel)
+    min_visible_percent = 3.0  # fatias muito pequenas ficam só na legenda
 
     for row in distribution_df.to_dict("records"):
         percent = float(row["percentual"])
+        if percent < min_visible_percent:
+            cursor += percent / total * 100
+            continue
         normalized_percent = percent / total * 100
         # Ângulo do MEIO da fatia; *3.6 converte % (0..100) em graus (0..360).
         middle_angle = (cursor + normalized_percent / 2) * 3.6

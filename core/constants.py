@@ -42,16 +42,16 @@ MENU_ITEMS = [
         "icon": "tool",
     },
     {
+        "key": "comparativo",
+        "label": "Comparativo entre cenários",
+        "description": "Compare recortes e metodologias",
+        "icon": "compare",
+    },
+    {
         "key": "cenario",
         "label": "Cenário econômico",
         "description": "Quanto custa e o que evita?",
         "icon": "scale",
-    },
-    {
-        "key": "projecao",
-        "label": "Projeção",
-        "description": "Como evoluirá no tempo?",
-        "icon": "trend",
     },
     {
         "key": "risco",

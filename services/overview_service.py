@@ -22,10 +22,7 @@ doc docs/06 (requisitos-regras-negocio-v2). A v2 propõe migrar isso para tabela
 rel_* no banco.
 
 ATENÇÃO — pontos frágeis já conhecidos (marcados ao longo do arquivo):
-  - a classificação de IAP existe DUPLICADA: em Python (`_classify_iap`) e em SQL
-    (CASE WHEN em `_get_iap_extraction_from_database`) — manter os dois em sincronia;
-  - `get_overview_data` ainda carrega valores fake/fallback de demonstração
-    (plan_cost_mi=51.8, last_update_minutes=12, distribuição fallback) — remover na v2.
+  - a classificação de IAP depende da tabela de conversão do código `iapa`;
 """
 
 from __future__ import annotations
@@ -34,6 +31,7 @@ import re
 import json
 import bisect
 import math
+import os
 from functools import lru_cache
 from typing import Any
 
@@ -194,20 +192,216 @@ def _to_float(value: Any, fallback: float = 0.0) -> float:
     return float(value)
 
 
+def _parse_vmda_payload(payload: Any) -> dict[str, Any]:
+    """Extrai VMDL/VMDP do JSON da view de tráfego.
+
+    Regra adotada:
+    - VMDL = passeio;
+    - VMDP = soma de 2 a 9 eixos.
+    """
+    try:
+        data = json.loads(payload) if isinstance(payload, str) else (payload or {})
+    except (TypeError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    vmdl = _to_float(data.get("passeio"), fallback=0.0)
+    vmdp = sum(
+        _to_float(data.get(axis), fallback=0.0)
+        for axis in ("2eixos", "3eixos", "4eixos", "5eixos", "6eixos", "7eixos", "8eixos", "9eixos")
+    )
+    return {
+        "vmdl": vmdl,
+        "vmdp": vmdp,
+        "segmento_trafego": data.get("segmento_trafego"),
+        "ano_base": data.get("ano_base"),
+    }
+
+
+def _get_vmda_traffic_by_road(roads: set[Any]) -> dict[str, list[dict[str, Any]]]:
+    """Busca os trechos de tráfego da view_vmda_67 e agrupa por rodovia."""
+    road_codes = sorted({code for road in roads if (code := _normalize_road_code(road))})
+    if not road_codes:
+        return {}
+    placeholders = ", ".join(["%s"] * len(road_codes))
+    db = MySQLConnection()
+    rows = db.execute_query(
+        f"""
+        SELECT rodovia, trecho, km_inicial, km_final, extensao, dados
+        FROM view_vmda_67
+        WHERE rodovia IN ({placeholders})
+        ORDER BY rodovia, km_inicial, km_final
+        """,
+        tuple(road_codes),
+    ) or []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        code = _normalize_road_code(row.get("rodovia")) or ""
+        traffic = _parse_vmda_payload(row.get("dados"))
+        grouped.setdefault(code, []).append(
+            {
+                "trecho": row.get("trecho"),
+                "km_inicial": _to_float(row.get("km_inicial")),
+                "km_final": _to_float(row.get("km_final")),
+                "extensao": _to_float(row.get("extensao")),
+                **traffic,
+            }
+        )
+    return grouped
+
+
+def _match_vmda_traffic(traffic_rows: list[dict[str, Any]], km_inicial: float, km_final: float) -> dict[str, Any] | None:
+    """Encontra o trecho de tráfego que contém o segmento de pavimento.
+
+    A regra de borda fica naturalmente respeitada:
+    - segmento que termina no km 12 ainda cabe no trecho 0-12;
+    - segmento que começa no km 12 e termina depois usa o trecho 12-x.
+    """
+    eps = 1e-6
+    matches = [
+        row
+        for row in traffic_rows
+        if float(row["km_inicial"]) <= km_inicial + eps and float(row["km_final"]) >= km_final - eps
+    ]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda row: (float(row.get("extensao") or 0.0), -float(row["km_inicial"])))[0]
+
+
 # ============================================================================
 # HELPERS DE CLASSIFICAÇÃO (IAP, condição ICDS/ICDP/ICDE) — README §12
 # ============================================================================
 
 
-def _classify_iap(value: Any) -> str:
-    """IAP numérico (campo `iapa`, gravado ×100) -> classe de conceito. README §12.1.
+_IAP_CODE_GROUPS: tuple[tuple[tuple[int, ...], float | None, str, str], ...] = (
+    (
+        (
+            111,
+            121,
+            131,
+            141,
+            151,
+            211,
+            221,
+            231,
+            241,
+            251,
+            311,
+            321,
+            331,
+            341,
+            351,
+            411,
+            421,
+            431,
+            511,
+            521,
+            531,
+            541,
+            551,
+            112,
+            122,
+            132,
+            142,
+            152,
+            212,
+            222,
+            312,
+            322,
+            412,
+            512,
+            113,
+            123,
+            213,
+            313,
+            413,
+            513,
+            114,
+            124,
+            214,
+            314,
+            414,
+            514,
+            115,
+            125,
+            215,
+            315,
+            415,
+            515,
+        ),
+        1.0,
+        "REC",
+        "Péssimo",
+    ),
+    ((232, 242, 252, 332, 422, 522, 133, 143, 153, 223, 233, 243, 253, 323, 333, 423, 523), 2.0, "RPS+REF", "Mau"),
+    ((134, 144, 154, 224, 234, 244, 254, 324, 424, 524, 135, 145, 155, 225, 235, 245, 255, 325, 425, 525), 2.5, "RPS", "- Regular"),
+    ((342, 352, 432, 532, 343, 353, 433, 533), 2.75, "RL+REF", "+ Regular"),
+    ((334, 344, 354, 434, 534, 335, 345, 355, 435, 535), 3.0, "RL+RS", "++ Regular"),
+    ((443, 453, 444, 454, 445, 455), 4.0, "RL", "Bom"),
+    ((543, 553, 544, 554, 545, 555), 5.0, "OK", "Excelente"),
+    ((441, 451, 442, 452, 542, 552), None, "CA", "CA"),
+)
 
-    ATENÇÃO: estes MESMOS limiares estão DUPLICADOS em SQL, no CASE WHEN de
-    `_get_iap_extraction_from_database` — qualquer ajuste precisa ser feito nos dois
-    lugares. Nota conhecida: esta função numérica nunca retorna "+ Regular"
-    (existe na legenda mas não tem faixa própria aqui) — ver README §12.1.
-    """
-    iap = _to_float(value) / 100
+_IAP_CODE_MAP: dict[int, dict[str, Any]] = {
+    code: {"value": value, "solution": solution, "class": class_name}
+    for codes, value, solution, class_name in _IAP_CODE_GROUPS
+    for code in codes
+}
+
+
+def _iap_code_key(value: Any) -> int | None:
+    """Normaliza o código IAP vindo do banco para procurar na tabela de conversão."""
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _iap_code_info(value: Any) -> dict[str, Any] | None:
+    """Retorna valor, solução e classe a partir do código IAP tabelado."""
+    code = _iap_code_key(value)
+    if code is None:
+        return None
+    return _IAP_CODE_MAP.get(code)
+
+
+def _iap_numeric_value(value: Any) -> float | None:
+    """Valor real do IAP. O campo `iapa` é código; só usa número direto como fallback."""
+    info = _iap_code_info(value)
+    if info is not None:
+        return info["value"]
+    try:
+        numeric = _to_float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    # Fallback para bases antigas/externas que já tragam IAP numérico real.
+    return numeric if numeric <= 10 else None
+
+
+def _iap_solution_from_code(value: Any, fallback: str | None = None) -> str | None:
+    """Solução indicada pela tabela do código IAP, preservando o banco como fallback."""
+    info = _iap_code_info(value)
+    if info is None:
+        return fallback
+    return info["solution"]
+
+
+def _classify_iap(value: Any) -> str:
+    """Código IAP (`iapa`) -> classe de conceito usando a tabela oficial do cliente."""
+    info = _iap_code_info(value)
+    if info is not None:
+        return info["class"]
+
+    iap = _iap_numeric_value(value)
+    if iap is None:
+        return "CA"
     if iap >= 4.01:
         return "Excelente"
     if iap >= 3.01:
@@ -222,15 +416,12 @@ def _classify_iap(value: Any) -> str:
 
 
 def _classify_iap_for_map(value: Any, intervention: str | None) -> str:
-    """Classe usada para COLORIR o mapa/diagrama. README §11.5.
+    """Classe usada no mapa/diagrama, derivada diretamente do IAP numérico.
 
-    Se o trecho tem solução corretiva, a cor vem do CONCEITO da solução
-    (_IAP_INTERVENTION_TO_CLASS), não do IAP numérico — é a regra real (um REC com
-    iapa 2.25 vira "Péssimo", não "- Regular"). Sem solução, cai no _classify_iap.
+    Mantido como fachada para preservar chamadas existentes no projeto.
+    A solução recomendada continua existindo como informação separada, mas não
+    define mais a classe visual do trecho.
     """
-    if intervention in _IAP_INTERVENTION_TO_CLASS:
-        return _IAP_INTERVENTION_TO_CLASS[intervention]
-
     return _classify_iap(value)
 
 
@@ -432,6 +623,322 @@ def _simplify_path(coords: list[list[float]], tolerance: float = 0.00012) -> lis
     return [coords[i] for i in range(n) if keep[i]]
 
 
+def _prefer_shape_map_geometry() -> bool:
+    """Permite voltar temporariamente para o traçado antigo por pontos de IRI."""
+    return os.getenv("MAP_GEOMETRY_SOURCE", "shape").strip().lower() != "iri"
+
+
+def _point_distance_sq(a: list[float], b: list[float]) -> float:
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+
+def _orient_shape_coords(
+    coords: list[list[float]],
+    start_lat: Any = None,
+    start_lon: Any = None,
+    end_lat: Any = None,
+    end_lon: Any = None,
+) -> list[list[float]]:
+    """Deixa a geometria na direção crescente do km quando o shape informa início/fim."""
+    if len(coords) < 2:
+        return coords
+
+    start_ref = [_to_float(start_lat, None), _to_float(start_lon, None)]
+    end_ref = [_to_float(end_lat, None), _to_float(end_lon, None)]
+    if None in start_ref or None in end_ref:
+        return coords
+
+    as_is = _point_distance_sq(coords[0], start_ref) + _point_distance_sq(coords[-1], end_ref)
+    reversed_score = _point_distance_sq(coords[-1], start_ref) + _point_distance_sq(coords[0], end_ref)
+    return list(reversed(coords)) if reversed_score < as_is else coords
+
+
+def _polyline_lengths(coords: list[list[float]]) -> tuple[list[float], float]:
+    cumulative = [0.0]
+    total = 0.0
+    for a, b in zip(coords, coords[1:]):
+        step = math.hypot(b[0] - a[0], b[1] - a[1])
+        total += step
+        cumulative.append(total)
+    return cumulative, total
+
+
+def _point_at_polyline_distance(
+    coords: list[list[float]],
+    cumulative: list[float],
+    target: float,
+) -> list[float]:
+    if target <= 0:
+        return list(coords[0])
+    if target >= cumulative[-1]:
+        return list(coords[-1])
+
+    idx = bisect.bisect_left(cumulative, target)
+    if idx <= 0:
+        return list(coords[0])
+
+    start_d = cumulative[idx - 1]
+    end_d = cumulative[idx]
+    if end_d == start_d:
+        return list(coords[idx])
+
+    ratio = (target - start_d) / (end_d - start_d)
+    a = coords[idx - 1]
+    b = coords[idx]
+    return [
+        a[0] + (b[0] - a[0]) * ratio,
+        a[1] + (b[1] - a[1]) * ratio,
+    ]
+
+
+def _slice_polyline_by_fraction(
+    coords: list[list[float]],
+    start_fraction: float,
+    end_fraction: float,
+) -> list[list[float]]:
+    """Recorta um trecho da linha mantendo a mesma forma visual do shape."""
+    if len(coords) < 2:
+        return []
+
+    start_fraction = max(0.0, min(1.0, start_fraction))
+    end_fraction = max(0.0, min(1.0, end_fraction))
+    if end_fraction <= start_fraction:
+        return []
+
+    cumulative, total = _polyline_lengths(coords)
+    if total <= 0:
+        return []
+
+    start_d = total * start_fraction
+    end_d = total * end_fraction
+    sliced = [_point_at_polyline_distance(coords, cumulative, start_d)]
+    for coord, dist in zip(coords[1:-1], cumulative[1:-1]):
+        if start_d < dist < end_d:
+            sliced.append(list(coord))
+    sliced.append(_point_at_polyline_distance(coords, cumulative, end_d))
+
+    compact: list[list[float]] = []
+    for coord in sliced:
+        if not compact or _point_distance_sq(compact[-1], coord) > 1e-16:
+            compact.append(coord)
+    return compact if len(compact) >= 2 else []
+
+
+@cached(ttl=3600)
+def _get_road_shape_rows_from_database(road_code: str | int | None) -> list[dict[str, Any]]:
+    """Carrega o eixo limpo da rodovia pela tabela pista_shape."""
+    road = _normalize_road_code(road_code)
+    if not road:
+        return []
+
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT
+          ps.codigo,
+          ps.km_inicial,
+          ps.km_final,
+          ps.lat,
+          ps.`long`,
+          ps.lat_final,
+          ps.long_final,
+          ST_AsText(ps.geometria) AS wkt
+        FROM pista_shape ps
+        WHERE ps.rodovia = %s
+          AND ps.geometria IS NOT NULL
+        ORDER BY ps.km_inicial, ps.km_final, ps.codigo
+        """,
+        (road,),
+    ) or []
+
+    shapes_by_geometry: dict[tuple[tuple[float, float], ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        km_i = _to_float(row.get("km_inicial"))
+        km_f = _to_float(row.get("km_final"))
+        coords = _parse_linestring_latlon(row.get("wkt"))
+        if len(coords) < 2 or km_i == km_f:
+            continue
+        coords = _orient_shape_coords(
+            coords,
+            row.get("lat"),
+            row.get("long"),
+            row.get("lat_final"),
+            row.get("long_final"),
+        )
+        if km_i > km_f:
+            km_i, km_f = km_f, km_i
+            coords = list(reversed(coords))
+        forward_key = tuple((round(c[0], 7), round(c[1], 7)) for c in coords)
+        reverse_key = tuple(reversed(forward_key))
+        geometry_key = min(forward_key, reverse_key)
+        current = shapes_by_geometry.get(geometry_key)
+        span = km_f - km_i
+        item = {
+            "codigo": row.get("codigo"),
+            "km_inicial": km_i,
+            "km_final": km_f,
+            "coords": coords,
+        }
+        geometry_items = current or []
+        replaced = False
+        should_add = True
+        for index, existing in enumerate(geometry_items):
+            existing_i = _to_float(existing.get("km_inicial"))
+            existing_f = _to_float(existing.get("km_final"))
+            ranges_overlap = km_i < existing_f and km_f > existing_i
+            if not ranges_overlap:
+                continue
+
+            existing_span = existing_f - existing_i
+            # Se a mesma linha cobre o mesmo km com ranges diferentes, fica o
+            # range mais amplo. Faixas adjacentes são mantidas.
+            if span > existing_span:
+                geometry_items[index] = item
+                replaced = True
+            should_add = False
+            break
+
+        if should_add and not replaced:
+            geometry_items.append(item)
+        shapes_by_geometry[geometry_key] = geometry_items
+
+    shapes = [
+        shape
+        for geometry_items in shapes_by_geometry.values()
+        for shape in geometry_items
+    ]
+    return sorted(
+        shapes,
+        key=lambda item: (_to_float(item.get("km_inicial")), _to_float(item.get("km_final")), str(item.get("codigo") or "")),
+    )
+
+
+def _shape_paths_for_segment(
+    shapes: list[dict[str, Any]],
+    km_i: float,
+    km_f: float,
+) -> list[list[list[float]]]:
+    start_km = min(km_i, km_f)
+    end_km = max(km_i, km_f)
+    paths: list[list[list[float]]] = []
+
+    # Alguns cadastros têm peças sobrepostas. Para não desenhar várias linhas
+    # paralelas, cobrimos o intervalo uma vez só.
+    cursor = start_km
+    while cursor < end_km - 1e-9:
+        candidates: list[dict[str, Any]] = []
+        for shape in shapes:
+            shape_i = _to_float(shape.get("km_inicial"))
+            shape_f = _to_float(shape.get("km_final"))
+            if shape_i <= cursor < shape_f and shape_f > shape_i:
+                candidates.append(shape)
+
+        if not candidates:
+            next_starts = [
+                _to_float(shape.get("km_inicial"))
+                for shape in shapes
+                if cursor < _to_float(shape.get("km_inicial")) < end_km
+            ]
+            if not next_starts:
+                break
+            cursor = min(next_starts)
+            continue
+
+        shape = min(
+            candidates,
+            key=lambda item: (
+                _to_float(item.get("km_inicial")),
+                _to_float(item.get("km_final")) - _to_float(item.get("km_inicial")),
+                str(item.get("codigo") or ""),
+            ),
+        )
+        shape_i = _to_float(shape.get("km_inicial"))
+        shape_f = _to_float(shape.get("km_final"))
+        overlap_i = max(start_km, shape_i)
+        overlap_f = min(end_km, shape_f)
+        start_fraction = (overlap_i - shape_i) / (shape_f - shape_i)
+        end_fraction = (overlap_f - shape_i) / (shape_f - shape_i)
+        sliced = _slice_polyline_by_fraction(shape.get("coords") or [], start_fraction, end_fraction)
+        if len(sliced) >= 2:
+            paths.append(_simplify_path(sliced))
+        cursor = overlap_f
+    return paths
+
+
+def _build_shape_paths_by_segment(
+    seg_rows: list[dict[str, Any]],
+    road_code: str | int | None,
+) -> dict[int, list[list[list[float]]]]:
+    if not _prefer_shape_map_geometry():
+        return {}
+
+    shapes = _get_road_shape_rows_from_database(road_code)
+    if not shapes:
+        return {}
+
+    by_segment: dict[int, list[list[list[float]]]] = {}
+    for row in seg_rows:
+        segment_id = int(row["id_segmento"])
+        km_i = _to_float(row.get("km_inicial_segmento"))
+        km_f = _to_float(row.get("km_final_segmento"))
+        paths = _shape_paths_for_segment(shapes, km_i, km_f)
+        if paths:
+            by_segment[segment_id] = paths
+    return by_segment
+
+
+def _load_iri_centerline_points(road_code: str | int | None) -> list[tuple[float, list[list[float]]]]:
+    road = _normalize_road_code(road_code)
+    if not road:
+        return []
+
+    db = MySQLConnection()
+    point_rows = db.execute_query(
+        """
+        SELECT pt.km_inicial AS km, ST_AsText(pt.geometria) AS wkt
+        FROM principal_levantamentos pt
+        WHERE pt.levantamento_importacao_id IN (
+            SELECT li.id FROM levantamento_importacoes li
+            WHERE li.nome_arquivo LIKE CONCAT('BR-', %s, '%%IRI%%')
+          )
+          AND pt.rodovia = %s
+        ORDER BY pt.km_inicial, pt.levantamento_importacao_id
+        """,
+        (road, road),
+    ) or []
+
+    points: list[tuple[float, list[list[float]]]] = []
+    for point in point_rows:
+        coords = _parse_linestring_latlon(point.get("wkt"))
+        if len(coords) >= 2 and not _has_large_coordinate_jump(coords):
+            points.append((_to_float(point.get("km")), coords))
+    return points
+
+
+def _fallback_iri_paths_for_segment(
+    points: list[tuple[float, list[list[float]]]],
+    point_kms: list[float],
+    km_i: float,
+    km_f: float,
+) -> list[list[list[float]]]:
+    lo = bisect.bisect_left(point_kms, min(km_i, km_f))
+    hi = bisect.bisect_right(point_kms, max(km_i, km_f))
+    by_km: dict[float, list[list[float]]] = {}
+    for km, coords in points[lo:hi]:
+        by_km.setdefault(round(km, 4), []).append(coords[0])
+
+    flat: list[list[float]] = []
+    for km in sorted(by_km):
+        group = by_km[km]
+        avg = [
+            sum(c[0] for c in group) / len(group),
+            sum(c[1] for c in group) / len(group),
+        ]
+        if not flat or flat[-1] != avg:
+            flat.append(avg)
+    return [_simplify_path(flat)] if len(flat) >= 2 else []
+
+
 # ============================================================================
 # PIPELINE PARAGON — rodovias, cenários e extração de IAP
 # (tabela analise_gerencial_intervencoes_iap)
@@ -457,15 +964,63 @@ def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") ->
     return _get_iap_scenarios_from_database(code, matrix_type)
 
 
+def get_available_years(
+    selected_road: str | None,
+    matrix_type: str = "Paragon",
+    scenario_key: str | None = None,
+) -> list[int]:
+    """Lista os anos disponíveis para a rodovia/cenário informado.
+
+    A lista é buscada no ciclo resolvido para o cenário selecionado. Se não houver
+    cenário explícito, usa o cenário default da metodologia pedida.
+    """
+    code = _normalize_road_code(selected_road)
+    if not code:
+        return []
+
+    db = MySQLConnection()
+    if matrix_type == "Matriz Cadastrada":
+        analysis = _get_dnit_analysis_for_road(code, scenario_key)
+        if not analysis:
+            return []
+        rows = db.execute_query(
+            """
+            SELECT DISTINCT ano
+            FROM analise_gerencial_intervencoes_dnit
+            WHERE gerencial_ciclo_id = %s
+              AND ano IS NOT NULL
+            ORDER BY ano
+            """,
+            (analysis["ciclo_id"],),
+        ) or []
+    else:
+        scenario = _get_iap_scenario_by_key(code, scenario_key) or _get_default_iap_scenario(db, code)
+        if not scenario:
+            return []
+        rows = db.execute_query(
+            """
+            SELECT DISTINCT ano
+            FROM analise_gerencial_intervencoes_iap
+            WHERE gerencial_ciclo_id = %s
+              AND ano IS NOT NULL
+            ORDER BY ano
+            """,
+            (scenario["ciclo_id"],),
+        ) or []
+
+    return [int(row["ano"]) for row in rows if row.get("ano") is not None]
+
+
 def get_iap_extraction(
     selected_road: str,
     year: int | None = None,
     scenario_key: str | None = None,
 ) -> dict[str, Any] | None:
-    """Extrai IAP médio e composição IAP para uso nas telas do relatório.
+    """Extrai IAP médio, composição por solução e distribuição por classe IAP.
 
-    A composição replica o relatório Paragon: agrupa por solucao_corretiva_final
-    e calcula o percentual somente sobre os trechos com intervenção final.
+    A extração devolve duas leituras diferentes:
+    - `composition`: agrupamento por solução corretiva final;
+    - `class_distribution`: agrupamento por classe derivada do IAP numérico.
     """
     code = _normalize_road_code(selected_road)
     if not code:
@@ -482,12 +1037,13 @@ def _get_iap_extraction_from_database(
 ) -> dict[str, Any] | None:
     """Extração Paragon do IAP para um cenário/ano (tabela intervencoes_iap).
 
-    Resolve o cenário (pela key ou o default Paragon) e o ano-base, e roda 3 queries
+    Resolve o cenário (pela key ou o default Paragon) e lê a base de segmentos
     sobre analise_gerencial_intervencoes_iap × analise_gerencial_segmento_pistas:
       1) médias/totais (iap médio ponderado por extensão, km/percentual crítico);
       2) composição por solução corretiva final (% sobre trechos com intervenção);
-      3) distribuição por classe de conceito IAP (via CASE WHEN em SQL).
-    Retorna dict com métricas + composição + distribuição, ou None se não houver dados.
+      3) distribuição por classe de conceito IAP (pela tabela de conversão).
+    Retorna dict com métricas + composição por solução + distribuição por classe,
+    ou None se não houver dados.
     """
     db = MySQLConnection()
     scenario = _get_iap_scenario_by_key(road_code, scenario_key) or _get_default_iap_scenario(db, road_code)
@@ -501,21 +1057,14 @@ def _get_iap_extraction_from_database(
         if year is None:
             return None
 
-    # Médias/totais: IAP médio ponderado pela extensão (iapa vem ×100 -> /100); km
-    # crítico = extensão com solução 'RPS+REF'/'REC'; % crítico = km crítico sobre o
-    # km com QUALQUER intervenção (NULLIF evita divisão por zero); extensão e nº seg.
-    averages = db.execute_query(
+    # Base do recorte. O IAP vem como código e é convertido em Python para manter
+    # média, classe e solução usando a mesma regra em todo o dashboard.
+    iap_rows = db.execute_query(
         """
         SELECT
-          ROUND(SUM(sp.extensao * i.iapa) / SUM(sp.extensao) / 100, 4) AS iap_medio,
-          ROUND(SUM(CASE WHEN i.solucao_corretiva_final IN ('RPS+REF', 'REC') THEN sp.extensao ELSE 0 END), 2) AS critical_km,
-          ROUND(
-            SUM(CASE WHEN i.solucao_corretiva_final IN ('RPS+REF', 'REC') THEN sp.extensao ELSE 0 END)
-            / NULLIF(SUM(CASE WHEN i.solucao_corretiva_final IS NOT NULL THEN sp.extensao ELSE 0 END), 0) * 100,
-            1
-          ) AS critical_percent,
-          ROUND(SUM(sp.extensao), 2) AS total_km,
-          COUNT(*) AS segmentos
+          sp.extensao,
+          i.iapa,
+          i.solucao_corretiva_final
         FROM analise_gerencial_intervencoes_iap i
         JOIN analise_gerencial_segmento_pistas sp ON sp.id = i.segmento_pista_id
         WHERE sp.analise_gerencial_id = %s
@@ -525,104 +1074,79 @@ def _get_iap_extraction_from_database(
         (scenario["analise_id"], scenario["ciclo_id"], year),
     ) or []
 
-    # Composição por solução corretiva: percentual calculado SOMENTE sobre os
-    # trechos que têm intervenção (base filtra solucao_corretiva_final IS NOT NULL).
-    composition = db.execute_query(
-        """
-        WITH base AS (
-            SELECT sp.extensao, i.solucao_corretiva_final
-            FROM analise_gerencial_intervencoes_iap i
-            JOIN analise_gerencial_segmento_pistas sp ON sp.id = i.segmento_pista_id
-            WHERE sp.analise_gerencial_id = %s
-              AND i.gerencial_ciclo_id = %s
-              AND i.ano = %s
-              AND i.solucao_corretiva_final IS NOT NULL
-        ), total AS (
-            SELECT SUM(extensao) AS total_km FROM base
-        )
-        SELECT b.solucao_corretiva_final AS intervencao,
-               COUNT(*) AS segmentos,
-               ROUND(SUM(b.extensao), 2) AS km,
-               ROUND(SUM(b.extensao) / t.total_km * 100, 1) AS percentual
-        FROM base b
-        CROSS JOIN total t
-        GROUP BY b.solucao_corretiva_final, t.total_km
-        ORDER BY km DESC
-        """,
-        (scenario["analise_id"], scenario["ciclo_id"], year),
-    ) or []
+    if not iap_rows:
+        return None
 
+    total_km = 0.0
+    critical_km = 0.0
+    weighted_iap = 0.0
+    weighted_iap_km = 0.0
+    composition_by_solution: dict[str, dict[str, float]] = {}
+    distribution_by_class: dict[str, dict[str, float]] = {}
+
+    for row in iap_rows:
+        km = _to_float(row.get("extensao"))
+        iap_value = _iap_numeric_value(row.get("iapa"))
+        solution = _iap_solution_from_code(row.get("iapa"), row.get("solucao_corretiva_final")) or "Sem intervenção"
+        class_name = _classify_iap(row.get("iapa"))
+
+        total_km += km
+        if iap_value is not None:
+            weighted_iap += km * iap_value
+            weighted_iap_km += km
+        if solution in {"RPS+REF", "REC"}:
+            critical_km += km
+
+        if solution and solution != "Sem intervenção":
+            solution_bucket = composition_by_solution.setdefault(solution, {"segmentos": 0.0, "km": 0.0})
+            solution_bucket["segmentos"] += 1
+            solution_bucket["km"] += km
+
+        class_bucket = distribution_by_class.setdefault(class_name, {"km": 0.0})
+        class_bucket["km"] += km
+
+    intervention_total_km = sum(row["km"] for row in composition_by_solution.values())
     composition = sorted(
         [
             {
-                "classe": row["intervencao"],
-                "intervencao": row["intervencao"],
-                "segmentos": int(row.get("segmentos") or 0),
-                "km": _to_float(row.get("km")),
-                "percentual": _to_float(row.get("percentual")),
-                "color": _IAP_INTERVENTION_COLORS.get(row.get("intervencao"), "#fff200"),
+                "classe": solution,
+                "intervencao": solution,
+                "segmentos": int(values["segmentos"]),
+                "km": round(values["km"], 2),
+                "percentual": round(values["km"] / intervention_total_km * 100, 1) if intervention_total_km else 0.0,
+                "color": _IAP_INTERVENTION_COLORS.get(solution, "#fff200"),
             }
-            for row in composition
+            for solution, values in composition_by_solution.items()
         ],
         key=lambda row: _IAP_INTERVENTION_ORDER.index(row["intervencao"])
         if row["intervencao"] in _IAP_INTERVENTION_ORDER
         else len(_IAP_INTERVENTION_ORDER),
     )
 
-    # Distribuição por classe de conceito IAP. ATENÇÃO: este CASE WHEN é a CÓPIA em
-    # SQL dos limiares de _classify_iap (README §12.1) — manter os dois em sincronia.
-    # O percentual usa window function: km da classe / km total (SUM(SUM(...)) OVER ()).
-    class_distribution = db.execute_query(
-        """
-        SELECT
-          CASE
-            WHEN i.iapa / 100 >= 4.01 THEN 'Excelente'
-            WHEN i.iapa / 100 >= 3.01 THEN 'Bom'
-            WHEN i.iapa / 100 >= 2.51 THEN '++ Regular'
-            WHEN i.iapa / 100 >= 2.01 THEN '- Regular'
-            WHEN i.iapa / 100 >= 1.01 THEN 'Mau'
-            ELSE 'Péssimo'
-          END AS classe,
-          ROUND(SUM(sp.extensao), 2) AS km,
-          ROUND(SUM(sp.extensao) / SUM(SUM(sp.extensao)) OVER () * 100, 1) AS percentual
-        FROM analise_gerencial_intervencoes_iap i
-        JOIN analise_gerencial_segmento_pistas sp ON sp.id = i.segmento_pista_id
-        WHERE sp.analise_gerencial_id = %s
-          AND i.gerencial_ciclo_id = %s
-          AND i.ano = %s
-        GROUP BY classe
-        """,
-        (scenario["analise_id"], scenario["ciclo_id"], year),
-    ) or []
-
     class_distribution = sorted(
         [
             {
-                **row,
-                "km": _to_float(row.get("km")),
-                "percentual": _to_float(row.get("percentual")),
-                "color": _IAP_CLASS_COLORS.get(row.get("classe"), "#fff200"),
+                "classe": class_name,
+                "km": round(values["km"], 2),
+                "percentual": round(values["km"] / total_km * 100, 1) if total_km else 0.0,
+                "color": _IAP_CLASS_COLORS.get(class_name, "#fff200"),
             }
-            for row in class_distribution
+            for class_name, values in distribution_by_class.items()
         ],
         key=lambda row: _IAP_CLASS_ORDER.index(row["classe"])
         if row["classe"] in _IAP_CLASS_ORDER
         else len(_IAP_CLASS_ORDER),
     )
 
-    average = averages[0] if averages else {}
-    if average.get("iap_medio") is None:
-        return None
-
     return {
         **scenario,
         "ano": year,
-        "iap_medio": _to_float(average.get("iap_medio")),
-        "total_km": _to_float(average.get("total_km")),
-        "critical_km": _to_float(average.get("critical_km")),
-        "critical_percent": _to_float(average.get("critical_percent")),
-        "critical_rule": "SUM(extensao) where solucao_corretiva_final in ('RPS+REF', 'REC') over intervention total",
-        "segmentos": int(average.get("segmentos") or 0),
+        "iap_medio": round(weighted_iap / weighted_iap_km, 4) if weighted_iap_km else 0.0,
+        "total_km": round(total_km, 2),
+        "critical_km": round(critical_km, 2),
+        "critical_percent": round(critical_km / total_km * 100, 1) if total_km else 0.0,
+        "critical_rule": "SUM(extensao) where mapped IAP solution in ('RPS+REF', 'REC') over total extension",
+        "segmentos": len(iap_rows),
         "composition": composition,
         "class_distribution": class_distribution,
     }
@@ -636,10 +1160,9 @@ def _get_iap_map_segments_from_database(
 ) -> pd.DataFrame:
     """Segmentos do mapa IAP (Paragon) com geometria real e cor por conceito.
 
-    Junta o IAP/solução de cada segmento (intervencoes_iap) com a geometria
-    reconstruída a partir dos pontos do levantamento IRI (principal_levantamentos),
-    e devolve um DataFrame com paths simplificados prontos para o mapa. Cada linha
-    traz iap, classe/cor por solução (_classify_iap_for_map) e a polyline do trecho.
+    Junta o IAP/solução de cada segmento com a geometria limpa do pista_shape.
+    Se uma base futura não tiver shape, usa os pontos IRI antigos como fallback.
+    Cada linha traz iap, classe/cor derivada do valor numérico e a polyline do trecho.
     """
     db = MySQLConnection()
 
@@ -656,9 +1179,10 @@ def _get_iap_map_segments_from_database(
 
     iap_by_segment = {}
     for row in iap_rows:
-        intervention = row.get("solucao_corretiva_final") or "Sem intervenção"
+        intervention = _iap_solution_from_code(row.get("iapa"), row.get("solucao_corretiva_final")) or "Sem intervenção"
         iap_by_segment[int(row["segmento_pista_id"])] = {
-            "iap": _to_float(row.get("iapa")),
+            "iap_code": row.get("iapa"),
+            "iap": _iap_numeric_value(row.get("iapa")),
             "intervencao": intervention,
         }
 
@@ -696,31 +1220,9 @@ def _get_iap_map_segments_from_database(
 
     rodovia = seg_rows[0].get("rodovia")
 
-    # Geometria real: TODOS os pontos do levantamento IRI da rodovia em UMA
-    # consulta (sem join por segmento, que estourava o read_timeout nas longas).
-    # Os pontos seguem a estrada na ordem de km → agrupamos por faixa de km. Isso
-    # mantém o traçado contínuo (sem os saltos do pista_shape, que tem peças
-    # duplicadas/deslocadas em algumas rodovias).
-    point_rows = db.execute_query(
-        """
-        SELECT pt.km_inicial AS km, ST_AsText(pt.geometria) AS wkt
-        FROM principal_levantamentos pt
-        WHERE pt.levantamento_importacao_id = (
-            SELECT MIN(li.id) FROM levantamento_importacoes li
-            WHERE li.nome_arquivo LIKE CONCAT('BR-', %s, '%%IRI%%')
-          )
-          AND pt.rodovia = %s
-        ORDER BY pt.km_inicial
-        """,
-        (rodovia, rodovia),
-    ) or []
-
-    points: list[tuple[float, list[list[float]]]] = []
-    for p in point_rows:
-        coords = _parse_linestring_latlon(p.get("wkt"))
-        if len(coords) >= 2 and not _has_large_coordinate_jump(coords):
-            points.append((_to_float(p.get("km")), coords))
-    point_kms = [k for k, _ in points]
+    shape_paths_by_segment = _build_shape_paths_by_segment(seg_rows, rodovia)
+    points: list[tuple[float, list[list[float]]]] | None = None
+    point_kms: list[float] = []
 
     segments: list[dict[str, Any]] = []
     for srow in seg_rows:
@@ -729,25 +1231,13 @@ def _get_iap_map_segments_from_database(
         seg_km_i = _to_float(srow.get("km_inicial_segmento"))
         seg_km_f = _to_float(srow.get("km_final_segmento"))
 
-        lo = bisect.bisect_left(point_kms, seg_km_i)
-        hi = bisect.bisect_right(point_kms, seg_km_f)
-        # Cada km do levantamento traz vários pontos (faixas/sentidos, em posições
-        # distintas). Concatenar todos faz a linha ziguezaguear entre carreiros, e
-        # infla o comprimento. Colapsamos num ponto médio por km → eixo central,
-        # traçado contínuo e limpo.
-        by_km: dict[float, list[list[float]]] = {}
-        for km, coords in points[lo:hi]:
-            by_km.setdefault(round(km, 4), []).append(coords[0])
-        flat: list[list[float]] = []
-        for km in sorted(by_km):
-            grp = by_km[km]
-            avg = [
-                sum(c[0] for c in grp) / len(grp),
-                sum(c[1] for c in grp) / len(grp),
-            ]
-            if not flat or flat[-1] != avg:
-                flat.append(avg)
-        if len(flat) < 2:
+        paths = shape_paths_by_segment.get(segment_id)
+        if not paths:
+            if points is None:
+                points = _load_iri_centerline_points(rodovia)
+                point_kms = [k for k, _ in points]
+            paths = _fallback_iri_paths_for_segment(points, point_kms, seg_km_i, seg_km_f)
+        if not paths:
             continue
 
         segments.append(
@@ -756,9 +1246,9 @@ def _get_iap_map_segments_from_database(
                 "sre": srow.get("codigo") or f"Segmento {segment_id}",
                 "km_inicial": seg_km_i,
                 "km_final": seg_km_f,
-                "iap": iap_data["iap"] / 100,
+                "iap": iap_data["iap"] or 0.0,
                 "classe_iap": _classify_iap_for_map(
-                    iap_data["iap"],
+                    iap_data["iap_code"],
                     iap_data["intervencao"],
                 ),
                 "intervencao_iap": iap_data["intervencao"],
@@ -766,7 +1256,7 @@ def _get_iap_map_segments_from_database(
                     iap_data["intervencao"],
                     "#fff200",
                 ),
-                "paths": [_simplify_path(flat)],
+                "paths": paths,
             }
         )
 
@@ -783,12 +1273,12 @@ def _get_linear_diagram_segments_from_database(
     ICDE e o IAP, já classificados e com cor. Lê intervencoes_iap × segmento_pistas.
 
     Retorna DataFrame com um registro por segmento (ordenado por km), cada índice
-    com sua classe (_classify_condition) e cor, além da classe/cor de IAP por solução.
+    com sua classe (_classify_condition) e cor, além da classe/cor de IAP pelo valor numérico.
     """
     db = MySQLConnection()
     # `codigo` = SNV/SRE via subquery correlata pelo range de km (mesmo padrão dos
     # outros SELECTs). Índices: icdsb=ICDS (superfície), icdpb=ICDP (panela),
-    # icdeb=ICDE (estrutural); iapa vem ×100.
+    # icdeb=ICDE (estrutural); iapa é código tabelado do IAP.
     rows = db.execute_query(
         """
         SELECT
@@ -822,13 +1312,14 @@ def _get_linear_diagram_segments_from_database(
 
     records = []
     for row in rows:
-        intervention = row.get("solucao_corretiva_final")
+        intervention = _iap_solution_from_code(row.get("iapa"), row.get("solucao_corretiva_final"))
         condition_classes = {
             "ICDS": _classify_condition(row.get("icdsb")),
             "ICDP": _classify_condition(row.get("icdpb")),
             "ICDE": _classify_condition(row.get("icdeb")),
         }
         iap_class = _classify_iap_for_map(row.get("iapa"), intervention)
+        iap_value = _iap_numeric_value(row.get("iapa"))
         records.append(
             {
                 "segment_id": int(row["segment_id"]),
@@ -838,7 +1329,7 @@ def _get_linear_diagram_segments_from_database(
                 "icds": _to_float(row.get("icdsb")),
                 "icdp": _to_float(row.get("icdpb")),
                 "icde": _to_float(row.get("icdeb")),
-                "iap": _to_float(row.get("iapa")) / 100,
+                "iap": iap_value or 0.0,
                 "classe_icds": condition_classes["ICDS"],
                 "classe_icdp": condition_classes["ICDP"],
                 "classe_icde": condition_classes["ICDE"],
@@ -887,6 +1378,7 @@ def _get_solution_table_from_database(
           sp.km_inicial,
           sp.km_final,
           sp.extensao,
+          sp.rodovia AS segment_rodovia,
           i.iapa,
           i.solucao_corretiva_final,
           i.solucoes,
@@ -936,11 +1428,20 @@ def _get_solution_table_from_database(
         (analise_id, ciclo_id, year),
     ) or []
 
+    traffic_by_road = _get_vmda_traffic_by_road({row.get("segment_rodovia") for row in rows})
     records = []
     for row in rows:
-        iap = _to_float(row.get("iapa")) / 100
-        solution_code = row.get("solucao_corretiva_final")
+        iap = _iap_numeric_value(row.get("iapa")) or 0.0
+        solution_code = _iap_solution_from_code(row.get("iapa"), row.get("solucao_corretiva_final"))
         segment_id = int(row["segment_id"])
+        traffic = _match_vmda_traffic(
+            traffic_by_road.get(_normalize_road_code(row.get("segment_rodovia")) or "", []),
+            _to_float(row.get("km_inicial")),
+            _to_float(row.get("km_final")),
+        )
+        vmdl = traffic.get("vmdl") if traffic else None
+        vmdp = traffic.get("vmdp") if traffic else None
+        vmdeq = (vmdl or 0.0) + 4.0 * vmdp if vmdl is not None else None
         records.append(
             {
                 "SNV": row.get("codigo") or f"Segmento {segment_id}",
@@ -951,6 +1452,10 @@ def _get_solution_table_from_database(
                 "IRI": _to_float(row.get("iria")),
                 "IGG": _to_float(row.get("igga")),
                 "VMDA": _to_float(row.get("vmda")),
+                "VMDL": vmdl,
+                "VMDP": vmdp if traffic else None,
+                "VMDeq": vmdeq,
+                "_trafego_trecho": traffic.get("segmento_trafego") if traffic else None,
                 "DEF": _to_float(row.get("d0b")),
                 "ICDS": _to_float(row.get("icdsb")),
                 "ICDP": _to_float(row.get("icdpb")),
@@ -965,6 +1470,17 @@ def _get_solution_table_from_database(
                 "_segment_id": segment_id,
             }
         )
+
+    severity_order = ["REC", "RPS+REF", "RPS", "RL+REF", "RL+RS", "RL", "OK", "Sem intervenção"]
+    severity_rank = {solution: index for index, solution in enumerate(severity_order)}
+    records = sorted(
+        records,
+        key=lambda row: (
+            severity_rank.get(row["_solucao_codigo"], len(severity_rank)),
+            row["IAP"],
+            row["Km Inicial"],
+        ),
+    )
 
     return pd.DataFrame(records)
 
@@ -1137,6 +1653,7 @@ def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[d
         SELECT
             agdt.id AS analise_id,
             agdt.nome,
+            agdt.pista,
             agdt.tipo_matriz,
             agc.id AS ciclo_id,
             CASE
@@ -1164,6 +1681,7 @@ def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[d
                 "analise_id": int(row["analise_id"]),
                 "ciclo_id": int(row["ciclo_id"]),
                 "cenario": row["nome"],
+                "pista": row.get("pista"),
                 "label": segment_type_label,
                 "tipo_matriz": row["tipo_matriz"],
                 "segment_type": segment_type,
@@ -1220,7 +1738,11 @@ def _get_available_roads_from_database() -> list[str]:
     return sorted(roads_by_code.values(), key=_road_sort_key)
 
 
-def get_overview_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_overview_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Monta os dados fake da tela de visão geral.
 
     O contrato já separa métricas, segmentos e distribuição para facilitar a
@@ -1228,40 +1750,57 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
     """
     road = selected_road or get_available_roads()[0]
 
-    iap_extraction = get_iap_extraction(road, scenario_key=scenario_key)
-    # Métricas reais vêm da extração; os literais são fallback de DEMONSTRAÇÃO usados
-    # só quando não há extração (rodovia sem cenário) — remover na v2.
-    iap_average = iap_extraction["iap_medio"] if iap_extraction else 3.66
-    extension_km = iap_extraction["total_km"] if iap_extraction else 90
-    critical_km = iap_extraction["critical_km"] if iap_extraction else 14
-    critical_percent = iap_extraction["critical_percent"] if iap_extraction else 15.6
-    segment_count = iap_extraction["segmentos"] if iap_extraction else 90
+    iap_extraction = get_iap_extraction(road, year=year, scenario_key=scenario_key)
+    if not iap_extraction:
+        empty = pd.DataFrame()
+        return {
+            "metrics": {
+                "road": road,
+                "uf": _extract_uf_from_road_label(road),
+                "ano": None,
+                "segment_count": 0,
+                "extension_km": 0.0,
+                "critical_km": 0.0,
+                "critical_percent": 0.0,
+                "iap_average": 0.0,
+            },
+            "cards": [],
+            "segments": empty,
+            "distribution": empty,
+            "linear_diagram": empty,
+            "iap_extraction": None,
+            "message": "Sem dados para este recorte.",
+        }
+
+    iap_average = iap_extraction["iap_medio"]
+    extension_km = iap_extraction["total_km"]
+    critical_km = iap_extraction["critical_km"]
+    critical_percent = iap_extraction["critical_percent"]
+    segment_count = iap_extraction["segmentos"]
 
     metrics = {
         "road": road,
         "uf": _extract_uf_from_road_label(road),
+        "ano": iap_extraction["ano"] if iap_extraction else None,
         "segment_count": segment_count,
         "extension_km": extension_km,
         "critical_km": critical_km,
         "critical_percent": critical_percent,
         "iap_average": iap_average,
-        # FAKE / demonstração — valores fixos ainda não vêm do banco. Remover na v2.
-        "plan_cost_mi": 51.8,        # custo do plano em R$ milhões (placeholder)
-        "last_update_minutes": 12,   # "atualizado há X min" (placeholder)
     }
 
     cards = [
         {
             "title": "IAP MÉDIO",
             "value": f"{iap_average:.2f}",
-            "subtitle": "Índice de aptidão do pavimento",
+            "subtitle": "Média ponderada pela extensão",
             "tone": "green",
             "icon": "↗",
         },
         {
             "title": "% TRECHOS CRÍTICOS",
             "value": f"{critical_percent:.1f}%",
-            "subtitle": "Mau + Péssimo",
+            "subtitle": "Percentual da extensão total em Mau + Péssimo",
             "tone": "red",
             "icon": "△",
         },
@@ -1281,32 +1820,21 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
         },
     ]
 
-    if iap_extraction:
-        segments = _get_iap_map_segments_from_database(
-            iap_extraction["analise_id"],
-            iap_extraction["ciclo_id"],
-            iap_extraction["ano"],
-        )
-        linear_diagram = _get_linear_diagram_segments_from_database(
-            iap_extraction["analise_id"],
-            iap_extraction["ciclo_id"],
-            iap_extraction["ano"],
-        )
-    else:
-        segments = pd.DataFrame()
-        linear_diagram = pd.DataFrame()
+    segments = _get_iap_map_segments_from_database(
+        iap_extraction["analise_id"],
+        iap_extraction["ciclo_id"],
+        iap_extraction["ano"],
+    )
+    linear_diagram = _get_linear_diagram_segments_from_database(
+        iap_extraction["analise_id"],
+        iap_extraction["ciclo_id"],
+        iap_extraction["ano"],
+    )
 
-    if iap_extraction and iap_extraction["composition"]:
-        distribution = pd.DataFrame(iap_extraction["composition"])
+    if iap_extraction["class_distribution"]:
+        distribution = pd.DataFrame(iap_extraction["class_distribution"])
     else:
-        # Distribuição FAKE de demonstração (sem extração real). Remover na v2.
-        distribution = pd.DataFrame(
-            [
-                {"classe": "RL+RS", "km": 51.16, "percentual": 38.2, "color": _IAP_INTERVENTION_COLORS["RL+RS"]},
-                {"classe": "RPS", "km": 81.18, "percentual": 60.7, "color": _IAP_INTERVENTION_COLORS["RPS"]},
-                {"classe": "REC", "km": 1.50, "percentual": 1.1, "color": _IAP_INTERVENTION_COLORS["REC"]},
-            ]
-        )
+        distribution = pd.DataFrame()
 
     return {
         "metrics": metrics,
@@ -1318,7 +1846,11 @@ def get_overview_data(selected_road: str | None = None, scenario_key: str | None
     }
 
 
-def get_solutions_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_solutions_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Dados da página de Soluções (Paragon): geometria do mapa, tabela de soluções
     recomendadas e itens de orçamento para a rodovia/cenário.
 
@@ -1326,7 +1858,7 @@ def get_solutions_data(selected_road: str | None = None, scenario_key: str | Non
     partir da extração IAP; devolve DataFrames vazios se não houver cenário.
     """
     road = selected_road or get_available_roads()[0]
-    iap_extraction = get_iap_extraction(road, scenario_key=scenario_key)
+    iap_extraction = get_iap_extraction(road, year=year, scenario_key=scenario_key)
 
     if iap_extraction:
         segments = _get_iap_map_segments_from_database(
@@ -1555,7 +2087,11 @@ def _eval_dnit_matrix(matrix: dict, iri: float, igg: float, numero_n: float, dc:
     return []
 
 
-def get_dnit_overview_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_dnit_overview_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Dados da visão geral DNIT: segmentos com IRI e IGG classificados (faixas DNIT)."""
     road = selected_road or get_available_roads()[0]
     code = _normalize_road_code(road)
@@ -1566,9 +2102,10 @@ def get_dnit_overview_data(selected_road: str | None = None, scenario_key: str |
     # tiver matriz Cadastrada, cai no Paragon (intervencoes_iap) — comportamento anterior.
     analysis = _get_dnit_analysis_for_road(code, scenario_key)
     if analysis:
-        analise_id, ciclo_id, year = analysis["analise_id"], analysis["ciclo_id"], analysis["ano"]
+        analise_id, ciclo_id = analysis["analise_id"], analysis["ciclo_id"]
+        year = int(year if year is not None else analysis["ano"])
     else:
-        extraction = get_iap_extraction(road, scenario_key=scenario_key)
+        extraction = get_iap_extraction(road, year=year, scenario_key=scenario_key)
         if not extraction:
             return {}
         analise_id, ciclo_id, year = extraction["analise_id"], extraction["ciclo_id"], extraction["ano"]
@@ -1908,9 +2445,8 @@ def _get_dnit_analysis_for_road(road_code: str, scenario_key: str | None = None)
 def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
     """Geometria/SRE/km de TODOS os segmentos da análise (sem depender de IAP).
 
-    Geometria pelos pontos do levantamento IRI agrupados por km (eixo central),
-    numa única consulta — evita o timeout do join por segmento nas rodovias longas
-    (mesmo fix do `_get_iap_map_segments_from_database`).
+    Geometria pelo pista_shape, recortada pelo km de cada segmento. Se uma base
+    futura não tiver shape, usa os pontos IRI antigos como fallback.
     """
     db = MySQLConnection()
     seg_rows = db.execute_query(
@@ -1937,53 +2473,30 @@ def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     rodovia = seg_rows[0].get("rodovia")
-    point_rows = db.execute_query(
-        """
-        SELECT pt.km_inicial AS km, ST_AsText(pt.geometria) AS wkt
-        FROM principal_levantamentos pt
-        WHERE pt.levantamento_importacao_id = (
-            SELECT MIN(li.id) FROM levantamento_importacoes li
-            WHERE li.nome_arquivo LIKE CONCAT('BR-', %s, '%%IRI%%')
-          )
-          AND pt.rodovia = %s
-        ORDER BY pt.km_inicial
-        """,
-        (rodovia, rodovia),
-    ) or []
-    points: list[tuple[float, list[list[float]]]] = []
-    for p in point_rows:
-        coords = _parse_linestring_latlon(p.get("wkt"))
-        if len(coords) >= 2 and not _has_large_coordinate_jump(coords):
-            points.append((_to_float(p.get("km")), coords))
-    point_kms = [k for k, _ in points]
+    shape_paths_by_segment = _build_shape_paths_by_segment(seg_rows, rodovia)
+    points: list[tuple[float, list[list[float]]]] | None = None
+    point_kms: list[float] = []
 
     segments: list[dict[str, Any]] = []
     for srow in seg_rows:
         km_i = _to_float(srow.get("km_inicial_segmento"))
         km_f = _to_float(srow.get("km_final_segmento"))
-        lo = bisect.bisect_left(point_kms, km_i)
-        hi = bisect.bisect_right(point_kms, km_f)
-        by_km: dict[float, list[list[float]]] = {}
-        for km, coords in points[lo:hi]:
-            by_km.setdefault(round(km, 4), []).append(coords[0])
-        flat: list[list[float]] = []
-        for km in sorted(by_km):
-            grp = by_km[km]
-            avg = [
-                sum(c[0] for c in grp) / len(grp),
-                sum(c[1] for c in grp) / len(grp),
-            ]
-            if not flat or flat[-1] != avg:
-                flat.append(avg)
-        if len(flat) < 2:
+        segment_id = int(srow["id_segmento"])
+        paths = shape_paths_by_segment.get(segment_id)
+        if not paths:
+            if points is None:
+                points = _load_iri_centerline_points(rodovia)
+                point_kms = [k for k, _ in points]
+            paths = _fallback_iri_paths_for_segment(points, point_kms, km_i, km_f)
+        if not paths:
             continue
         segments.append(
             {
-                "segment_id": int(srow["id_segmento"]),
-                "sre": srow.get("codigo") or f"Segmento {int(srow['id_segmento'])}",
+                "segment_id": segment_id,
+                "sre": srow.get("codigo") or f"Segmento {segment_id}",
                 "km_inicial": km_i,
                 "km_final": km_f,
-                "paths": [_simplify_path(flat)],
+                "paths": paths,
             }
         )
 
@@ -2183,8 +2696,8 @@ def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
         for r in seg_rows
     }
 
-    # Todos os anos do ciclo. iapa = IAP DEPOIS da intervenção do ano (×100);
-    # iapb = IAP ANTES; conceito_iapa = classe já calculada no pipeline.
+    # Todos os anos do ciclo. iapa/iapb são códigos tabelados do IAP;
+    # conceito_iapa fica só como fallback histórico.
     rows = db.execute_query(
         """
         SELECT ano, segmento_pista_id AS seg, iapa, iapb, conceito_iapa, solucao_corretiva_final
@@ -2209,9 +2722,13 @@ def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
             continue
         ext = info["ext"]
         ano = int(row["ano"])
-        iap_after = _to_float(row.get("iapa")) / 100
-        iap_before = _to_float(row.get("iapb")) / 100
-        solution = row.get("solucao_corretiva_final")
+        iap_after = _iap_numeric_value(row.get("iapa"))
+        iap_before = _iap_numeric_value(row.get("iapb"))
+        if iap_after is None:
+            continue
+        if iap_before is None:
+            iap_before = iap_after
+        solution = _iap_solution_from_code(row.get("iapa"), row.get("solucao_corretiva_final"))
 
         bucket = per_year.setdefault(
             ano,
@@ -2240,7 +2757,7 @@ def _get_projection_from_database(analise_id: int, ciclo_id: int) -> dict:
             sd["solucoes"][code] = sd["solucoes"].get(code, 0.0) + ext
 
         # limiar de cada conceito = menor IAP observado naquele conceito
-        conceito = row.get("conceito_iapa")
+        conceito = _classify_iap(row.get("iapa")) or row.get("conceito_iapa")
         if conceito:
             cur = conceito_min.get(conceito)
             if cur is None or iap_after < cur:
@@ -2460,7 +2977,11 @@ def _get_dnit_budget_items(ciclo_id: int, analise_id: int) -> pd.DataFrame:
     return pd.DataFrame(items)
 
 
-def get_dnit_economic_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_dnit_economic_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Cenário econômico DNIT — mesma shape de get_solutions_data (Paragon).
 
     Devolve table (segmentos com Custo estimado), budget_items (por seg×ano×solução)
@@ -2473,8 +2994,10 @@ def get_dnit_economic_data(selected_road: str | None = None, scenario_key: str |
         return {"road": road, "available": False, "table": pd.DataFrame(),
                 "budget_items": pd.DataFrame(), "segments": pd.DataFrame()}
 
+    selected_year = int(year if year is not None else analysis["ano"])
+
     sol_data = _get_dnit_solutions_from_database(
-        analysis["analise_id"], analysis["ciclo_id"], analysis["ano"], all_years=True
+        analysis["analise_id"], analysis["ciclo_id"], selected_year, all_years=True
     )
     if not sol_data:
         return {"road": road, "available": False, "table": pd.DataFrame(),
@@ -2504,7 +3027,7 @@ def get_dnit_economic_data(selected_road: str | None = None, scenario_key: str |
         "zona_colors": sol_data.get("zona_colors"),
         "analise_id": analysis["analise_id"],
         "ciclo_id": analysis["ciclo_id"],
-        "ano_base": analysis["ano"],
+        "ano_base": selected_year,
     }
 
 
@@ -2610,6 +3133,261 @@ def _get_dnit_iri_projection(ciclo_id: int, analise_id: int) -> pd.DataFrame:
             "Intervenção": interv is not None,
         })
     return pd.DataFrame(records)
+
+
+@cached(ttl=3600)
+def _get_table_columns(table_name: str) -> set[str]:
+    """Lista colunas disponíveis em uma tabela/view para montar consultas seguras."""
+    db = MySQLConnection()
+    try:
+        rows = db.execute_query(f"SHOW COLUMNS FROM {table_name}") or []
+    except Exception:
+        return set()
+    return {str(row.get("Field") or row.get("field") or "").lower() for row in rows}
+
+
+def _pick_column(columns: set[str], candidates: list[str]) -> str | None:
+    """Escolhe a primeira coluna existente dentro de uma lista controlada."""
+    for candidate in candidates:
+        if candidate.lower() in columns:
+            return candidate
+    return None
+
+
+@cached(ttl=3600)
+def _get_dnit_performance_projection(ciclo_id: int, analise_id: int) -> pd.DataFrame:
+    """Séries anuais DNIT vindas da view de desempenho.
+
+    A view pode variar entre bases. Por isso a consulta só usa colunas realmente
+    existentes, sem criar valores de demonstração quando faltar dado.
+    """
+    view_name = "vw_desempenho_pavimento_com_trecho"
+    columns = _get_table_columns(view_name)
+    if not columns:
+        return pd.DataFrame()
+
+    seg_col = _pick_column(columns, ["segmento_pista_id", "segment_id", "id_segmento"])
+    year_col = _pick_column(columns, ["ano"])
+    cycle_col = _pick_column(columns, ["gerencial_ciclo_id", "ciclo_id"])
+    metric_cols = {
+        "IRI": _pick_column(columns, ["iri_antes_intervencao"]),
+        "Afundamento nas trilhas de roda": _pick_column(columns, ["flechas_antes_intervencao"]),
+        "FC2 + FC3": _pick_column(columns, ["fc2_fc3_antes_intervencao"]),
+        "Panelas": _pick_column(columns, ["n_panelas_antes_intervencao"]),
+    }
+    metric_cols = {label: col for label, col in metric_cols.items() if col}
+    if not seg_col or not year_col or not metric_cols:
+        return pd.DataFrame()
+
+    metric_select = ",\n               ".join(
+        f"v.{col} AS `{label}`" for label, col in metric_cols.items()
+    )
+    segment_meta_select = []
+    for col in ("trecho_nome", "km_inicial", "km_final", "km_trecho"):
+        if col in columns:
+            segment_meta_select.append(f"v.{col} AS {col}")
+    segment_meta_sql = (",\n               " + ",\n               ".join(segment_meta_select)) if segment_meta_select else ""
+    where_cycle = f" AND v.{cycle_col} = %s" if cycle_col else ""
+    params: tuple[Any, ...] = (analise_id, ciclo_id) if cycle_col else (analise_id,)
+
+    db = MySQLConnection()
+    try:
+        rows = db.execute_query(
+            f"""
+            SELECT v.{seg_col} AS seg, v.{year_col} AS ano,
+                   {metric_select}
+                   {segment_meta_sql}
+            FROM {view_name} v
+            JOIN analise_gerencial_segmento_pistas sp ON sp.id = v.{seg_col}
+            WHERE sp.analise_gerencial_id = %s
+              {where_cycle}
+            ORDER BY v.{seg_col}, v.{year_col}
+            """,
+            params,
+        ) or []
+    except Exception:
+        return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+
+    geo = _get_dnit_geometry_from_database(analise_id)
+    ext_by_seg = {}
+    if geo is not None and not geo.empty:
+        for _, r in geo.iterrows():
+            seg_id = int(r["segment_id"])
+            ext_by_seg[seg_id] = max(_to_float(r.get("km_final")) - _to_float(r.get("km_inicial")), 0.0)
+
+    records: list[dict[str, Any]] = []
+    for r in rows:
+        seg_id = int(r["seg"])
+        base = {
+            "_segment_id": seg_id,
+            "Ano": int(r["ano"]),
+            "Extensão": ext_by_seg.get(seg_id, 0.0),
+        }
+        km_i = _to_float(r.get("km_inicial"))
+        km_f = _to_float(r.get("km_final"))
+        segment_token = f"{km_i:.3f}|{km_f:.3f}"
+        segment_label = f"km {km_i:.2f}-{km_f:.2f}"
+        base["_segment_token"] = segment_token
+        base["_segment_label"] = segment_label
+        for label in metric_cols:
+            value = r.get(label)
+            if value is None:
+                continue
+            item = dict(base)
+            item["Indicador"] = label
+            item["Valor"] = _to_float(value)
+            records.append(item)
+
+    return pd.DataFrame(records)
+
+
+def get_dnit_performance_projection(
+    selected_road: str | None = None,
+    scenario_keys: list[str] | tuple[str, ...] | None = None,
+) -> dict:
+    """Séries anuais da view de desempenho para comparar cenários técnicos."""
+    road = selected_road or get_available_roads()[0]
+    code = _normalize_road_code(road)
+    if not code:
+        return {"road": road, "available": False}
+
+    available = get_available_scenarios(road, "Paragon") + get_available_scenarios(road, "Matriz Cadastrada")
+    by_key = {str(s["key"]): s for s in available}
+    selected_keys = [str(key) for key in (scenario_keys or []) if str(key) in by_key]
+    if not selected_keys and available:
+        selected_keys = [str(available[0]["key"])]
+    if not selected_keys:
+        return {"road": road, "available": False}
+
+    frames: list[pd.DataFrame] = []
+    scenario_labels: dict[str, str] = {}
+    intervention_markers: list[dict[str, Any]] = []
+    segment_lookup: dict[str, str] = {}
+
+    for key in selected_keys:
+        scenario = by_key.get(key)
+        if not scenario:
+            continue
+        analysis = {
+            "analise_id": int(scenario["analise_id"]),
+            "ciclo_id": int(scenario["ciclo_id"]),
+        }
+
+        label = str(scenario.get("cenario") or key)
+        scenario_labels[key] = label
+
+        perf = _get_dnit_performance_projection(analysis["ciclo_id"], analysis["analise_id"])
+        if not perf.empty:
+            perf = perf.copy()
+            perf["_scenario_key"] = key
+            perf["_scenario_label"] = label
+            segment_lookup.update(
+                {
+                    str(row["_segment_token"]): str(row["_segment_label"])
+                    for _, row in perf[["_segment_token", "_segment_label"]].drop_duplicates().iterrows()
+                }
+            )
+            frames.append(perf)
+        segment_by_id = {}
+        if not perf.empty:
+            segment_by_id = {
+                int(row["_segment_id"]): {
+                    "token": str(row["_segment_token"]),
+                    "label": str(row["_segment_label"]),
+                }
+                for _, row in perf[["_segment_id", "_segment_token", "_segment_label"]].drop_duplicates().iterrows()
+            }
+
+        if scenario.get("tipo_matriz") == "Matriz Cadastrada":
+            schedule = _get_dnit_projection_intervencoes(analysis["ciclo_id"], analysis["analise_id"])
+            if schedule.empty:
+                continue
+            grouped_schedule = (
+                schedule.groupby(["_segment_id", "Ano"])
+                .agg(
+                    solucoes=("Solução núcleo", lambda vals: ", ".join(sorted({str(v) for v in vals if str(v) and str(v) != "—"}))),
+                    grupos=("Solução grupo", lambda vals: ", ".join(sorted({str(v) for v in vals if str(v)}))),
+                )
+                .reset_index()
+            )
+            for _, row in grouped_schedule.iterrows():
+                segment_ref = segment_by_id.get(int(row["_segment_id"]))
+                if not segment_ref:
+                    continue
+                intervention_markers.append({
+                    "_scenario_key": key,
+                    "_scenario_label": label,
+                    "_segment_token": segment_ref["token"],
+                    "_segment_label": segment_ref["label"],
+                    "Ano": int(row["Ano"]),
+                    "Soluções": row["solucoes"] or "Intervenção",
+                    "Grupos": row["grupos"] or "",
+                    "Cor": _DNIT_GROUP_COLORS.get(str(row["grupos"]).split(",")[0].strip(), "#f4f7fb"),
+                })
+        else:
+            db = MySQLConnection()
+            rows = db.execute_query(
+                """
+                SELECT segmento_pista_id, ano, iapa, solucao_corretiva_final
+                FROM analise_gerencial_intervencoes_iap
+                WHERE gerencial_ciclo_id = %s
+                  AND ano IS NOT NULL
+                """,
+                (analysis["ciclo_id"],),
+            ) or []
+            by_segment_year: dict[tuple[int, int], set[str]] = {}
+            for row in rows:
+                solution = str(row.get("solucao_corretiva_final") or "").strip()
+                if not solution or str(solution).upper() == "OK":
+                    continue
+                by_segment_year.setdefault((int(row["segmento_pista_id"]), int(row["ano"])), set()).add(str(solution))
+            for (seg_id, year), solutions in sorted(by_segment_year.items()):
+                segment_ref = segment_by_id.get(seg_id)
+                if not segment_ref:
+                    continue
+                primary = sorted(solutions, key=lambda value: _IAP_INTERVENTION_ORDER.index(value) if value in _IAP_INTERVENTION_ORDER else 99)[0]
+                intervention_markers.append({
+                    "_scenario_key": key,
+                    "_scenario_label": label,
+                    "_segment_token": segment_ref["token"],
+                    "_segment_label": segment_ref["label"],
+                    "Ano": int(year),
+                    "Soluções": ", ".join(sorted(solutions)),
+                    "Grupos": primary,
+                    "Cor": _IAP_INTERVENTION_COLORS.get(primary, "#f4f7fb"),
+                })
+
+    if not frames:
+        return {
+            "road": road,
+            "available": False,
+            "scenario_labels": scenario_labels,
+            "interventions": intervention_markers,
+        }
+
+    raw = pd.concat(frames, ignore_index=True)
+    grouped = (
+        raw.groupby(["_scenario_key", "_scenario_label", "_segment_token", "_segment_label", "Indicador", "Ano"])
+        .agg(Valor=("Valor", "mean"))
+        .reset_index()
+    )
+    segment_options = [
+        {"token": token, "label": label}
+        for token, label in sorted(segment_lookup.items(), key=lambda item: item[1])
+    ]
+
+    return {
+        "road": road,
+        "available": True,
+        "series": grouped[["_scenario_key", "_scenario_label", "_segment_token", "_segment_label", "Indicador", "Ano", "Valor"]].copy(),
+        "segments": segment_options,
+        "scenario_labels": scenario_labels,
+        "interventions": intervention_markers,
+        "metrics": sorted(grouped["Indicador"].dropna().astype(str).unique().tolist()),
+        "anos": sorted(grouped["Ano"].dropna().astype(int).unique().tolist()),
+    }
 
 
 def get_dnit_iri_projection(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
