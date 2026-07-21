@@ -21,6 +21,7 @@ _ICON_SVGS = {
     "grid": "<path d='M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z'/>",
     "activity": "<path d='M3 12h4l3-7 4 14 3-7h4'/>",
     "tool": "<path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.8 2.8-3-3z'/>",
+    "compare": "<path d='M7 7h12M15 3l4 4-4 4M17 17H5M9 13l-4 4 4 4'/>",
     "trend": "<path d='M3 7l6 6 4-4 8 8'/>",
     "scale": "<path d='M12 3v18M5 7h14M6 7l-3 7h6zM18 7l-3 7h6z'/>",
     "shield": "<path d='M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6z'/>",
@@ -50,12 +51,14 @@ def render_sidebar(active_key: str = "overview") -> None:
     link `?page=<key>` com target=_self (recarrega na mesma aba). Rótulos e
     descrições são escapados antes de entrarem no HTML.
     """
+    current_theme = str(st.session_state.get("dashboard_theme", "dark"))
     items_html = []
     for item in MENU_ITEMS:
         # Destaca o item cuja key bate com a página ativa.
         active_class = " active" if item["key"] == active_key else ""
+        href = f'?page={html.escape(item["key"])}&theme={html.escape(current_theme)}'
         items_html.append(
-            f'<a class="side-item{active_class}" href="?page={html.escape(item["key"])}" target="_self">'
+            f'<a class="side-item{active_class}" href="{href}" target="_self">'
             f'<div class="side-icon">{_menu_icon(item["icon"])}</div>'
             '<div class="side-copy">'
             f'<div class="side-label">{html.escape(item["label"])}</div>'
@@ -78,3 +81,10 @@ def render_sidebar(active_key: str = "overview") -> None:
     )
 
     st.sidebar.markdown(sidebar_html, unsafe_allow_html=True)
+
+    next_theme = "light" if current_theme == "dark" else "dark"
+    label = "Tema claro" if current_theme == "dark" else "Tema escuro"
+    if st.sidebar.button(label, key="sidebar_theme_toggle", use_container_width=True):
+        st.session_state["dashboard_theme"] = next_theme
+        st.query_params["theme"] = next_theme
+        st.rerun()

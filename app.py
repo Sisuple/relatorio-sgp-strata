@@ -3,15 +3,15 @@
 Este arquivo é o ponto de entrada e o roteador da UI. `main()` lê o parâmetro
 `?page=` da URL e monta a tela correspondente da jornada de decisão executiva:
 
-    Visão geral → Diagnóstico → Soluções → Cenário econômico → Projeção
-       (rede)      (condição)    (o que fazer)  (quanto custa)   (evolução)
+    Visão geral → Diagnóstico → Soluções → Comparativo → Cenário econômico
+       (rede)      (condição)    (o que fazer)  (comparar)       (quanto custa)
 
 Cada trilha metodológica tem seu par de telas: as funções `_render_*` cobrem a
 metodologia **Paragon** e as `_render_dnit_*` cobrem a **Matriz Cadastrada (DNIT)**.
 O roteamento entre as duas é decidido pelo "Tipo de Matriz" escolhido na top bar.
 
 Papel deste módulo: concentrar as REGRAS DE APRESENTAÇÃO e boa parte das regras de
-negócio hardcoded (cores, custos paramétricos, estratégias, mapeamentos código→nome,
+negócio hardcoded (cores, estratégias, mapeamentos código→nome,
 pesos de priorização). Os dados técnicos já vêm processados pelas camadas `services/`
 e `components/`. As regras hardcoded aqui estão catalogadas no README.md Parte II
 (§11 Terminologia/Cores, §12 Limiares, §13 Priorização, §14 Custos/Econômico/Famílias).
@@ -50,6 +50,7 @@ from services.overview_service import (
     get_scenario_label,
     get_dnit_economic_data,
     get_dnit_iri_projection,
+    get_dnit_performance_projection,
     get_dnit_overview_data,
     get_dnit_projection_schedule,
     get_dnit_solutions_data,
@@ -80,8 +81,18 @@ st.set_page_config(
     page_title="IAGON · Pavimentos",
     page_icon="●",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
+
+
+def _dashboard_theme() -> str:
+    """Tema visual do painel. As cores técnicas dos dados não entram nessa troca."""
+    query_theme = str(st.query_params.get("theme", "")).lower()
+    if query_theme in {"dark", "light"}:
+        st.session_state["dashboard_theme"] = query_theme
+    elif "dashboard_theme" not in st.session_state:
+        st.session_state["dashboard_theme"] = "dark"
+    return str(st.session_state["dashboard_theme"])
 
 
 def inject_css() -> None:
@@ -109,6 +120,13 @@ def inject_css() -> None:
             }
 
             #MainMenu, footer, header[data-testid="stHeader"] { display: none; }
+            /* Mantém o menu lateral sempre disponível para navegação entre telas. */
+            [data-testid="collapsedControl"],
+            [data-testid="stSidebarCollapseButton"] {
+                display: none !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+            }
             [data-testid="stAppViewContainer"] { background: var(--bg); color: var(--text); }
             [data-testid="stMain"] { background: var(--bg); }
 
@@ -139,6 +157,23 @@ def inject_css() -> None:
             .side-label { font-size: 13px; line-height: 1.1; color: inherit; font-weight: 800; }
             .side-description { font-size: 10px; line-height: 1.2; color: #83929e; margin-top: 3px; }
             .side-item.active .side-description { color: #75b8c5; }
+            [data-testid="stSidebar"] div[data-testid="stButton"] {
+                position: fixed;
+                left: 14px;
+                bottom: 16px;
+                width: 224px;
+                z-index: 30;
+            }
+            [data-testid="stSidebar"] div[data-testid="stButton"] button {
+                min-height: 36px;
+                border: 1px solid #244257;
+                border-radius: 999px;
+                background: #0b1a23;
+                color: #f4f7fb;
+                font-size: 11px;
+                font-weight: 850;
+                box-shadow: 0 12px 26px rgba(0,0,0,.18);
+            }
 
             .top-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin: 4px 0 12px; }
             .eyebrow { margin: 0 0 2px; color: #8c9ba7; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
@@ -174,6 +209,10 @@ def inject_css() -> None:
             .tone-yellow { color: var(--yellow); border-color: rgba(250,204,21,.22); }
 
             .element-container:has(.metric-card) { height: 100%; }
+            .need-breakdown { margin: 10px 0 2px; display: flex; flex-wrap: wrap; gap: 8px; }
+            .need-breakdown-pill { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 6px 10px; border-radius: 999px; border: 1px solid rgba(34,211,238,.20); background: rgba(8,26,36,.62); color: #9fb0bd; font-size: 11px; font-weight: 800; }
+            .need-breakdown-pill strong { color: #e8f1f8; font-size: 12px; font-weight: 900; }
+            .need-breakdown-pill span { color: #00c2e8; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 900; }
             iframe { border-radius: 14px; }
 
             .chart-card { margin-top: 14px; min-height: 436px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; box-shadow: 0 18px 44px rgba(0,0,0,.24); padding: 20px 20px 18px; }
@@ -231,6 +270,7 @@ def inject_css() -> None:
             .linear-card-compact .linear-diagram { margin-top: 20px; }
             .linear-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
             .linear-diagram { margin-top: 28px; display: grid; gap: 12px; }
+            .linear-scenario-label { margin-top: 12px; font-weight: 850; color: var(--text); font-size: 13px; }
             .linear-row { display: grid; grid-template-columns: 48px 1fr; align-items: center; gap: 12px; }
             .linear-row-label { color: var(--text); font-size: 12px; font-weight: 850; text-align: right; }
             .linear-track { height: 17px; display: flex; overflow: hidden; border-radius: 2px; background: rgba(148,163,184,.16); box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }
@@ -286,12 +326,25 @@ def inject_css() -> None:
             .net-rank-interv-label { padding: 0 8px; color: #08202b; font-size: 10px; font-weight: 900; letter-spacing: .02em; white-space: nowrap; text-shadow: none; }
             .net-rank-val { color: #f2f7fb; font-size: 13px; font-weight: 850; text-align: right; white-space: nowrap; }
             .net-rank-extra { grid-column: 2 / span 2; color: #8f9eaa; font-size: 11px; line-height: 1.35; }
+            .net-rank-group { margin: 0 0 12px; padding: 14px 12px 13px; border: 1px solid rgba(0,194,232,.14); border-radius: 14px; background: rgba(7,22,31,.36); transition: background .15s ease, box-shadow .15s ease; }
+            .net-rank-group:hover { background: rgba(9,30,42,.42); }
+            .net-rank-group.active { box-shadow: inset 0 0 0 1px rgba(0,194,232,.14); }
+            .net-rank-group:last-child { margin-bottom: 0; }
+            .net-rank-group-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+            .net-rank-group-title { color: #e8f1f8; font-size: 13px; font-weight: 850; text-decoration: none; }
+            .net-rank-group-title:hover { color: #00c2e8; }
+            .net-rank-group-meta { color: #8f9eaa; font-size: 11px; font-weight: 750; white-space: nowrap; }
+            .net-rank-slice { display: grid; grid-template-columns: 174px 1fr 64px; grid-template-rows: auto auto; align-items: center; column-gap: 14px; row-gap: 5px; padding: 9px 0; border-top: 1px solid rgba(148,163,184,.08); }
+            .net-rank-slice:first-of-type { border-top: 0; }
+            .net-rank-slice-name { grid-row: 1 / span 2; color: #54d6ff; font-size: 12px; font-weight: 850; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             @media (max-width: 920px) {
                 .net-rank-row { grid-template-columns: minmax(0, 1fr) 70px; grid-template-rows: auto auto auto; row-gap: 7px; padding: 12px 0 15px; }
                 .net-rank-name { grid-column: 1 / span 2; grid-row: 1; white-space: normal; }
                 .net-rank-track { grid-column: 1; grid-row: 2; }
                 .net-rank-val { grid-column: 2; grid-row: 2; }
                 .net-rank-extra { grid-column: 1 / span 2; grid-row: 3; }
+                .net-rank-slice { grid-template-columns: minmax(0, 1fr) 70px; grid-template-rows: auto auto auto; row-gap: 7px; }
+                .net-rank-slice-name { grid-column: 1 / span 2; grid-row: 1; white-space: normal; }
             }
             .iagon-hero { display: flex; gap: 14px; align-items: center; margin: 4px 0 16px; padding: 18px 20px; border-radius: 16px; border: 1px solid #1d3848; background: linear-gradient(120deg, rgba(0,194,232,.10), rgba(11,29,40,.45)); }
             .iagon-avatar { width: 46px; height: 46px; flex: none; display: grid; place-items: center; border-radius: 14px; background: linear-gradient(135deg, #00c2e8, #0a6ee0); color: #04121a; font-size: 22px; font-weight: 800; box-shadow: 0 10px 28px rgba(0,194,232,.35); }
@@ -397,7 +450,14 @@ def inject_css() -> None:
             .solution-filter-label { margin: 0 0 6px; color: #8f9eaa; font-size: 10px; letter-spacing: .11em; text-transform: uppercase; font-weight: 850; }
             div[data-testid="stMultiSelect"] label,
             div[data-testid="stSlider"] label { display: none; }
-            div[data-baseweb="tag"] { background: rgba(0,194,232,.14); color: var(--text); }
+            div[data-baseweb="tag"] {
+                background: rgba(0,194,232,.14) !important;
+                border: 1px solid rgba(0,194,232,.30) !important;
+                color: #d8eef5 !important;
+                box-shadow: inset 0 0 0 1px rgba(6,16,24,.12);
+            }
+            div[data-baseweb="tag"] span { color: #d8eef5 !important; font-weight: 800 !important; }
+            div[data-baseweb="tag"] svg { color: #9bcbd7 !important; fill: #9bcbd7 !important; }
             .pagination-summary { color: #9aa8b3; font-size: 12px; padding-top: 28px; text-align: right; }
             div[data-testid="stNumberInput"] label { display: none; }
             div[data-testid="stNumberInput"] input,
@@ -412,6 +472,24 @@ def inject_css() -> None:
                 font-weight: 800;
             }
             .economic-panel { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; padding: 20px; box-shadow: 0 18px 44px rgba(0,0,0,.18); }
+            .comparison-x { height: 100%; min-height: 88px; display: grid; place-items: center; color: #00c2e8; font-size: 28px; line-height: 1; font-weight: 900; opacity: .82; padding-top: 18px; }
+            .comparison-side-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; }
+            .comparison-side-title b { color:#e8f1f8; font-size:13px; font-weight:850; }
+            .comparison-side-title span { color:#8f9eaa; font-size:10px; letter-spacing:.11em; text-transform:uppercase; font-weight:850; }
+            .comparison-side-grid { display:grid; grid-template-columns:minmax(160px,.72fr) minmax(240px,1.28fr); gap:12px; align-items:end; }
+            .comparison-param-title { color:#8f9eaa; font-size:10px; letter-spacing:.12em; text-transform:uppercase; font-weight:850; margin:18px 0 10px; padding-top:16px; border-top:1px solid rgba(34,211,238,.10); }
+            .comparison-summary { display:grid; grid-template-columns:minmax(0,1fr) 34px minmax(0,1fr); align-items:stretch; gap:12px; margin:10px 0 14px; }
+            .comparison-pill { border:1px solid rgba(34,211,238,.22); background:linear-gradient(135deg, rgba(8,28,38,.92), rgba(7,18,27,.92)); border-radius:12px; padding:12px 14px; min-height:64px; }
+            .comparison-pill small { display:block; color:#8f9eaa; font-size:10px; letter-spacing:.12em; text-transform:uppercase; font-weight:850; margin-bottom:7px; }
+            .comparison-pill strong { display:block; color:#e8f1f8; font-size:14px; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+            .comparison-pill span { display:block; color:#00c2e8; font-size:11px; font-weight:800; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+            .comparison-summary-x { display:grid; place-items:center; color:#00c2e8; font-size:22px; font-weight:900; opacity:.88; }
+            .comparison-param-summary { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:4px 0 18px; color:#9fb0bd; font-size:12px; font-weight:750; }
+            .comparison-param-summary b { color:#00c2e8; font-weight:900; }
+            .comparison-param-chip { border:1px solid rgba(148,163,184,.16); background:rgba(8,26,36,.72); border-radius:999px; padding:7px 10px; }
+            .comparison-param-row { margin-bottom:12px; }
+            div[data-testid="stRadio"] label p { color:#c9d6df !important; font-weight:inherit !important; font-size:inherit !important; }
+            div[data-testid="stRadio"] [role="radiogroup"] label { opacity:1 !important; }
             .economic-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
             .economic-title { display: flex; align-items: center; gap: 10px; }
             .economic-icon { width: 32px; height: 32px; border-radius: 12px; display: grid; place-items: center; background: #00c2e8; color: #031019; font-weight: 900; }
@@ -441,6 +519,28 @@ def inject_css() -> None:
             .economic-scroll .economic-labels { min-width: max-content; }
             .economic-legend span { display: inline-flex; align-items: center; gap: 6px; }
             .economic-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+            .segment-timeline-panel { padding-bottom: 18px; }
+            .segment-timeline-titlebar { display: flex; align-items: center; gap: 10px; padding: 4px 0 10px; }
+            .segment-timeline-titlebar h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
+            .segment-control-caption { color: #8f9eaa; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 900; text-align: right; margin: 4px 0 2px; }
+            .segment-control-caption + div[data-testid="stRadio"] [role="radiogroup"] { justify-content: flex-end; gap: 6px; }
+            .segment-control-caption + div[data-testid="stRadio"] label { border: 1px solid rgba(34,211,238,.18); border-radius: 999px; background: rgba(8,26,36,.58); padding: 4px 8px; }
+            .segment-control-caption + div[data-testid="stRadio"] label p { font-size: 10px !important; line-height: 1 !important; font-weight: 900 !important; color: #d8eef5 !important; text-transform: uppercase; }
+            .segment-timeline-scroll { overflow-x: auto; overflow-y: auto; max-height: 520px; padding-bottom: 10px; scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.5) rgba(148,163,184,.12); }
+            .segment-timeline-scroll::-webkit-scrollbar { height: 10px; width: 10px; }
+            .segment-timeline-scroll::-webkit-scrollbar-track { background: rgba(148,163,184,.10); border-radius: 6px; }
+            .segment-timeline-scroll::-webkit-scrollbar-thumb { background: rgba(148,163,184,.45); border-radius: 6px; }
+            .segment-timeline-scroll::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,.72); }
+            .segment-timeline-grid { display: grid; min-width: max-content; border: 1px solid rgba(148,163,184,.16); border-radius: 12px; overflow: hidden; background: rgba(6,16,24,.24); }
+            .segment-timeline-cell { min-height: 44px; padding: 8px; border-right: 1px solid rgba(148,163,184,.12); border-bottom: 1px solid rgba(148,163,184,.12); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+            .segment-timeline-head, .segment-timeline-year { position: sticky; top: 0; z-index: 2; min-height: 38px; background: #0b1d28; color: #cbd5dd; font-size: 10px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }
+            .segment-timeline-segment { position: sticky; left: 0; z-index: 1; background: #0b1d28; color: #e8f1f8; display: grid; align-content: center; gap: 3px; min-width: 0; }
+            .segment-timeline-segment strong { display: block; font-size: 11px; font-weight: 900; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .segment-timeline-segment span { display: block; color: #8f9eaa; font-size: 10px; font-weight: 800; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .segment-timeline-head { left: 0; z-index: 3; }
+            .segment-timeline-chip { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; border-radius: 8px; padding: 4px 8px; font-size: 10px; font-weight: 900; line-height: 1; box-shadow: 0 8px 20px rgba(0,0,0,.18); max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .segment-timeline-empty { background: rgba(8,26,36,.28); }
+            .segment-timeline-note { color: #9aa8b3; font-size: 11px; margin: -8px 0 12px; }
             .priority-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; margin-right: 7px; }
 
             @media (max-width: 980px) {
@@ -457,6 +557,332 @@ def inject_css() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    if _dashboard_theme() == "light":
+        st.markdown(
+            """
+            <style>
+                :root {
+                    --bg: #eef3f6;
+                    --sidebar: #f7fafc;
+                    --surface: #ffffff;
+                    --surface-2: #edf4f7;
+                    --border: #c9d8e1;
+                    --muted: #5f7280;
+                    --text: #13232e;
+                }
+
+                [data-testid="stAppViewContainer"],
+                [data-testid="stMain"] {
+                    background: var(--bg) !important;
+                    color: var(--text) !important;
+                }
+                [data-testid="stSidebar"],
+                .sidebar-shell {
+                    background: var(--sidebar) !important;
+                }
+                [data-testid="stSidebar"] {
+                    border-right-color: var(--border) !important;
+                }
+                iframe {
+                    background: var(--bg) !important;
+                    color-scheme: light;
+                }
+
+                .page-title,
+                .brand-title,
+                .chart-heading h3,
+                .solution-card-head h3,
+                .metric-value,
+                .linear-row-label,
+                .linear-axis-title,
+                .linear-legend strong,
+                .iap-donut-center,
+                .iap-legend-item,
+                .solution-panel-title,
+                .economic-head h3,
+                .solution-distribution h3,
+                .comparison-title,
+                .segment-timeline-title,
+                .comparison-side-title b,
+                .comparison-param-title,
+                .comparison-pill strong,
+                .comparison-pill small,
+                .segment-timeline-segment strong,
+                .economic-control-value,
+                .solution-table strong,
+                .comparison-pill strong,
+                .net-rank-group-title,
+                .net-rank-val,
+                .segment-control-caption + div[data-testid="stRadio"] label p {
+                    color: var(--text) !important;
+                }
+
+                .eyebrow,
+                .filter-label,
+                .metric-title,
+                .chart-heading p,
+                .metric-subtitle,
+                .brand-subtitle,
+                .solution-card-head p,
+                .economic-head p,
+                .solution-panel-subtitle,
+                .iap-percent,
+                .linear-tick,
+                .comparison-subtitle,
+                .comparison-side-title span,
+                .comparison-param-summary,
+                .segment-timeline-subtitle,
+                .segment-timeline-segment span,
+                .segment-control-caption,
+                .solution-filter-label,
+                .pagination-summary,
+                .economic-control-label,
+                .economic-legend,
+                .iap-legend-note,
+                .net-rank-extra,
+                .net-rank-group-meta {
+                    color: var(--muted) !important;
+                }
+                [data-testid="stMarkdownContainer"] p,
+                [data-testid="stMarkdownContainer"] li {
+                    color: inherit;
+                }
+                .chart-card [data-testid="stPlotlyChart"] text,
+                .chart-card .js-plotly-plot .main-svg text,
+                .chart-card svg text,
+                .solution-card [data-testid="stPlotlyChart"] text,
+                .economic-panel [data-testid="stPlotlyChart"] text {
+                    fill: #506576 !important;
+                    color: #506576 !important;
+                    text-shadow: none !important;
+                }
+                .chart-card [data-testid="stPlotlyChart"] .annotation-text,
+                .chart-card .js-plotly-plot .annotation-text {
+                    fill: #13232e !important;
+                    color: #13232e !important;
+                }
+                .economic-bar span {
+                    color: #13232e !important;
+                    text-shadow: none !important;
+                }
+                .economic-y-tick,
+                .economic-labels {
+                    color: #6b7f8f !important;
+                }
+                .iap-card .iap-donut {
+                    box-shadow: 0 16px 34px rgba(18,43,58,.08) !important;
+                }
+                .iap-card .iap-donut:after {
+                    background: #ffffff !important;
+                    box-shadow: inset 0 0 0 1px rgba(19,35,46,.08) !important;
+                }
+                .iap-card .iap-donut-center strong {
+                    color: #13232e !important;
+                }
+                .iap-card .iap-donut-center span {
+                    color: #5f7280 !important;
+                }
+                .iap-card .iap-slice-label {
+                    color: #506576 !important;
+                    text-shadow: none !important;
+                }
+                .solution-distribution .solution-bar-value {
+                    color: #13232e !important;
+                    text-shadow: none !important;
+                }
+                .solution-distribution .solution-bar-value span {
+                    color: #506576 !important;
+                }
+                .solution-y-tick,
+                .solution-bar-label {
+                    color: #6b7f8f !important;
+                }
+                .comparison-pill {
+                    background: #ffffff !important;
+                    border-color: #bfd2dc !important;
+                    box-shadow: 0 12px 26px rgba(18,43,58,.08) !important;
+                }
+                .comparison-param-title {
+                    border-top-color: rgba(95,114,128,.22) !important;
+                }
+                .status-pill[style*="grid-template-columns"] {
+                    background: #ffffff !important;
+                    border-color: #bfd2dc !important;
+                    color: #13232e !important;
+                }
+                .status-pill[style*="grid-template-columns"] div {
+                    color: #13232e !important;
+                }
+                .status-pill[style*="grid-template-columns"] div[style*="#00c2e8"] {
+                    color: #008fad !important;
+                }
+                .status-pill[style*="grid-template-columns"] div[style*="#f2a51a"] {
+                    color: #b87900 !important;
+                }
+                .status-pill[style*="grid-template-columns"] div[style*="letter-spacing:.14em"],
+                .status-pill[style*="grid-template-columns"] div[style*="letter-spacing: .14em"] {
+                    color: #6b7f8f !important;
+                }
+                div[data-testid="stRadio"] label p,
+                div[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {
+                    color: #13232e !important;
+                }
+                div[data-testid="stRadio"] label[data-baseweb="radio"] p {
+                    color: #13232e !important;
+                }
+                .segment-control-caption + div[data-testid="stRadio"] label {
+                    background: #ffffff !important;
+                    border-color: #bfd2dc !important;
+                }
+                .segment-control-caption + div[data-testid="stRadio"] label p {
+                    color: #13232e !important;
+                }
+
+                div[data-baseweb="select"] > div,
+                .filter-placeholder,
+                .status-pill,
+                .detail-toggle,
+                .comparison-param-chip,
+                .economic-note {
+                    background: #ffffff !important;
+                    border-color: #bfd2dc !important;
+                    color: var(--text) !important;
+                }
+                div[data-baseweb="select"] span,
+                div[data-baseweb="select"] svg,
+                div[data-testid="stSelectbox"] input,
+                div[data-testid="stMultiSelect"] input {
+                    color: var(--text) !important;
+                    fill: var(--text) !important;
+                }
+                div[data-baseweb="popover"] {
+                    background: #ffffff !important;
+                }
+                div[data-baseweb="menu"] {
+                    background: #ffffff !important;
+                    color: var(--text) !important;
+                }
+                div[role="option"],
+                li[role="option"] {
+                    color: var(--text) !important;
+                    background: #ffffff !important;
+                }
+                div[role="option"]:hover,
+                li[role="option"]:hover {
+                    background: #e7f2f7 !important;
+                }
+                div[data-baseweb="tag"] {
+                    background: #dff6fb !important;
+                    border-color: #8fcfde !important;
+                    color: #075668 !important;
+                    box-shadow: none !important;
+                }
+                div[data-baseweb="tag"] span,
+                div[data-baseweb="tag"] svg {
+                    color: #075668 !important;
+                    fill: #075668 !important;
+                }
+
+                .metric-card,
+                .chart-card,
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[data-testid="stVerticalBlock"] > div:first-child .iap-zoom-marker),
+                .solution-card,
+                .solution-distribution,
+                .solution-panel,
+                .economic-panel,
+                .alert-item,
+                .iagon-hero,
+                .comparison-summary-row,
+                .scenario-summary-card,
+                .segment-timeline-card {
+                    background: #ffffff !important;
+                    border-color: var(--border) !important;
+                    box-shadow: 0 16px 34px rgba(18,43,58,.10) !important;
+                }
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[data-testid="stVerticalBlock"] > div:first-child .iap-zoom-marker) {
+                    background: #ffffff !important;
+                }
+                .metric-card {
+                    background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(241,247,250,.98)) !important;
+                }
+                .metric-icon {
+                    background: rgba(19,35,46,.08) !important;
+                }
+                .net-rank-group {
+                    background: transparent !important;
+                    border-color: #d7e4eb !important;
+                    box-shadow: none !important;
+                }
+                .net-rank-group:hover,
+                .net-rank-group.active {
+                    background: #f8fbfc !important;
+                    box-shadow: inset 0 0 0 1px rgba(0,127,155,.08) !important;
+                }
+
+                .side-item {
+                    color: #516575 !important;
+                }
+                .side-item.active {
+                    background: #dff6fb !important;
+                    color: #007f9b !important;
+                }
+                .side-description {
+                    color: #78909d !important;
+                }
+                .side-item.active .side-description {
+                    color: #33899a !important;
+                }
+                [data-testid="stSidebar"] div[data-testid="stButton"] button {
+                    border-color: #bfd2dc !important;
+                    background: #ffffff !important;
+                    color: #13232e !important;
+                    box-shadow: 0 10px 24px rgba(18,43,58,.08) !important;
+                }
+
+                .segment-table,
+                .solution-table td,
+                .detail-row td.detail-cell,
+                .iagon-cv-filtro,
+                .segment-timeline-grid,
+                .segment-timeline-head,
+                .segment-timeline-segment {
+                    background: #f7fafc !important;
+                    border-color: #d5e2e9 !important;
+                    color: #2c3e4a !important;
+                }
+                .solution-table th {
+                    background: #edf4f7 !important;
+                    color: #637684 !important;
+                }
+                .segment-timeline-empty {
+                    background: rgba(203, 216, 225, .38) !important;
+                }
+                .segment-timeline-cell {
+                    border-color: #d5e2e9 !important;
+                    color: #13232e !important;
+                }
+                .segment-timeline-year,
+                .segment-timeline-head {
+                    background: #102431 !important;
+                    color: #f4f7fb !important;
+                }
+                .detail-summary,
+                .snv-strip-axis,
+                .snv-cost-val {
+                    color: #5f7280 !important;
+                }
+                .snv-strip-leg,
+                .snv-cost-lbl {
+                    color: #334755 !important;
+                }
+                .snv-cost-track {
+                    background: #e5edf2 !important;
+                }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -483,7 +909,10 @@ def _sync_selected_road(selected_road: str | None) -> None:
     """Compartilha a rodovia escolhida entre a Visão geral e as demais telas."""
     if not selected_road:
         return
-    st.session_state["topbar_road"] = selected_road
+    # O seletor compartilhado pode já ter sido montado com esta mesma chave.
+    # Nesse caso, regravar o valor gera StreamlitAPIException mesmo sem mudança real.
+    if st.session_state.get("topbar_road") != selected_road:
+        st.session_state["topbar_road"] = selected_road
     st.query_params["road"] = _normalize_road_code(selected_road) or selected_road
 
 
@@ -492,7 +921,7 @@ def _sync_selected_road(selected_road: str | None) -> None:
 _DIAGNOSIS_TO_MATRIX = {
     "Diagnóstico Paragon": "Paragon",
     "Diagnóstico DNIT": "Matriz Cadastrada",
-    "Comparativo Paragon × DNIT": "Comparativo Paragon × DNIT",
+    "Comparativo": "Comparativo",
 }
 _MATRIX_TO_DIAGNOSIS = {v: k for k, v in _DIAGNOSIS_TO_MATRIX.items()}
 
@@ -661,10 +1090,10 @@ def render_top_bar(
                 scenarios = get_available_scenarios(selected_out, matrix_type)
                 with scenario_col:
                     # Comparativo não usa o seletor de Cenários (cada metodologia tem o seu).
-                    if diagnosis == "Comparativo Paragon × DNIT":
+                    if diagnosis == "Comparativo":
                         _filter_label("Cenários")
                         st.markdown(
-                            '<div class="status-pill" style="margin-top:2px">Auto · Paragon (SH) + DNIT Revitaliza</div>',
+                            '<div class="status-pill" style="margin-top:2px">Configurado abaixo</div>',
                             unsafe_allow_html=True,
                         )
                         scenario_key = None
@@ -735,6 +1164,7 @@ def _collect_network_scenario_options(roads: list[str], matrix_type: str) -> lis
         for scenario in get_available_scenarios(road, matrix_type):
             short_label = _network_scenario_label(scenario) or str(scenario.get("key", ""))
             display_label = f"{road} - {short_label}" if multi_road else short_label
+            pista = _normalize_scenario_pista(scenario)
             options.append(
                 {
                     "token": _network_scenario_token(road, str(scenario["key"])),
@@ -743,10 +1173,87 @@ def _collect_network_scenario_options(roads: list[str], matrix_type: str) -> lis
                     "scenario_key": str(scenario["key"]),
                     "display_label": display_label,
                     "short_label": short_label,
+                    "pista": pista,
                 }
             )
     options.sort(key=lambda item: (str(item["road"]), str(item["display_label"])))
     return options
+
+
+def _normalize_scenario_pista(scenario: dict | None) -> str:
+    """Normaliza a pista do cenário para aplicar regras de seleção na Visão geral."""
+    if not scenario:
+        return ""
+    raw = str(scenario.get("pista") or "").strip().lower()
+    name = str(scenario.get("cenario") or scenario.get("nome") or "").strip().lower()
+    value = raw or name
+    if "todos" in value:
+        return "todos"
+    if "decrescente" in value:
+        return "decrescente"
+    if "crescente" in value and "decrescente" not in value:
+        return "crescente"
+    return value or "outro"
+
+
+def _sanitize_network_scenario_selection(selected_tokens: list[str], scenario_options: list[dict]) -> tuple[list[str], str | None]:
+    """Impede combinações de cenários que duplicam a mesma pista/rodovia.
+
+    Regra:
+    - `Todos` é exclusivo para a rodovia;
+    - `Crescente` só pode combinar com `Decrescente`;
+    - `Decrescente` só pode combinar com `Crescente`;
+    - qualquer outra pista fica exclusiva para evitar dupla contagem.
+    """
+    if not selected_tokens:
+        return [], None
+
+    option_by_token = {str(item["token"]): item for item in scenario_options}
+    selected = [str(token) for token in selected_tokens if str(token) in option_by_token]
+    by_road: dict[str, list[str]] = {}
+    for token in selected:
+        road_code = str(option_by_token[token].get("road_code") or option_by_token[token].get("road") or "")
+        by_road.setdefault(road_code, []).append(token)
+
+    sanitized: list[str] = []
+    changed = False
+    for road_code, tokens in by_road.items():
+        if len(tokens) <= 1:
+            sanitized.extend(tokens)
+            continue
+
+        def _pista(token: str) -> str:
+            return str(option_by_token[token].get("pista") or "")
+
+        todos = [token for token in tokens if _pista(token) == "todos"]
+        if todos:
+            sanitized.append(todos[0])
+            changed = True
+            continue
+
+        crescentes = [token for token in tokens if _pista(token) == "crescente"]
+        decrescentes = [token for token in tokens if _pista(token) == "decrescente"]
+        if crescentes or decrescentes:
+            allowed = []
+            if crescentes:
+                allowed.append(crescentes[0])
+            if decrescentes:
+                allowed.append(decrescentes[0])
+            sanitized.extend(allowed)
+            changed = changed or len(allowed) != len(tokens)
+            continue
+
+        sanitized.append(tokens[0])
+        changed = True
+
+    ordered = [token for token in selected if token in set(sanitized)]
+    message = None
+    if changed or ordered != selected:
+        message = (
+            "A seleção de cenários foi ajustada para evitar dupla contagem: "
+            "`Todos` fica sozinho; `Crescente` só combina com `Decrescente`."
+        )
+    return ordered, message
 
 
 def _collect_network_year_options(
@@ -781,22 +1288,10 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
     with right:
         road_col, matriz_col, scenario_col, year_col = st.columns([1.0, 0.9, 1.45, 0.75], gap="small")
 
-        with road_col:
-            _filter_label("Rodovia")
-            road_options = get_available_roads()
-            selected_roads = st.multiselect(
-                "Rodovia",
-                road_options,
-                key="topbar_network_road",
-                placeholder="Todas as rodovias",
-                label_visibility="collapsed",
-            )
-            _sync_selected_road(selected_roads[0] if len(selected_roads) == 1 else None)
-
         with matriz_col:
             _filter_label("Tipo de Matriz")
             if st.session_state.get("topbar_network_matrix_type") not in matrix_options:
-                st.session_state.pop("topbar_network_matrix_type", None)
+                st.session_state["topbar_network_matrix_type"] = matrix_options[0]
             matrix_choice = st.selectbox(
                 "Tipo de Matriz",
                 matrix_options,
@@ -806,43 +1301,108 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
         matrix_type = matrix_choice if matrix_choice in ("Paragon", "Matriz Cadastrada") else "Paragon"
+        road_key = "topbar_network_road"
+        scenario_key = "topbar_network_scenario_values"
+        year_key = "topbar_network_year_values"
+        road_options = get_dnit_available_roads() if diagnosis == "Diagnóstico DNIT" else get_available_roads()
+        current_roads = [
+            str(road) for road in (st.session_state.get(road_key) or [])
+            if str(road) in road_options
+        ]
+        if road_options and not current_roads:
+            current_roads = [road_options[0]]
+        st.session_state[road_key] = current_roads
+
+        with road_col:
+            _filter_label("Rodovia")
+            selected_roads = st.multiselect(
+                "Rodovia",
+                road_options,
+                key=road_key,
+                placeholder="Selecione uma rodovia",
+                label_visibility="collapsed",
+            )
+            if road_options and not selected_roads:
+                st.session_state[road_key] = [road_options[0]]
+                st.rerun()
+            _sync_selected_road(selected_roads[0] if len(selected_roads) == 1 else None)
+
         effective_roads = _network_filter_roads(selected_roads, diagnosis)
         scenario_options = _collect_network_scenario_options(effective_roads, matrix_type)
         valid_scenario_tokens = {item["token"] for item in scenario_options}
-        if st.session_state.get("topbar_network_scenario_values"):
-            st.session_state["topbar_network_scenario_values"] = [
-                token for token in st.session_state["topbar_network_scenario_values"]
+        pending_key = "_topbar_network_scenario_pending"
+        warning_key = "_topbar_network_scenario_warning"
+        if pending_key in st.session_state:
+            pending_values = [
+                token for token in st.session_state.pop(pending_key)
                 if token in valid_scenario_tokens
             ]
+            st.session_state[scenario_key] = pending_values
+        current_scenarios = st.session_state.get(scenario_key, []) or []
+        current_scenarios = [token for token in current_scenarios if token in valid_scenario_tokens]
+        if scenario_options and len(effective_roads) == 1 and not current_scenarios:
+            current_scenarios = [str(scenario_options[0]["token"])]
+        st.session_state[scenario_key] = current_scenarios
+        scenario_warning = st.session_state.pop(warning_key, None)
 
         with scenario_col:
             _filter_label("Cenário")
             selected_scenarios = st.multiselect(
                     "Cenário",
                     [item["token"] for item in scenario_options],
-                    key="topbar_network_scenario_values",
+                    key=scenario_key,
                     format_func=lambda token: next(
                         (item["display_label"] for item in scenario_options if item["token"] == token),
                         str(token),
                     ),
-                    placeholder="Todos os cenários",
+                    placeholder=(
+                        "Cenário padrão por rodovia"
+                        if len(effective_roads) > 1 else
+                        "Selecione um cenário"
+                    ),
                     label_visibility="collapsed",
                 )
+            if scenario_options and len(effective_roads) == 1 and not selected_scenarios:
+                st.session_state[pending_key] = [str(scenario_options[0]["token"])]
+                st.rerun()
+            sanitized_scenarios, sanitize_message = _sanitize_network_scenario_selection(
+                selected_scenarios,
+                scenario_options,
+            )
+            if sanitize_message:
+                st.session_state[pending_key] = sanitized_scenarios
+                st.session_state[warning_key] = sanitize_message
+                st.rerun()
+            selected_scenarios = sanitized_scenarios
+            if scenario_warning:
+                st.caption(scenario_warning)
         year_options = _collect_network_year_options(effective_roads, matrix_type, selected_scenarios)
-        if st.session_state.get("topbar_network_year_values"):
-            st.session_state["topbar_network_year_values"] = [
-                year for year in st.session_state["topbar_network_year_values"]
-                if year in year_options
+        year_pending_key = "_topbar_network_year_pending"
+        if year_pending_key in st.session_state:
+            pending_years = [
+                int(year) for year in st.session_state.pop(year_pending_key)
+                if int(year) in year_options
             ]
+            st.session_state[year_key] = pending_years
+        current_years = [
+            int(year) for year in (st.session_state.get(year_key) or [])
+            if int(year) in year_options
+        ]
+        if year_options and not current_years:
+            current_years = [year_options[0]]
+        st.session_state[year_key] = current_years
         with year_col:
             _filter_label("Ano")
             selected_years = st.multiselect(
                     "Ano",
                     year_options,
-                    key="topbar_network_year_values",
-                    placeholder="Todos os anos",
+                    key=year_key,
+                    placeholder="Selecione o ano",
                     label_visibility="collapsed",
                 )
+            if year_options and not selected_years:
+                st.session_state[year_pending_key] = [year_options[0]]
+                st.rerun()
 
     with left:
         st.markdown(
@@ -858,7 +1418,7 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
     return diagnosis, selected_roads, selected_scenarios, selected_years
 
 
-def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, str | None, int | None]:
+def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], int | None]:
     """Barra superior do Diagnóstico com a mesma lógica visual da Visão geral.
 
     Usa select único para cenário e adiciona filtro de ano.
@@ -867,7 +1427,7 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, str | None, i
     matrix_options = [_DIAGNOSIS_TO_MATRIX.get(o, o) for o in options]
     left, right = st.columns([0.82, 2.25], gap="large")
     selected_road = default_road
-    scenario_key: str | None = None
+    scenario_keys: list[str] = []
     selected_year: int | None = None
     diagnosis = "Diagnóstico Paragon"
 
@@ -911,26 +1471,37 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, str | None, i
         with scenario_col:
             _filter_label("Cenário")
             if scenarios:
-                scenario_keys = [s["key"] for s in scenarios]
-                scen_by_key = {s["key"]: s for s in scenarios}
-                scenario_key = st.selectbox(
-                    "Cenário",
+                scenario_keys = [str(s["key"]) for s in scenarios]
+                scen_by_key = {str(s["key"]): s for s in scenarios}
+                storage_key = f"topbar_diag_scenario_{selected_road}_{matrix_type}"
+                current = [str(value) for value in st.session_state.get(storage_key, []) if str(value) in scenario_keys]
+                if not current and scenario_keys:
+                    current = scenario_keys[:1]
+                    st.session_state[storage_key] = current
+                selected = st.multiselect(
+                    "Cenários",
                     scenario_keys,
-                    key=f"topbar_diag_scenario_{selected_road}_{matrix_type}",
+                    default=current,
+                    key=storage_key,
                     format_func=lambda k: _network_scenario_label(scen_by_key.get(k)),
+                    placeholder="Selecione um ou mais",
                     label_visibility="collapsed",
                 )
+                scenario_keys = [str(value) for value in selected]
             else:
                 _placeholder("Sem cenários para a rodovia")
 
-        years = get_available_years(selected_road, matrix_type, scenario_key)
+        year_set: set[int] = set()
+        for scenario_key in scenario_keys:
+            year_set.update(get_available_years(selected_road, matrix_type, scenario_key))
+        years = sorted(year_set)
         with year_col:
             _filter_label("Ano")
             if years:
                 selected_year = st.selectbox(
                     "Ano",
                     years,
-                    key=f"topbar_diag_year_{selected_road}_{matrix_type}_{scenario_key or 'default'}",
+                    key=f"topbar_diag_year_{selected_road}_{matrix_type}_{'|'.join(scenario_keys) or 'default'}",
                     label_visibility="collapsed",
                 )
             else:
@@ -947,20 +1518,20 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, str | None, i
             unsafe_allow_html=True,
         )
 
-    return diagnosis, selected_road, scenario_key, selected_year
+    return diagnosis, selected_road, scenario_keys, selected_year
 
 
-def render_solution_top_bar(default_road: str) -> tuple[str, str, str | None, int | None]:
-    """Barra superior da tela Soluções com cenário em seleção única.
+def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int | None]:
+    """Barra superior da tela Soluções com cenário em seleção múltipla.
 
-    Mantém a mesma leitura visual das outras telas, mas trabalha só com os filtros
-    mestres desta página: rodovia e cenário.
+    Mantém a mesma leitura visual das outras telas, mas permite comparar dois ou
+    mais cenários/sentidos no mesmo mapa.
     """
     options = ["Diagnóstico Paragon", "Diagnóstico DNIT"]
     matrix_options = [_DIAGNOSIS_TO_MATRIX.get(o, o) for o in options]
     left, right = st.columns([0.82, 2.25], gap="large")
     selected_road = default_road
-    scenario_key: str | None = None
+    scenario_keys: list[str] = []
     selected_year: int | None = None
     diagnosis = "Diagnóstico Paragon"
 
@@ -1005,26 +1576,43 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, str | None, in
         with scenario_col:
             _filter_label("Cenário")
             if scenarios:
-                scenario_keys = [s["key"] for s in scenarios]
+                available_scenario_keys = [s["key"] for s in scenarios]
                 scen_by_key = {s["key"]: s for s in scenarios}
-                scenario_key = st.selectbox(
+                storage_key = f"topbar_solution_scenario_{selected_road}_{matrix_type}"
+                raw_current = st.session_state.get(storage_key) or []
+                if isinstance(raw_current, str):
+                    raw_current = [raw_current]
+                current = [
+                    str(value)
+                    for value in raw_current
+                    if str(value) in available_scenario_keys
+                ]
+                if not current and available_scenario_keys:
+                    current = available_scenario_keys[:1]
+                st.session_state[storage_key] = current
+                scenario_keys = st.multiselect(
                     "Cenário",
-                    scenario_keys,
-                    key=f"topbar_solution_scenario_{selected_road}_{matrix_type}",
+                    available_scenario_keys,
+                    key=storage_key,
+                    default=current,
                     format_func=lambda k: _network_scenario_label(scen_by_key.get(k)),
+                    placeholder="Selecione um ou mais cenários",
                     label_visibility="collapsed",
                 )
             else:
                 _placeholder("Sem cenários para a rodovia")
 
-        years = get_available_years(selected_road, matrix_type, scenario_key)
+        years_set: set[int] = set()
+        for scenario_key in scenario_keys:
+            years_set.update(get_available_years(selected_road, matrix_type, scenario_key))
+        years = sorted(years_set)
         with year_col:
             _filter_label("Ano")
             if years:
                 selected_year = st.selectbox(
                     "Ano",
                     years,
-                    key=f"topbar_solution_year_{selected_road}_{matrix_type}_{scenario_key or 'default'}",
+                    key=f"topbar_solution_year_{selected_road}_{matrix_type}_{'|'.join(scenario_keys) or 'default'}",
                     label_visibility="collapsed",
                 )
             else:
@@ -1041,7 +1629,7 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, str | None, in
             unsafe_allow_html=True,
         )
 
-    return diagnosis, selected_road, scenario_key, selected_year
+    return diagnosis, selected_road, scenario_keys, selected_year
 
 
 def _render_filter_placeholder(text: str) -> None:
@@ -1054,23 +1642,12 @@ def _render_filter_placeholder(text: str) -> None:
     )
 
 
-def _collect_local_year_options(road: str, matrix_type: str, scenario_keys: list[str] | None) -> list[int]:
-    years: set[int] = set()
-    keys = [str(key) for key in (scenario_keys or []) if key]
-    if keys:
-        for scenario_key in keys:
-            years.update(get_available_years(road, matrix_type, scenario_key))
-    else:
-        years.update(get_available_years(road, matrix_type, None))
-    return sorted(years)
-
-
 def _render_economic_master_filters(
     road: str,
     *,
     matrix_type: str,
     widget_prefix: str,
-) -> tuple[list[str], dict[str, str], int | None]:
+) -> tuple[list[str], dict[str, str]]:
     scenarios = get_available_scenarios(road, matrix_type)
     labels = {str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"]) for s in scenarios}
     keys = [str(s["key"]) for s in scenarios]
@@ -1082,37 +1659,174 @@ def _render_economic_master_filters(
         if current:
             st.session_state[storage_key] = current
 
-    scenario_col, year_col = st.columns([1.6, 0.8], gap="medium")
+    _filter_caption("Cenários")
+    selected_keys = st.multiselect(
+        "Cenários",
+        keys,
+        default=current,
+        key=storage_key,
+        format_func=lambda k: labels.get(str(k), str(k)),
+        placeholder="Selecione um ou mais",
+        label_visibility="collapsed",
+    )
+
+    return [str(value) for value in selected_keys], labels
+
+
+def _comparison_matrix_label(matrix_type: str) -> str:
+    return "Matriz" if matrix_type == "Matriz Cadastrada" else "Paragon"
+
+
+def _comparison_scenario_summary(side: dict) -> str:
+    keys = [str(value) for value in (side.get("scenario_keys") or []) if value]
+    labels = side.get("labels") or {}
+    if not keys:
+        return "Nenhum cenário"
+    if len(keys) == 1:
+        return str(labels.get(keys[0], keys[0]))
+    return f"{len(keys)} cenários selecionados"
+
+
+def _render_comparison_summary(side_a: dict, side_b: dict) -> None:
+    def _pill(side: dict) -> str:
+        side_name = html.escape(str(side.get("side") or ""))
+        matrix = html.escape(_comparison_matrix_label(str(side.get("matrix_type") or "")))
+        scenario = html.escape(_comparison_scenario_summary(side))
+        return (
+            '<div class="comparison-pill">'
+            f'<small>Comparação {side_name}</small>'
+            f'<strong>{matrix}</strong>'
+            f'<span>{scenario}</span>'
+            '</div>'
+        )
+
+    st.markdown(
+        '<div class="comparison-summary">'
+        f'{_pill(side_a)}'
+        '<div class="comparison-summary-x">×</div>'
+        f'{_pill(side_b)}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_comparison_side_filter(road: str, side: str, default_matrix: str) -> dict:
+    matrix_key = f"cmp_{side}_matrix_type"
+    scenario_key = f"cmp_{side}_scenario_values"
+    matrix_options = ["Paragon", "Matriz Cadastrada"]
+    current_matrix = st.session_state.get(matrix_key, default_matrix)
+    if current_matrix not in matrix_options:
+        current_matrix = default_matrix
+    st.markdown(
+        '<div class="comparison-side-title">'
+        f'<b>Comparação {side.upper()}</b><span>tipo + cenários</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    matrix_col, scenario_col = st.columns([0.72, 1.28], gap="small")
+    with matrix_col:
+        _filter_caption("Tipo")
+        matrix_type = st.selectbox(
+            f"Tipo de matriz {side.upper()}",
+            matrix_options,
+            index=matrix_options.index(current_matrix),
+            key=matrix_key,
+            label_visibility="collapsed",
+        )
+
+    scenarios = get_available_scenarios(road, matrix_type)
+    labels = {
+        str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
+        for s in scenarios
+    }
+    keys = [str(s["key"]) for s in scenarios]
+    current = [str(value) for value in st.session_state.get(scenario_key, []) if str(value) in keys]
+    if not current and keys:
+        current = keys[:1]
+        st.session_state[scenario_key] = current
+
     with scenario_col:
         _filter_caption("Cenários")
-        selected_keys = st.multiselect(
-            "Cenários",
+        selected = st.multiselect(
+            f"Cenários {side.upper()}",
             keys,
             default=current,
-            key=storage_key,
+            key=scenario_key,
             format_func=lambda k: labels.get(str(k), str(k)),
             placeholder="Selecione um ou mais",
             label_visibility="collapsed",
         )
+    return {
+        "side": side.upper(),
+        "matrix_type": matrix_type,
+        "scenario_keys": [str(value) for value in selected],
+        "labels": labels,
+        "display_label": f"{side.upper()} · {_comparison_matrix_label(matrix_type)}",
+    }
 
-    year_options = _collect_local_year_options(road, matrix_type, selected_keys)
-    year_key = f"{widget_prefix}_year_value"
-    if st.session_state.get(year_key) not in year_options:
-        st.session_state.pop(year_key, None)
-    selected_year: int | None = None
-    with year_col:
-        _filter_caption("Ano")
-        if year_options:
-            selected_year = st.selectbox(
-                "Ano",
-                year_options,
-                key=year_key,
+
+def _render_comparison_master_filters(road: str) -> tuple[dict, dict]:
+    with st.expander("Editar comparação", expanded=False):
+        col_a, col_x, col_b = st.columns([1, 0.08, 1], gap="medium")
+        with col_a:
+            side_a = _render_comparison_side_filter(road, "a", "Paragon")
+        with col_x:
+            st.markdown('<div class="comparison-x">×</div>', unsafe_allow_html=True)
+        with col_b:
+            side_b = _render_comparison_side_filter(road, "b", "Matriz Cadastrada")
+    _render_comparison_summary(side_a, side_b)
+    return side_a, side_b
+
+
+def render_comparison_top_bar(default_road: str) -> tuple[str, str]:
+    """Topo da tela Comparativo com todas as rodovias das duas metodologias."""
+    paragon_roads = list(get_available_roads() or [])
+    dnit_roads = list(get_dnit_available_roads() or [])
+    roads = list(dict.fromkeys([*paragon_roads, *dnit_roads]))
+    if not roads:
+        roads = [default_road]
+
+    _preselect_road_from_url(roads)
+    if st.session_state.get("topbar_road") not in roads:
+        st.session_state["topbar_road"] = roads[0]
+
+    left, right = st.columns([0.82, 1.92], gap="large")
+    with right:
+        road_col, view_col, spacer = st.columns([0.8, 0.9, 1.3], gap="small")
+        with road_col:
+            _filter_label("Rodovia")
+            selected_road = st.selectbox(
+                "Rodovia",
+                roads,
+                key="topbar_road",
                 label_visibility="collapsed",
             )
-        else:
-            _render_filter_placeholder("Sem anos")
+        with view_col:
+            _filter_label("Visualização")
+            view_mode = st.selectbox(
+                "Visualização",
+                ["Técnico", "Econômico"],
+                key="topbar_comparison_view_mode",
+                label_visibility="collapsed",
+            )
+        with spacer:
+            st.empty()
+    with left:
+        st.markdown(
+            """
+            <div class="top-copy">
+                <p class="eyebrow">RELATÓRIOS</p>
+                <h1 class="page-title">Comparativo entre cenários</h1>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    _sync_selected_road(selected_road)
+    return selected_road, view_mode
 
-    return [str(value) for value in selected_keys], labels, selected_year
+
+def _comparison_signature(side: dict) -> tuple[str, tuple[str, ...]]:
+    return str(side.get("matrix_type") or ""), tuple(sorted(str(k) for k in side.get("scenario_keys") or []))
 
 
 def render_metric_cards(cards: list[dict]) -> None:
@@ -1210,6 +1924,124 @@ def _weighted_iap_from_linear(diagram_df: pd.DataFrame | None, fallback: float) 
     return float((diagram_df["iap"].astype(float) * diagram_df["extensao"].astype(float)).sum() / total_ext)
 
 
+def _scenario_offset_parts(
+    road: str,
+    scenario_keys: list[str],
+    *,
+    matrix_type: str,
+    year: int | None,
+    data_loader,
+) -> list[dict]:
+    """Carrega os cenários e separa visualmente seus sentidos no mapa.
+
+    A pista vem do cadastro do cenário: Crescente representa km 0 -> X e
+    Decrescente representa km X -> 0. Cada uma recebe sempre um lado oposto,
+    independentemente da ordem em que os filtros foram selecionados.
+    """
+    keys = [str(key) for key in (scenario_keys or []) if key]
+    scenarios = get_available_scenarios(road, matrix_type)
+    by_key = {str(s["key"]): s for s in scenarios}
+    n = len(keys)
+    fallback_offsets = [i - (n - 1) / 2.0 for i in range(n)]
+    parts: list[dict] = []
+    for i, key in enumerate(keys):
+        data = data_loader(road, key, year) or {}
+        segments = data.get("segments") if data else None
+        if segments is not None and not segments.empty:
+            segments = segments.copy()
+            pista = _normalize_scenario_pista(by_key.get(key))
+            if n <= 1 or pista == "todos":
+                offset_side = 0.0
+            elif pista == "crescente":
+                offset_side = 0.5
+            elif pista == "decrescente":
+                offset_side = -0.5
+            else:
+                offset_side = fallback_offsets[i]
+            segments["offset_side"] = offset_side
+            segments["sentido"] = _network_scenario_label(by_key.get(key)) or str(key)
+            data = dict(data)
+            data["segments"] = segments
+        data["_scenario_key"] = key
+        data["_scenario_label"] = _network_scenario_label(by_key.get(key)) or str(key)
+        parts.append(data)
+    return parts
+
+
+def _concat_segments(parts: list[dict]) -> pd.DataFrame:
+    segments = [part.get("segments") for part in parts if part.get("segments") is not None and not part.get("segments").empty]
+    return pd.concat(segments, ignore_index=True) if segments else pd.DataFrame()
+
+
+def _select_diagnosis_linear_part(
+    parts: list[dict],
+    fallback: dict,
+    *,
+    key: str,
+    render_control: bool = True,
+) -> dict:
+    """Escolhe qual cenário alimenta o diagrama linear quando há múltiplos cenários."""
+    valid_parts = [part for part in parts if part]
+    if len(valid_parts) <= 1:
+        return valid_parts[0] if valid_parts else fallback
+
+    options = [str(part.get("_scenario_key") or idx) for idx, part in enumerate(valid_parts)]
+    labels = {
+        option: str(part.get("_scenario_label") or f"Cenário {idx + 1}")
+        for idx, (option, part) in enumerate(zip(options, valid_parts))
+    }
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = options[0]
+
+    if render_control:
+        _filter_caption("Diagrama linear")
+        selected = st.radio(
+            "Cenário do diagrama linear",
+            options,
+            key=key,
+            horizontal=True,
+            format_func=lambda value: labels.get(str(value), str(value)),
+            label_visibility="collapsed",
+        )
+    else:
+        selected = st.session_state.get(key, options[0])
+    selected_key = str(selected)
+    for option, part in zip(options, valid_parts):
+        if option == selected_key:
+            return part
+    return valid_parts[0]
+
+
+def _render_iap_distributions_for_scenarios(
+    parts: list[dict],
+    *,
+    km_range: tuple[float, float] | None,
+    selected_iap_class: str,
+) -> None:
+    if len(parts) <= 1:
+        return
+    cols = st.columns(min(len(parts), 2), gap="medium")
+    for idx, part in enumerate(parts):
+        with cols[idx % len(cols)]:
+            diagram = _filter_by_km_range(part.get("linear_diagram"), km_range)
+            distribution = _build_distribution_from_linear(diagram)
+            distribution_filtered = _filter_by_iap_class(distribution, selected_iap_class, class_col="classe")
+            avg = _weighted_iap_from_linear(
+                _filter_by_iap_class(diagram, selected_iap_class, class_col="classe_iap"),
+                float(part.get("metrics", {}).get("iap_average") or 0.0),
+            )
+            render_iap_distribution(
+                distribution_filtered if not distribution_filtered.empty else distribution,
+                avg,
+                title=f"Distribuição IAP · {part.get('_scenario_label')}",
+                subtitle=(
+                    "Faixa em km e faixa IAP aplicadas ao mapa e à distribuição"
+                    if selected_iap_class == "Todas" else
+                    f"Mostrando apenas a faixa {selected_iap_class}"
+                ),
+            )
+
+
 def _render_diagnosis_iap_class_filter(
     distribution_df: pd.DataFrame,
     *,
@@ -1240,23 +2072,45 @@ def _render_diagnosis_iap_class_filter(
 
 def _render_solution_filters(table_df):
     """Renderiza os filtros da tela de Soluções (SRE, Conceito IAP, Tipo de solução)
-    e devolve a tabela já filtrada pelas seleções do usuário."""
+    e devolve a tabela já filtrada pelas seleções do usuário.
+
+    Os filtros são dependentes: ao escolher SRE, os conceitos e soluções passam a
+    mostrar somente opções existentes naquela combinação.
+    """
     if table_df is None or table_df.empty:
         return table_df
 
+    def _sync_multiselect_key(key: str, options: list[str]) -> list[str]:
+        current = [str(value) for value in (st.session_state.get(key) or [])]
+        valid = [value for value in current if value in options]
+        if valid != current:
+            st.session_state[key] = valid
+        return valid
+
     sre_options = sorted(str(value) for value in table_df["SNV"].dropna().unique())
+    selected_sre = _sync_multiselect_key("solution_filter_sre", sre_options)
+    after_sre = table_df[table_df["SNV"].astype(str).isin(selected_sre)].copy() if selected_sre else table_df.copy()
+
     # Ordem canônica dos conceitos IAP, do melhor ao pior (ver README §11 / §12.1).
     iap_class_order = ["Excelente", "Bom", "++ Regular", "+ Regular", "- Regular", "Mau", "Péssimo"]
     iap_options = [
         label
         for label in iap_class_order
-        if label in set(table_df["_classe_iap"].dropna().astype(str))
+        if label in set(after_sre["_classe_iap"].dropna().astype(str))
     ]
+    selected_iap_classes = _sync_multiselect_key("solution_filter_iap", iap_options)
+    after_iap = (
+        after_sre[after_sre["_classe_iap"].astype(str).isin(selected_iap_classes)].copy()
+        if selected_iap_classes
+        else after_sre.copy()
+    )
+
     solution_options = sorted(
         str(value)
-        for value in table_df["Solução recomendada"].dropna().unique()
+        for value in after_iap["Solução recomendada"].dropna().unique()
         if str(value) != "Sem intervenção"
     )
+    selected_solutions = _sync_multiselect_key("solution_filter_solution", solution_options)
 
     first_row = st.columns([1, 1, 1], gap="medium")
     with first_row[0]:
@@ -1264,6 +2118,7 @@ def _render_solution_filters(table_df):
         selected_sre = st.multiselect(
             "SRE",
             sre_options,
+            key="solution_filter_sre",
             placeholder="Todos os SREs",
             label_visibility="collapsed",
         )
@@ -1272,6 +2127,7 @@ def _render_solution_filters(table_df):
         selected_iap_classes = st.multiselect(
             "Conceito IAP",
             iap_options,
+            key="solution_filter_iap",
             placeholder="Todos os conceitos",
             label_visibility="collapsed",
         )
@@ -1280,6 +2136,7 @@ def _render_solution_filters(table_df):
         selected_solutions = st.multiselect(
             "Tipo de solução",
             solution_options,
+            key="solution_filter_solution",
             placeholder="Todas as soluções",
             label_visibility="collapsed",
         )
@@ -1386,7 +2243,7 @@ def _render_solution_distribution(
     plan_cost_mi: float | None = None,
     *,
     group_col: str = "Solução recomendada",
-    subtitle: str = "Engenharia aplicada · catálogo paramétrico Paragon",
+    subtitle: str = "Distribuição por solução",
     color_fn=None,
 ) -> None:
     """Gráfico de barras (HTML) com a distribuição de km por tipo de solução na rede."""
@@ -1483,13 +2340,13 @@ def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type
     return (selected or default), labels
 
 
-def _combined_solution_data(road, keys, labels):
+def _combined_solution_data(road, keys, labels, year: int | None = None):
     """Tabela e segmentos combinados de vários cenários, com coluna/atributo de
     Sentido e os segmentos deslocados (uma camada por sentido) para o mapa."""
     tables, segs = [], []
     n = len(keys)
     for i, k in enumerate(keys):
-        d = get_solutions_data(road, scenario_key=k)
+        d = get_solutions_data(road, scenario_key=k, year=year)
         t, s = d.get("table"), d.get("segments")
         sent = str(labels.get(k, k))
         if t is not None and not t.empty:
@@ -1505,6 +2362,42 @@ def _combined_solution_data(road, keys, labels):
         pd.concat(tables, ignore_index=True) if tables else None,
         pd.concat(segs, ignore_index=True) if segs else None,
     )
+
+
+def _combined_dnit_solution_data(road, keys, labels):
+    """Combina cenários da Matriz Cadastrada para a tela Soluções.
+
+    A lógica é igual à Paragon: cada cenário recebe um `Sentido` na tabela e um
+    `offset_side` nos segmentos, para o mapa mostrar pistas separadas.
+    """
+    tables, segs = [], []
+    n = len(keys)
+    zona_colors = None
+    zona_order = None
+    for i, k in enumerate(keys):
+        d = get_dnit_solutions_data(road, scenario_key=k)
+        if not d or not d.get("available"):
+            continue
+        t, s = d.get("table"), d.get("segments")
+        sent = str(labels.get(k, k))
+        zona_colors = zona_colors or d.get("zona_colors")
+        zona_order = zona_order or d.get("zona_order")
+        if t is not None and not t.empty:
+            t = t.copy()
+            t["Sentido"] = sent
+            tables.append(t)
+        if s is not None and not s.empty:
+            s = s.copy()
+            s["offset_side"] = (i - (n - 1) / 2.0)
+            s["sentido"] = sent
+            segs.append(s)
+    return {
+        "available": bool(tables),
+        "table": pd.concat(tables, ignore_index=True) if tables else pd.DataFrame(),
+        "segments": pd.concat(segs, ignore_index=True) if segs else pd.DataFrame(),
+        "zona_colors": zona_colors or _DNIT_ZONA_COLORS,
+        "zona_order": zona_order or _DNIT_ZONA_ORDER,
+    }
 
 
 def _sentido_bar_bg(color: str, idx: int) -> str:
@@ -1733,30 +2626,55 @@ def _dnit_core_color(label: str) -> str:
 
 def _render_dnit_solution_filters(table_df, zona_order):
     """Filtros da tela de Soluções DNIT (SRE, Faixa IRI, Tipo de solução) e devolve
-    a tabela filtrada. `zona_order` fixa a ordem das faixas de IRI (ver README §12.4)."""
+    a tabela filtrada. `zona_order` fixa a ordem das faixas de IRI (ver README §12.4).
+
+    Os filtros também são dependentes: SRE reduz as faixas disponíveis, e as faixas
+    reduzem os tipos de solução disponíveis.
+    """
     if table_df is None or table_df.empty:
         return table_df
 
+    def _sync_multiselect_key(key: str, options: list[str]) -> list[str]:
+        current = [str(value) for value in (st.session_state.get(key) or [])]
+        valid = [value for value in current if value in options]
+        if valid != current:
+            st.session_state[key] = valid
+        return valid
+
     sre_options = sorted(str(v) for v in table_df["SNV"].dropna().unique())
-    faixa_present = set(table_df["Faixa"].dropna().astype(str))
+    selected_sre = _sync_multiselect_key("dnit_solution_filter_sre", sre_options)
+    after_sre = table_df[table_df["SNV"].astype(str).isin(selected_sre)].copy() if selected_sre else table_df.copy()
+
+    faixa_present = set(after_sre["Faixa"].dropna().astype(str))
     faixa_options = [z for z in zona_order if z in faixa_present]
-    solucao_options = sorted(str(v) for v in table_df["Solução núcleo"].dropna().unique())
+    selected_faixa = _sync_multiselect_key("dnit_solution_filter_faixa", faixa_options)
+    after_faixa = (
+        after_sre[after_sre["Faixa"].astype(str).isin(selected_faixa)].copy()
+        if selected_faixa
+        else after_sre.copy()
+    )
+
+    solucao_options = sorted(str(v) for v in after_faixa["Solução núcleo"].dropna().unique())
+    selected_solucao = _sync_multiselect_key("dnit_solution_filter_solucao", solucao_options)
 
     first_row = st.columns([1, 1, 1], gap="medium")
     with first_row[0]:
         _filter_caption("SRE")
         selected_sre = st.multiselect(
-            "SRE", sre_options, placeholder="Todos os SREs", label_visibility="collapsed"
+            "SRE", sre_options, key="dnit_solution_filter_sre",
+            placeholder="Todos os SREs", label_visibility="collapsed"
         )
     with first_row[1]:
         _filter_caption("Faixa IRI (matriz)")
         selected_faixa = st.multiselect(
-            "Faixa IRI", faixa_options, placeholder="Todas as faixas", label_visibility="collapsed"
+            "Faixa IRI", faixa_options, key="dnit_solution_filter_faixa",
+            placeholder="Todas as faixas", label_visibility="collapsed"
         )
     with first_row[2]:
         _filter_caption("Tipo de solução")
         selected_solucao = st.multiselect(
-            "Tipo de solução", solucao_options, placeholder="Todas as soluções", label_visibility="collapsed"
+            "Tipo de solução", solucao_options, key="dnit_solution_filter_solucao",
+            placeholder="Todas as soluções", label_visibility="collapsed"
         )
 
     filtered = table_df.copy()
@@ -1868,11 +2786,23 @@ def _render_dnit_solutions_table(table_df) -> None:
     )
 
 
-def _render_dnit_solutions_page(road, scenario_key) -> None:
+def _render_dnit_solutions_page(road, scenario_keys) -> None:
     """Monta a página inteira de Soluções DNIT: mapa + distribuição + tabela paginada.
     Só rodovias processadas com a Matriz Revitaliza DNIT/RO têm esses dados; as demais
     caem no diagnóstico Paragon (mensagem informativa ao usuário)."""
-    data = get_dnit_solutions_data(road, scenario_key=scenario_key)
+    selected_keys = [str(key) for key in (scenario_keys or []) if key]
+    if not selected_keys:
+        st.info("Selecione ao menos um cenário para exibir as soluções.")
+        return
+    labels = {
+        str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
+        for s in get_available_scenarios(road, "Matriz Cadastrada")
+    }
+    if len(selected_keys) >= 2:
+        data = _combined_dnit_solution_data(road, selected_keys, labels)
+    else:
+        scenario_key = selected_keys[0] if selected_keys else None
+        data = get_dnit_solutions_data(road, scenario_key=scenario_key)
     if not data or not data.get("available") or data.get("table") is None or data["table"].empty:
         disponiveis = get_dnit_available_roads()
         if disponiveis:
@@ -1909,19 +2839,6 @@ def _render_dnit_solutions_page(road, scenario_key) -> None:
 # Regras hardcoded desta seção catalogadas no README §14.
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Custo paramétrico por km, por CÓDIGO de solução (README §14.1). É apenas FALLBACK:
-# só é usado quando o trecho não tem orçamento real gravado no banco. R$/km.
-_ECONOMIC_SOLUTION_COST_KM = {
-    "OK": 0,
-    "RL": 180_000,
-    "RL+RS": 280_000,
-    "RL+REF": 420_000,
-    "RPS": 680_000,
-    "RPS+REF": 920_000,
-    "REC": 1_250_000,
-    "Sem intervenção": 0,
-}
-
 # Ordem de prioridade das soluções por ESTRATÉGIA (menor número = atendido primeiro
 # quando o orçamento é escasso). Na prática a UI expõe só "Balanceada"; Corretiva
 # (prioriza reconstruir o pior) e Preventiva (prioriza barato/muitos km) existem mas
@@ -1931,11 +2848,13 @@ _ECONOMIC_STRATEGY_ORDER = {
     "Preventiva": {"RL": 1, "RL+RS": 2, "RL+REF": 3, "RPS": 4, "RPS+REF": 5, "REC": 6, "OK": 7},
     "Balanceada": {"REC": 1, "RPS": 2, "RL+RS": 3, "RPS+REF": 4, "RL+REF": 5, "RL": 6, "OK": 7},
 }
-# Ano-base do cenário econômico: o horizonte cobre [_ECONOMIC_BASE_YEAR, _ECONOMIC_BASE_YEAR + horizonte - 1].
-_ECONOMIC_BASE_YEAR = 2026
+# Ano inicial de fallback: usado apenas quando o banco não informa anos no orçamento.
+_ECONOMIC_FALLBACK_START_YEAR = date.today().year
 # Horizonte padrão (anos) — usado no slider do cenário econômico E no custo da Visão geral,
 # pra os dois mostrarem a mesma necessidade por rodovia.
 _ECONOMIC_DEFAULT_HORIZON = 8
+_ECONOMIC_SCOPE_ACCUMULATED = "periodo"
+_ECONOMIC_SCOPE_YEAR_ONLY = "ano"
 
 
 def _limit_budget_to_horizon(budget_items, horizon: int):
@@ -1946,13 +2865,106 @@ def _limit_budget_to_horizon(budget_items, horizon: int):
         return budget_items
 
     years = pd.to_numeric(budget_items["Ano"], errors="coerce")
-    base = int(years.min())  # 1º ano com programação (ex.: 2027)
+    base = int(years.min())  # 1º ano com programação no banco
     max_year = base + int(horizon) - 1
     return budget_items[(years >= base) & (years <= max_year)].copy()
 
 
+def _budget_year_bounds(
+    budget_items: pd.DataFrame | None,
+    *,
+    fallback_start: int | None = None,
+    fallback_horizon: int = _ECONOMIC_DEFAULT_HORIZON,
+) -> tuple[int, int]:
+    """Retorna o primeiro e o último ano disponível para montar a linha do tempo."""
+    if budget_items is not None and not budget_items.empty and "Ano" in budget_items.columns:
+        years = pd.to_numeric(budget_items["Ano"], errors="coerce").dropna()
+        if not years.empty:
+            return int(years.min()), int(years.max())
+    fallback_start = int(fallback_start or _ECONOMIC_FALLBACK_START_YEAR)
+    return int(fallback_start), int(fallback_start) + int(fallback_horizon) - 1
+
+
+def _horizon_from_end_year(start_year: int, end_year: int) -> int:
+    """Converte o ano final escolhido pelo usuário na quantidade de anos usada no cálculo."""
+    return max(1, int(end_year) - int(start_year) + 1)
+
+
+def _analysis_scope_label(scope_mode: str, start_year: int, selected_year: int) -> str:
+    """Texto curto do escopo econômico selecionado."""
+    if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY:
+        return f"Ano {int(selected_year)}"
+    return f"Período {int(start_year)}-{int(selected_year)}"
+
+
+def _analysis_budget_multiplier(scope_mode: str, start_year: int, selected_year: int) -> int:
+    """Quantidade de orçamentos anuais considerados no escopo escolhido."""
+    if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY:
+        return 1
+    return _horizon_from_end_year(start_year, selected_year)
+
+
+def _filter_budget_items_to_scope(
+    budget_items: pd.DataFrame | None,
+    *,
+    start_year: int,
+    selected_year: int,
+    scope_mode: str,
+) -> pd.DataFrame | None:
+    """Filtra a programação orçamentária para período acumulado ou ano isolado."""
+    if budget_items is None or budget_items.empty or "Ano" not in budget_items.columns:
+        return budget_items
+    years = pd.to_numeric(budget_items["Ano"], errors="coerce")
+    if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY:
+        return budget_items.loc[years == int(selected_year)].copy()
+    return budget_items.loc[(years >= int(start_year)) & (years <= int(selected_year))].copy()
+
+
+def _render_scope_mode_selector(key: str) -> str:
+    """Permite alternar entre acumulado até o ano marcado ou somente o ano marcado."""
+    options = {
+        "Período acumulado": _ECONOMIC_SCOPE_ACCUMULATED,
+        "Somente ano selecionado": _ECONOMIC_SCOPE_YEAR_ONLY,
+    }
+    selected = st.radio(
+        "Modo do horizonte",
+        list(options.keys()),
+        horizontal=True,
+        key=key,
+        label_visibility="collapsed",
+    )
+    return options[selected]
+
+
+def _render_horizon_year_selector(
+    *,
+    key: str,
+    start_year: int,
+    end_year: int,
+) -> tuple[int, int]:
+    """Mostra o horizonte como linha do tempo por ano final e devolve (horizonte, ano_final)."""
+    years = list(range(int(start_year), int(end_year) + 1))
+    if not years:
+        years = [int(start_year)]
+    selected_end_year = st.select_slider(
+        "Até o ano",
+        options=years,
+        value=years[-1],
+        key=key,
+        label_visibility="collapsed",
+    )
+    horizon = _horizon_from_end_year(start_year, selected_end_year)
+    st.markdown(
+        f'<div class="economic-control-value">{start_year} até {selected_end_year} · {horizon} ano(s)</div>',
+        unsafe_allow_html=True,
+    )
+    return horizon, int(selected_end_year)
+
+
 def _format_money(value: float) -> str:
     """Formata reais de forma compacta (mi / mil / R$) para KPIs e cards."""
+    if value >= 1_000_000_000:
+        return f"R$ {value / 1_000_000_000:.1f} bi"
     if value >= 1_000_000:
         return f"R$ {value / 1_000_000:.1f} mi"
     if value >= 1_000:
@@ -1962,6 +2974,8 @@ def _format_money(value: float) -> str:
 
 def _format_money_chart(value: float) -> str:
     """Como `_format_money`, mas com 1 casa em 'mil' e '0' explícito, p/ rótulos de gráfico."""
+    if value >= 1_000_000_000:
+        return f"R$ {value / 1_000_000_000:.1f} bi"
     if value >= 1_000_000:
         return f"R$ {value / 1_000_000:.1f} mi"
     if value >= 1_000:
@@ -1990,9 +3004,8 @@ def _axis_max_headroom(value: float) -> int:
 def _economic_work_table(table_df) -> pd.DataFrame:
     """Prepara a tabela base do cenário econômico atribuindo custo a cada trecho.
 
-    Prioriza o custo REAL do banco ("Custo estimado"); quando ausente, cai no custo
-    paramétrico por km (`_ECONOMIC_SOLUTION_COST_KM`, README §14.1). A coluna
-    "Custo origem" marca a proveniência: Banco / Paramétrico / Sem custo.
+    Usa somente o custo real do banco ("Custo estimado"). Quando uma intervenção
+    vem sem custo, o recorte deve ser tratado como sem dados de custo.
     """
     if table_df is None or table_df.empty:
         return pd.DataFrame()
@@ -2001,25 +3014,28 @@ def _economic_work_table(table_df) -> pd.DataFrame:
     df["_solucao_codigo"] = df.get("_solucao_codigo", "Sem intervenção").fillna("Sem intervenção").astype(str)
     df["Custo banco"] = pd.to_numeric(df.get("Custo estimado", 0), errors="coerce").fillna(0.0)
     df["Custo econômico"] = df["Custo banco"]
-
-    # Sem custo no banco → aplica o fallback paramétrico (R$/km × extensão).
-    missing_cost = df["Custo econômico"] <= 0
-    fallback_cost = df["_solucao_codigo"].map(_ECONOMIC_SOLUTION_COST_KM).fillna(0) * df["Extensão"].astype(float)
-    df.loc[missing_cost, "Custo econômico"] = fallback_cost.loc[missing_cost]
     df["Custo origem"] = "Banco"
-    df.loc[missing_cost & (df["Custo econômico"] > 0), "Custo origem"] = "Paramétrico"
     df.loc[df["Custo econômico"] <= 0, "Custo origem"] = "Sem custo"
     return df
 
 
+def _has_missing_intervention_cost(table_df: pd.DataFrame | None, budget_items: pd.DataFrame | None = None) -> bool:
+    """Indica se há intervenção prevista sem custo real no recorte econômico."""
+    if budget_items is not None and not budget_items.empty:
+        return False
+    work = _economic_work_table(table_df)
+    if work.empty:
+        return False
+    no_cost = pd.to_numeric(work.get("Custo econômico", 0), errors="coerce").fillna(0.0) <= 0
+    interventions = ~work.get("_solucao_codigo", "Sem intervenção").astype(str).isin(["OK", "Sem intervenção", "CA"])
+    return bool((no_cost & interventions).any())
+
+
 def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
-    """Calcula a priorização por SNV (IPT = nível de prioridade) por segmento.
+    """Calcula a priorização por SNV usando IPI por segmento.
 
     Segmentos classificados como "Excelente" são excluídos do cálculo — só entram no
-    ranking trechos que precisam de intervenção. Metodologia (cliente): o IPT é o
-    próprio nível de prioridade (1 = maior … 10 = menor), com
-    IPT = 10·(0,5·(1 − R_VMDA) + 0,3·R_ICDS + 0,2·R_ICDP), R_VMDA log e ICDS/ICDP
-    lineares (min-max global). Menor IPT = mais crítico.
+    ranking trechos que precisam de intervenção. No Paragon, maior IPI = mais crítico.
     """
     if df is None or df.empty:
         return {}
@@ -2033,11 +3049,13 @@ def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
     segmentos = [
         {
             "rodovia": row.get("Rodovia", ""),
-            # Chave por (SNV, Sentido) quando há sentido → priorização/IPT/IPE
+            # Chave por (SNV, Sentido) quando há sentido → IPI/IPE independentes
             # independentes por sentido (senão CR e DE ficariam idênticos).
             "snv": (f"{row.get('SNV')}␟{row.get('Sentido')}" if has_sent else str(row.get("SNV"))),
             "extensao_km": row.get("Extensão"),
             "vmda": row.get("VMDA"),
+            "vmdl": row.get("VMDL"),
+            "vmdp": row.get("VMDP"),
             "icds": row.get("ICDS"),
             "icdp": row.get("ICDP"),
             "custo": row.get("Custo econômico"),
@@ -2048,7 +3066,7 @@ def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
 
 
 def _prioridade_por_segmento(df: pd.DataFrame) -> dict:
-    """Por _segment_id → priorização/IPT calculados POR SEGMENTO (sem agregar no SNV).
+    """Por _segment_id → IPI calculado POR SEGMENTO (sem agregar no SNV).
     Segmentos 'Excelente' são excluídos do cálculo (não precisam de intervenção)."""
     if df is None or df.empty or "_segment_id" not in df.columns:
         return {}
@@ -2061,6 +3079,8 @@ def _prioridade_por_segmento(df: pd.DataFrame) -> dict:
         {
             "id": int(row.get("_segment_id")),
             "vmda": row.get("VMDA"),
+            "vmdl": row.get("VMDL"),
+            "vmdp": row.get("VMDP"),
             "icds": row.get("ICDS"),
             "icdp": row.get("ICDP"),
             "extensao_km": row.get("Extensão"),
@@ -2072,17 +3092,18 @@ def _prioridade_por_segmento(df: pd.DataFrame) -> dict:
 
 
 def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
-    """Anexa IPT/IPE/PRIORIZAÇÃO calculados POR SEGMENTO aos segmentos e ordena."""
+    """Anexa IPI/IPE calculados POR SEGMENTO aos segmentos e ordena por maior IPI."""
     if df is None or df.empty or "_segment_id" not in df.columns:
         return df
 
     prio = _prioridade_por_segmento(df)
     df = df.copy()
     sid = df["_segment_id"]
-    df["IPT"] = sid.map(lambda i: prio.get(int(i), {}).get("ip_tecnico", 0.0) if pd.notna(i) else 0.0)
+    df["IPI"] = sid.map(lambda i: prio.get(int(i), {}).get("ipi", prio.get(int(i), {}).get("ip_tecnico", 0.0)) if pd.notna(i) else 0.0)
+    # Alias temporário: ainda existe código antigo esperando IPT, mas o valor exibido é IPI.
+    df["IPT"] = df["IPI"]
     df["IPE"] = sid.map(lambda i: prio.get(int(i), {}).get("ip_economico", 0.0) if pd.notna(i) else 0.0)
-    # Segmentos sem entrada no ranking (Excelente / sem intervenção) ficam com 10.0.
-    df["Priorização"] = sid.map(lambda i: prio.get(int(i), {}).get("priorizacao", 10.0) if pd.notna(i) else 10.0)
+    df["Priorização"] = df["IPI"]
     df["Classe prioridade"] = sid.map(lambda i: prio.get(int(i), {}).get("classificacao", "Prioridade Baixa") if pd.notna(i) else "Prioridade Baixa")
     df["_rank"] = sid.map(lambda i: prio.get(int(i), {}).get("ranking", len(prio) + 1) if pd.notna(i) else len(prio) + 1)
 
@@ -2091,7 +3112,13 @@ def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, strategy: str) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+def _simulate_economic_scenario(
+    table_df,
+    annual_budget_mi: int,
+    horizon: int,
+    strategy: str,
+    base_year: int | None = None,
+) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     """Simula a execução das obras dentro de um orçamento anual e horizonte.
 
     Ordena os trechos por priorização e vai "gastando" o orçamento ano a ano: cada
@@ -2102,6 +3129,7 @@ def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, s
     df = _economic_work_table(table_df)
     if df.empty:
         return {}, df, pd.DataFrame()
+    base_year = int(base_year or _ECONOMIC_FALLBACK_START_YEAR)
 
     df = _aplicar_indice_priorizacao(df)
 
@@ -2118,10 +3146,10 @@ def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, s
             execution_years.append("")
         elif cost <= remaining_total:
             statuses.append("Executa")
-            # Ano previsto = ano-base 2026 (_ECONOMIC_BASE_YEAR, README §14.2) + nº de
+            # Ano previsto = ano-base da linha do tempo + nº de
             # orçamentos anuais já consumidos, limitado ao fim do horizonte.
-            execution_year = int((total_budget - remaining_total) // annual_budget) + 2026 if annual_budget else 2026
-            execution_years.append(str(min(execution_year, 2025 + int(horizon))))
+            execution_year = int((total_budget - remaining_total) // annual_budget) + int(base_year) if annual_budget else int(base_year)
+            execution_years.append(str(min(execution_year, int(base_year) + int(horizon) - 1)))
             remaining_total -= cost
         else:
             statuses.append("Backlog")
@@ -2137,7 +3165,7 @@ def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, s
     current_iap = float((df["IAP"] * df["Extensão"]).sum() / df["Extensão"].sum()) if df["Extensão"].sum() else 0
 
     for offset in range(int(horizon)):
-        year = 2026 + offset
+        year = int(base_year) + offset
         year_budget = annual_budget
         year_km = 0.0
         for idx, row in pending.iterrows():
@@ -2184,7 +3212,6 @@ def _simulate_economic_scenario(table_df, annual_budget_mi: int, horizon: int, s
         # Custo evitado = 35% do custo executado (premissa hardcoded, README §14.2):
         # intervir cedo evitaria reconstrução futura mais cara.
         "cost_avoided": executed_cost * 0.35,
-        "uses_parametric_cost": bool((df["Custo origem"] == "Paramétrico").any()),
     }
     return metrics, df, pd.DataFrame(annual_rows)
 
@@ -2210,36 +3237,44 @@ def _budget_items_for_year(budget_items: pd.DataFrame | None, year: int | None) 
     return budget_items.loc[years == int(year)].copy()
 
 
-def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_key: str) -> tuple[int, int, int]:
-    """Sliders do cenário econômico: orçamento anual, horizonte e nível de prioridade.
-    Devolve `(orçamento_mi, horizonte_anos, prioridade_máx)`. O default do orçamento é
+def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_key: str) -> tuple[int, int, float, int, int, str]:
+    """Sliders do cenário econômico: orçamento anual, horizonte e corte mínimo de IPI.
+    Devolve `(orçamento_mi, horizonte_anos, ipi_mínimo)`. O default do orçamento é
     a necessidade total (cobre 100%) e o horizonte default é o total programado no banco."""
-    budget_col, horizon_col, prio_col = st.columns([1, 1, 1], gap="medium")
+    budget_col, horizon_col, scope_col, prio_col = st.columns([1, 1, 1.05, 1], gap="medium")
 
     # Horizonte TOTAL da análise (ano-base até o último ano programado) — é o default
     # e o máximo do slider (não fixo em 8/20). O gestor pode reduzir a partir do total.
-    _anos = (
-        pd.to_numeric(budget_items["Ano"], errors="coerce").dropna()
-        if (budget_items is not None and not budget_items.empty and "Ano" in budget_items)
-        else None
-    )
-    full_h = max(1, int(_anos.max()) - int(_anos.min()) + 1) if (_anos is not None and not _anos.empty) else _ECONOMIC_DEFAULT_HORIZON
+    start_year, end_year = _budget_year_bounds(budget_items)
 
     # Horizonte primeiro: a necessidade total (default do orçamento) depende dele.
     with horizon_col:
         _filter_caption("Horizonte")
-        horizon = st.slider(
-            "Horizonte", 1, max(full_h, 2), full_h, 1,
-            key=f"horizon_{scenario_key}",
-            label_visibility="collapsed",
+        horizon, selected_end_year = _render_horizon_year_selector(
+            key=f"horizon_end_year_{scenario_key}",
+            start_year=start_year,
+            end_year=end_year,
         )
-        st.markdown(f'<div class="economic-control-value">{horizon} anos</div>', unsafe_allow_html=True)
+
+    with scope_col:
+        _filter_caption("Cálculo")
+        scope_mode = _render_scope_mode_selector(f"scope_mode_{scenario_key}")
+        st.markdown(
+            f'<div class="economic-control-value">{_analysis_scope_label(scope_mode, start_year, selected_end_year)}</div>',
+            unsafe_allow_html=True,
+        )
 
     # Default do orçamento = necessidade total (garante cobrir tudo). O máximo é
     # estável (necessidade sem limite de horizonte) para o estado do slider não
     # estourar ao mudar o horizonte.
     # teto (ceil) em milhões — garante que o default cobre 100% da necessidade
-    need_mi = max(1, int(-(-_necessidade_total(table_df, budget_items, horizon) // 1_000_000)))
+    scoped_budget_items = _filter_budget_items_to_scope(
+        budget_items,
+        start_year=start_year,
+        selected_year=selected_end_year,
+        scope_mode=scope_mode,
+    )
+    need_mi = max(1, int(-(-_necessidade_total(table_df, scoped_budget_items, 9999) // 1_000_000)))
     budget_max = max(50, int(-(-_necessidade_total(table_df, budget_items, 9999) // 1_000_000)))
     with budget_col:
         _filter_caption("Orçamento anual")
@@ -2250,20 +3285,19 @@ def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_k
         )
         st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
 
-    # Filtro de nível de prioridade: mantém SNVs com priorização (invertida) ≤ X.
-    # Escala 1..10, default 10 = todos. 1 = só o(s) mais crítico(s).
+    # Filtro de prioridade Paragon: agora usa o IPI real (0..100), sem escala 1..10.
     with prio_col:
-        _filter_caption("Nível de prioridade")
-        prio_max = st.slider(
-            "Nível de prioridade", 1, 10, 10, 1,
+        _filter_caption("IPI mínimo")
+        ipi_min = st.slider(
+            "IPI mínimo", 0, 100, 0, 1,
             key=f"prio_{scenario_key}",
             label_visibility="collapsed",
-            help="1 = atender só o mais crítico; 10 = atender todos.",
+            help="0 mostra todos os trechos. Valores maiores deixam só os trechos com IPI mais alto.",
         )
-        rotulo = "Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}"
+        rotulo = "Todos" if ipi_min <= 0 else f"IPI ≥ {ipi_min}"
         st.markdown(f'<div class="economic-control-value">{rotulo}</div>', unsafe_allow_html=True)
 
-    return annual_budget, horizon, prio_max
+    return annual_budget, horizon, float(ipi_min), start_year, selected_end_year, scope_mode
 
 
 def _render_cost_by_solution(table_df: pd.DataFrame) -> None:
@@ -2535,6 +3569,247 @@ def _render_budget_cost_by_solution(budget_items: pd.DataFrame, *, color_fn=None
     )
 
 
+def _timeline_text_color(hex_color: str) -> str:
+    """Escolhe texto claro/escuro para chips pequenos sem depender de CSS externo."""
+    color = str(hex_color or "").strip().lstrip("#")
+    if len(color) != 6:
+        return "#061018"
+    try:
+        r, g, b = (int(color[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return "#061018"
+    luminance = (0.299 * r) + (0.587 * g) + (0.114 * b)
+    return "#061018" if luminance >= 150 else "#f8fafc"
+
+
+def _timeline_solution_label(label: str) -> str:
+    """Rótulo curto para caber no cronograma; o nome completo fica no tooltip."""
+    normalized = str(label or "").lower()
+    if "reconstru" in normalized:
+        return "REC"
+    if "fresagem" in normalized and "refor" in normalized:
+        return "RPS+REF"
+    if "fresagem" in normalized:
+        return "RPS"
+    if "reparo localizado" in normalized and "refor" in normalized:
+        return "RL+REF"
+    if "microrrevestimento" in normalized and "reparo localizado" in normalized:
+        return "RL+RS"
+    if "recarga superficial" in normalized:
+        return "RS"
+    if "microrrevestimento" in normalized:
+        return "RS"
+    if "reparo localizado" in normalized or normalized.startswith("rl"):
+        return "RL"
+    return str(label or "Intervenção")[:18]
+
+
+def _timeline_scenario_short(label: str) -> str:
+    """Encurta o cenário para a linha do cronograma não virar um texto gigante."""
+    raw = str(label or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    pista = ""
+    if "FIXA" in upper:
+        pista = "Fixa"
+    elif "SH" in upper:
+        pista = "SH"
+
+    sentido = ""
+    if "DECRESCENTE" in upper:
+        sentido = "Decrescente"
+    elif "CRESCENTE" in upper:
+        sentido = "Crescente"
+    elif "TODOS" in upper:
+        sentido = "Todos"
+
+    pieces = [piece for piece in [pista, sentido] if piece]
+    return " · ".join(pieces) if pieces else raw[:22]
+
+
+def _segment_timeline_source(
+    budget_items: pd.DataFrame | None,
+    prioritized_table: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Monta uma base única para o cronograma por segmento."""
+    if budget_items is not None and not budget_items.empty and {"Ano", "Solução", "Custo"}.issubset(budget_items.columns):
+        source = budget_items.copy()
+        source["_timeline_year"] = pd.to_numeric(source["Ano"], errors="coerce")
+        source["_timeline_solution"] = source["Solução"].astype(str)
+        source["_timeline_cost"] = pd.to_numeric(source["Custo"], errors="coerce").fillna(0.0)
+        return source
+
+    if prioritized_table is None or prioritized_table.empty or "Ano previsto" not in prioritized_table.columns:
+        return pd.DataFrame()
+
+    source = prioritized_table.copy()
+    source["_timeline_year"] = pd.to_numeric(source["Ano previsto"], errors="coerce")
+    source["_timeline_solution"] = source.get("Solução recomendada", "").astype(str)
+    source["_timeline_cost"] = pd.to_numeric(source.get("Custo econômico", 0), errors="coerce").fillna(0.0)
+    return source
+
+
+def _render_segment_intervention_timeline(
+    budget_items: pd.DataFrame | None,
+    prioritized_table: pd.DataFrame | None,
+    *,
+    start_year: int,
+    end_year: int,
+    scope_label: str,
+    color_fn=None,
+) -> None:
+    """Cronograma tipo Gantt: segmentos na vertical, anos na horizontal."""
+    source = _segment_timeline_source(budget_items, prioritized_table)
+    if source.empty:
+        return
+
+    source = source.copy()
+    source["_timeline_year"] = pd.to_numeric(source["_timeline_year"], errors="coerce")
+    source = source.dropna(subset=["_timeline_year"])
+    source["_timeline_year"] = source["_timeline_year"].astype(int)
+    source = source[
+        (source["_timeline_year"] >= int(start_year))
+        & (source["_timeline_year"] <= int(end_year))
+        & (source["_timeline_cost"] > 0)
+    ].copy()
+    if source.empty:
+        st.markdown(
+            '<section class="solution-distribution"><div class="solution-distribution-head">'
+            '<div class="solution-distribution-title"><div class="solution-distribution-icon">▦</div>'
+            '<div><h3>Cronograma por segmento</h3>'
+            f'<p>{html.escape(scope_label)} · sem intervenções programadas nesse recorte</p></div></div>'
+            '</div></section>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    color_fn = color_fn or _solution_color
+    years = list(range(int(start_year), int(end_year) + 1))
+
+    scenario_options = []
+    if "Sentido" in source.columns:
+        scenario_options = [str(value) for value in dict.fromkeys(source["Sentido"].dropna().astype(str).tolist()) if str(value).strip()]
+
+    with st.container(border=True):
+        header_cols = st.columns([1.15, 0.55, 0.95] if len(scenario_options) > 1 else [1.15, 0.55, 0.12])
+        with header_cols[0]:
+            st.markdown(
+                '<div class="segment-timeline-titlebar">'
+                '<div class="solution-distribution-icon">▦</div>'
+                '<h3>Cronograma por segmento</h3>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        with header_cols[1]:
+            st.markdown('<div class="segment-control-caption">MODO</div>', unsafe_allow_html=True)
+            mode = st.radio(
+                "Modo do cronograma por segmento",
+                ["Técnico", "Econômico"],
+                horizontal=True,
+                key="economic_segment_timeline_mode",
+                label_visibility="collapsed",
+            )
+        selected_scenario = None
+        if len(scenario_options) > 1:
+            with header_cols[2]:
+                st.markdown('<div class="segment-control-caption">CENÁRIO</div>', unsafe_allow_html=True)
+                selected_scenario = st.radio(
+                    "Cenário do cronograma por segmento",
+                    scenario_options,
+                    horizontal=True,
+                    key="economic_segment_timeline_scenario",
+                    format_func=_timeline_scenario_short,
+                    label_visibility="collapsed",
+                )
+        elif len(scenario_options) == 1:
+            selected_scenario = scenario_options[0]
+
+        if selected_scenario:
+            source = source[source["Sentido"].astype(str) == str(selected_scenario)].copy()
+        if source.empty:
+            st.info("Sem intervenções programadas para o cenário selecionado.")
+            return
+
+        group_cols = [col for col in ["_segment_id", "SNV", "Sentido", "Km Inicial", "Km Final"] if col in source.columns]
+        if not group_cols:
+            group_cols = [col for col in ["SNV", "Km Inicial", "Km Final"] if col in source.columns]
+        if not group_cols:
+            return
+
+        segment_order = (
+            source[group_cols]
+            .drop_duplicates()
+            .sort_values([col for col in ["SNV", "Sentido", "Km Inicial", "Km Final"] if col in group_cols])
+        )
+        segment_keys = [tuple(row[col] for col in group_cols) for _, row in segment_order.iterrows()]
+        source["_timeline_group_key"] = source[group_cols].apply(lambda row: tuple(row[col] for col in group_cols), axis=1)
+        source = source[source["_timeline_group_key"].isin(segment_keys)].copy()
+
+        grouped = (
+            source.groupby(["_timeline_group_key", "_timeline_year", "_timeline_solution"], as_index=False)
+            .agg({"_timeline_cost": "sum"})
+        )
+        cell_lookup: dict[tuple[tuple, int], list[dict]] = {}
+        for row in grouped.to_dict("records"):
+            cell_lookup.setdefault((row["_timeline_group_key"], int(row["_timeline_year"])), []).append(row)
+
+        def segment_label(row: pd.Series) -> tuple[str, str, str]:
+            snv = str(row.get("SNV", "") or "").strip()
+            scenario = _timeline_scenario_short(str(row.get("Sentido", "") or "").strip())
+            km_ini = row.get("Km Inicial")
+            km_fim = row.get("Km Final")
+            km_txt = ""
+            if pd.notna(km_ini) and pd.notna(km_fim):
+                km_txt = f"km {float(km_ini):.1f}-{float(km_fim):.1f}"
+            main = snv or "Segmento"
+            sub = " · ".join(piece for piece in [scenario, km_txt] if piece)
+            full = " · ".join(piece for piece in [snv, str(row.get("Sentido", "") or "").strip(), km_txt] if piece)
+            return main, sub, full or main
+
+        header_cells = ['<div class="segment-timeline-cell segment-timeline-head">Segmento</div>']
+        header_cells.extend(f'<div class="segment-timeline-cell segment-timeline-year">{year}</div>' for year in years)
+
+        rows_html = ["".join(header_cells)]
+        for _, seg_row in segment_order.iterrows():
+            key = tuple(seg_row[col] for col in group_cols)
+            label_main, label_sub, label_full = segment_label(seg_row)
+            rows_html.append(
+                '<div class="segment-timeline-cell segment-timeline-segment" '
+                f'title="{html.escape(label_full)}">'
+                f'<strong>{html.escape(label_main)}</strong>'
+                f'<span>{html.escape(label_sub)}</span>'
+                '</div>'
+            )
+            for year in years:
+                items = cell_lookup.get((key, year), [])
+                if not items:
+                    rows_html.append('<div class="segment-timeline-cell segment-timeline-empty"></div>')
+                    continue
+                chips = []
+                for item in items:
+                    solution = str(item["_timeline_solution"])
+                    cost = float(item["_timeline_cost"])
+                    color = color_fn(solution)
+                    text_color = _timeline_text_color(color)
+                    text = _timeline_solution_label(solution) if mode == "Técnico" else _format_money(cost)
+                    tooltip = f"{solution} · {label_full} · {year} · {_format_money(cost)}"
+                    chips.append(
+                        '<span class="segment-timeline-chip" '
+                        f'style="background:{color};color:{text_color};" title="{html.escape(tooltip)}">'
+                        f'{html.escape(text)}</span>'
+                    )
+                rows_html.append(f'<div class="segment-timeline-cell">{"".join(chips)}</div>')
+
+        grid_style = f"grid-template-columns:minmax(190px, 230px) repeat({len(years)}, minmax(78px, 1fr));"
+        st.markdown(
+            f'<div class="segment-timeline-scroll"><div class="segment-timeline-grid" style="{grid_style}">'
+            f'{"".join(rows_html)}'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+
 def _group_priority_by_snv(table_df: pd.DataFrame) -> pd.DataFrame:
     """Consolida os segmentos por SNV (ou SNV+Sentido) numa tabela de prioridade.
     O SNV herda o segmento mais crítico (Prioridade = min) e reordena 1..N."""
@@ -2550,7 +3825,9 @@ def _group_priority_by_snv(table_df: pd.DataFrame) -> pd.DataFrame:
         "Custo econômico": "sum",
         "Solução recomendada": lambda values: " + ".join(dict.fromkeys(str(value) for value in values if str(value).strip())),
     }
-    for col in ("IPT", "IPE", "Priorização"):
+    if "Classe prioridade" in table_df.columns:
+        agg["Classe prioridade"] = "first"
+    for col in ("IPI", "IPT", "IPE", "Priorização"):
         if col in table_df.columns:
             agg[col] = "max"  # constantes por (SNV, sentido) — "max" só extrai o valor
 
@@ -2561,11 +3838,17 @@ def _group_priority_by_snv(table_df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["Prioridade", "IAP", "Km Inicial"], ascending=[True, True, True])
         .reset_index(drop=True)
     )
-    for col in ("IPT", "IPE", "Priorização"):
+    for col in ("IPI", "IPT", "IPE", "Priorização"):
         if col not in grouped.columns:
             grouped[col] = 0.0
         grouped[col] = grouped[col].fillna(0.0)
-    grouped["Classe prioridade"] = grouped["Priorização"].map(classificar_prioridade)
+    if "Classe prioridade" not in grouped.columns:
+        grouped["Classe prioridade"] = grouped["IPI"].map(lambda value: (
+            "Prioridade Crítica" if value >= 70 else
+            "Prioridade Alta" if value >= 50 else
+            "Prioridade Média" if value >= 30 else
+            "Prioridade Baixa"
+        ))
     grouped["Prioridade"] = range(1, len(grouped) + 1)
     return grouped
 
@@ -2604,22 +3887,32 @@ def _group_budget_by_snv(budget_items: pd.DataFrame, priority_table: pd.DataFram
             else ["SNV"]
         )
         grouped = grouped.merge(
-            priority[merge_keys + ["Prioridade", "IAP", "IPT", "IPE", "Priorização"]],
+            priority[merge_keys + ["Prioridade", "IAP", "IPI", "IPT", "IPE", "Priorização", "Classe prioridade"]],
             on=merge_keys,
             how="left",
         )
     else:
         grouped["Prioridade"] = range(1, len(grouped) + 1)
         grouped["IAP"] = 0
+        grouped["IPI"] = 0.0
         grouped["IPT"] = 0.0
         grouped["IPE"] = 0.0
         grouped["Priorização"] = 0.0
+        grouped["Classe prioridade"] = "Prioridade Baixa"
 
     grouped["Prioridade"] = grouped["Prioridade"].fillna(len(grouped) + 1).astype(int)
     grouped["IAP"] = grouped["IAP"].fillna(0)
-    for col in ("IPT", "IPE", "Priorização"):
+    for col in ("IPI", "IPT", "IPE", "Priorização"):
         grouped[col] = grouped[col].fillna(0.0)
-    grouped["Classe prioridade"] = grouped["Priorização"].map(classificar_prioridade)
+    if "Classe prioridade" not in grouped.columns:
+        grouped["Classe prioridade"] = grouped["IPI"].map(lambda value: (
+            "Prioridade Crítica" if value >= 70 else
+            "Prioridade Alta" if value >= 50 else
+            "Prioridade Média" if value >= 30 else
+            "Prioridade Baixa"
+        ))
+    else:
+        grouped["Classe prioridade"] = grouped["Classe prioridade"].fillna("Prioridade Baixa")
     grouped = grouped.sort_values(["Prioridade", "IAP", "Km Inicial"], ascending=[True, True, True]).reset_index(drop=True)
     grouped["Prioridade"] = range(1, len(grouped) + 1)
     return grouped
@@ -2705,7 +3998,8 @@ def _segment_attendance(
     Retorna (attended_snv_table, attended_km, attended_segment_ids):
       - attended_snv_table: uma linha por SNV com ≥1 segmento financiado;
         `Extensão` e `Custo econômico` refletem apenas a porção atendida.
-      - attended_segment_ids: `_segment_id` efetivamente financiados (mapa/PDF).
+      - attended_segment_ids: chaves dos segmentos efetivamente financiados; quando
+        existem dois sentidos, a chave também preserva o sentido para não misturar pistas.
     """
     if snv_table is None or snv_table.empty:
         return pd.DataFrame(), 0.0, set()
@@ -2713,7 +4007,7 @@ def _segment_attendance(
     keys = ["SNV", "Sentido"] if "Sentido" in snv_table.columns else ["SNV"]
 
     seg = _segment_cost_frame(budget_items, priority_table, keys)
-    # Sem dados por segmento (ex.: custo paramétrico) → cai no SNV inteiro.
+    # Sem dados por segmento → cai no SNV inteiro.
     if seg is None or seg.empty:
         attended = _select_snv_attended_by_budget(snv_table, annual_budget_mi)
         km = float(attended["Extensão"].sum()) if not attended.empty else 0.0
@@ -2728,7 +4022,8 @@ def _segment_attendance(
     seg = seg[seg["_ord"].notna()].sort_values(["_ord", "_km_ini"]).reset_index(drop=True)
 
     remaining = budget
-    attended_ids: set = set()
+    attended_ids: set[str] = set()
+    use_sentido_key = "Sentido" in keys and seg["Sentido"].fillna("").astype(str).nunique() > 1
     att_ext: dict = {}
     att_cost: dict = {}
     for r in seg.to_dict("records"):
@@ -2736,7 +4031,10 @@ def _segment_attendance(
         if cost > remaining:
             break
         remaining -= cost
-        attended_ids.add(int(r["_segment_id"]))
+        segment_key = str(int(r["_segment_id"]))
+        if use_sentido_key:
+            segment_key += "|" + str(r.get("Sentido") or "")
+        attended_ids.add(segment_key)
         gk = tuple(str(r[k]) for k in keys)
         att_ext[gk] = att_ext.get(gk, 0.0) + float(r["_ext"] or 0)
         att_cost[gk] = att_cost.get(gk, 0.0) + cost
@@ -2766,11 +4064,12 @@ def _segment_priority_table(prioritized_table: pd.DataFrame, budget_items: pd.Da
     df = prioritized_table.copy()
     # Custo real por segmento (soma da programação do orçamento); fallback p/ Custo econômico.
     if budget_items is not None and not budget_items.empty and "_segment_id" in budget_items.columns:
+        merge_keys = ["_segment_id", "Sentido"] if "Sentido" in df.columns and "Sentido" in budget_items.columns else ["_segment_id"]
         real = (
-            budget_items.groupby("_segment_id", as_index=False)["Custo"].sum()
+            budget_items.groupby(merge_keys, as_index=False)["Custo"].sum()
             .rename(columns={"Custo": "_custo_real"})
         )
-        df = df.merge(real, on="_segment_id", how="left")
+        df = df.merge(real, on=merge_keys, how="left")
         usa_real = df["_custo_real"].notna() & (df["_custo_real"] > 0)
         df["Custo econômico"] = df["_custo_real"].where(usa_real, df["Custo econômico"])
         df = df.drop(columns=["_custo_real"])
@@ -2798,6 +4097,27 @@ def _segment_attendance_seg(seg_table: pd.DataFrame, annual_budget_mi: int) -> t
         rows.append(r)
         km += float(r.get("Extensão", 0) or 0)
     return pd.DataFrame(rows), km, ids
+
+
+def _economic_segment_keys(df: pd.DataFrame | None, id_col: str = "_segment_id", sentido_col: str = "Sentido") -> set[str]:
+    """Chave de segmento para cenário econômico; preserva pistas quando há mais de um cenário."""
+    if df is None or df.empty or id_col not in df.columns:
+        return set()
+    ids = df[id_col].dropna().astype(int).astype(str)
+    if sentido_col in df.columns:
+        sentidos = df.loc[ids.index, sentido_col].fillna("").astype(str)
+        if sentidos.nunique(dropna=False) > 1:
+            return set(ids + "|" + sentidos)
+    return set(ids)
+
+
+def _economic_segment_key_series(df: pd.DataFrame, id_col: str, sentido_col: str) -> pd.Series:
+    ids = df[id_col].astype(int).astype(str)
+    if sentido_col in df.columns:
+        sentidos = df[sentido_col].fillna("").astype(str)
+        if sentidos.nunique(dropna=False) > 1:
+            return ids + "|" + sentidos
+    return ids
 
 
 def _solution_text_color(color: str) -> str:
@@ -3145,9 +4465,9 @@ def _render_solution_segments_map(segments_df, budget_items: pd.DataFrame, selec
         <script>
           const segments = {payload_json};
           const map = L.map('map', {{ zoomControl:false, attributionControl:false, scrollWheelZoom:true }});
-          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 22, maxNativeZoom: 17, attribution: 'Tiles &copy; Esri' }}).addTo(map);
-          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 22, maxNativeZoom: 17 }}).addTo(map);
-          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 22, maxNativeZoom: 17 }}).addTo(map);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 17, maxNativeZoom: 17, attribution: 'Tiles &copy; Esri' }}).addTo(map);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 17, maxNativeZoom: 17 }}).addTo(map);
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 17, maxNativeZoom: 17 }}).addTo(map);
           const points = [];
           const fmt = (value) => Number(value).toFixed(2);
           segments.forEach((segment) => {{
@@ -3180,6 +4500,7 @@ _PRIORITY_CLASS_COLORS = {
     "Prioridade Alta": "#f2a51a",
     "Prioridade Média": "#fff200",
     "Prioridade Baixa": "#7f909c",
+    "Prioridade Muito Baixa": "#7f909c",
 }
 
 
@@ -3189,21 +4510,21 @@ def _priority_class_color(classe: str) -> str:
 
 
 def _priority_memory_markup(m: dict) -> str:
-    """Memória de cálculo do nível de prioridade (IPT) de um SNV: fórmulas + valores."""
+    """Memória de cálculo do IPI."""
     if not m:
         return '<span class="muted">Memória de cálculo indisponível para este trecho.</span>'
-    vmda = float(m.get("vmda") or 0.0)
+    vmdl = float(m.get("vmdl") or 0.0)
+    vmdp = float(m.get("vmdp") or 0.0)
+    vmdeq = float(m.get("vmdeq") or 0.0)
     icds = float(m.get("icds") or 0.0)
     icdp = float(m.get("icdp") or 0.0)
-    rv = float(m.get("vmda_normalizado") or 0.0)
-    rs = float(m.get("icds_normalizado") or 0.0)
-    rp = float(m.get("icdp_normalizado") or 0.0)
-    vmin = float(m.get("vmda_min") or 0.0); vmax = float(m.get("vmda_max") or 0.0)
-    smin = float(m.get("icds_min") or 0.0); smax = float(m.get("icds_max") or 0.0)
-    pmin = float(m.get("icdp_min") or 0.0); pmax = float(m.get("icdp_max") or 0.0)
-    ipt = float(m.get("ip_tecnico") or 0.0)
-    iptmin = float(m.get("ipt_min") or 0.0); iptmax = float(m.get("ipt_max") or 0.0)
-    prio = int(round(float(m.get("priorizacao") or 0)))
+    dds = float(m.get("dds") or 0.0)
+    ddp = float(m.get("ddp") or 0.0)
+    dqo_base = float(m.get("dqo_base") or 0.0)
+    gatilho = float(m.get("gatilho") or 0.0)
+    dqo = float(m.get("dqo") or 0.0)
+    ft = float(m.get("ft") or 0.0)
+    ipi = float(m.get("ipi", m.get("ip_tecnico", 0.0)) or 0.0)
 
     head = ('font-size:11px;font-weight:800;letter-spacing:.04em;color:#9aa8b3;'
             'text-transform:uppercase;margin:2px 0 4px')
@@ -3212,37 +4533,33 @@ def _priority_memory_markup(m: dict) -> str:
     fcss = 'font-family:monospace;font-size:13px;color:#e5edf3;margin:3px 0'
     rows = (
         '<tr>'
-        f'<td style="{td};color:#e5edf3;font-weight:700">R<sub>VMDA</sub> (log)</td>'
-        f'<td style="{td}">{vmda:,.0f}</td>'
-        f'<td style="{td};font-family:monospace">(ln&nbsp;{vmda:,.0f} − ln&nbsp;{vmin:,.0f}) / (ln&nbsp;{vmax:,.0f} − ln&nbsp;{vmin:,.0f})</td>'
-        f'<td style="{td};color:#fff;font-weight:800">{rv:.3f}</td>'
+        f'<td style="{td};color:#e5edf3;font-weight:700">DDS</td>'
+        f'<td style="{td}">ICDS {icds:.2f}</td>'
+        f'<td style="{td};font-family:monospace">(5 − ICDS) / 4</td>'
+        f'<td style="{td};color:#fff;font-weight:800">{dds:.3f}</td>'
         '</tr>'
         '<tr>'
-        f'<td style="{td};color:#e5edf3;font-weight:700">R<sub>ICDS</sub></td>'
-        f'<td style="{td}">{icds:.2f}</td>'
-        f'<td style="{td};font-family:monospace">({icds:.2f} − {smin:.2f}) / ({smax:.2f} − {smin:.2f})</td>'
-        f'<td style="{td};color:#fff;font-weight:800">{rs:.3f}</td>'
+        f'<td style="{td};color:#e5edf3;font-weight:700">DDP</td>'
+        f'<td style="{td}">ICDP {icdp:.2f}</td>'
+        f'<td style="{td};font-family:monospace">(5 − ICDP) / 4</td>'
+        f'<td style="{td};color:#fff;font-weight:800">{ddp:.3f}</td>'
         '</tr>'
         '<tr>'
-        f'<td style="{td};color:#e5edf3;font-weight:700">R<sub>ICDP</sub></td>'
-        f'<td style="{td}">{icdp:.2f}</td>'
-        f'<td style="{td};font-family:monospace">({icdp:.2f} − {pmin:.2f}) / ({pmax:.2f} − {pmin:.2f})</td>'
-        f'<td style="{td};color:#fff;font-weight:800">{rp:.3f}</td>'
+        f'<td style="{td};color:#e5edf3;font-weight:700">VMDeq</td>'
+        f'<td style="{td}">VMDL {vmdl:,.0f} · VMDP {vmdp:,.0f}</td>'
+        f'<td style="{td};font-family:monospace">VMDL + 4 × VMDP</td>'
+        f'<td style="{td};color:#fff;font-weight:800">{vmdeq:,.0f}</td>'
         '</tr>'
     )
     return (
-        f'<div style="{head}">Nível de prioridade — memória de cálculo</div>'
-        '<div style="font-size:12px;color:#8f9eaa;margin-bottom:8px">Escala 1 (mais crítico) … 10 (menos crítico). '
-        'Normalização min–máx global (R ∈ [0,1]); valores do segmento mais crítico do SNV. '
-        'O VMDA é inverso (mais tráfego → mais prioritário).</div>'
+        f'<div style="{head}">IPI — memória de cálculo</div>'
+        '<div style="font-size:12px;color:#8f9eaa;margin-bottom:8px">Escala técnica direta: maior IPI = trecho mais crítico. '
+        'A fila é montada do maior IPI para o menor.</div>'
         '<table style="border-collapse:collapse;width:100%;font-size:12px">'
         f'<tr><th style="{th}">Variável</th><th style="{th}">Valor</th>'
-        f'<th style="{th}">Normalização</th><th style="{th}">R</th></tr>{rows}</table>'
-        f'<div style="{fcss};margin-top:10px">IPT = 10 × (0,5·(1 − R<sub>VMDA</sub>) + 0,3·R<sub>ICDS</sub> + 0,2·R<sub>ICDP</sub>)</div>'
-        f'<div style="{fcss}">&nbsp;&nbsp;&nbsp;&nbsp;= 10 × (0,5·(1 − {rv:.3f}) + 0,3·{rs:.3f} + 0,2·{rp:.3f}) = <b>{ipt:.2f}</b></div>'
-        f'<div style="{fcss};margin-top:8px">Nível de prioridade = round( (IPT − IPT<sub>mín</sub>) / (IPT<sub>máx</sub> − IPT<sub>mín</sub>) × 9 + 1 )</div>'
-        f'<div style="{fcss}">&nbsp;&nbsp;&nbsp;&nbsp;= round( ({ipt:.2f} − {iptmin:.2f}) / ({iptmax:.2f} − {iptmin:.2f}) × 9 + 1 ) = <b style="color:#00c2e8">{prio}</b></div>'
-        '<div style="font-size:11px;color:#8f9eaa;margin-top:6px">O IPT é re-normalizado entre os trechos (min–máx) para a escala 1 (mais crítico) … 10 (menos crítico).</div>'
+        f'<th style="{th}">Fórmula</th><th style="{th}">Resultado</th></tr>{rows}</table>'
+        f'<div style="{fcss};margin-top:10px">DQO<sub>base</sub> = <b>{dqo_base:.3f}</b> · Gatilho = <b>{gatilho:.3f}</b> · DQO = <b>{dqo:.3f}</b> · FT = <b>{ft:.3f}</b></div>'
+        f'<div style="{fcss}">IPI = 100 × DQO<sup>1,2</sup> × FT = <b>{ipi:.2f}</b></div>'
     )
 
 
@@ -3258,7 +4575,7 @@ def _render_economic_priority_table(
     """Tabela executiva de priorização do cenário econômico (a "fila" de trechos).
 
     Duas visões: só os segmentos atendidos pelo orçamento anual, ou todos os
-    priorizados. Cada linha expande a memória de cálculo do IPT e o detalhe de custos.
+    priorizados. Cada linha expande a memória de cálculo do IPI e o detalhe de custos.
     """
     if snv_table is None or snv_table.empty:
         return
@@ -3274,7 +4591,7 @@ def _render_economic_priority_table(
     with sort_col:
         _filter_caption("Ordenar por")
         sort_by = st.selectbox(
-            "Ordenar por", ["Km inicial", "Prioridade"], label_visibility="collapsed",
+            "Ordenar por", ["Prioridade", "Km inicial"], label_visibility="collapsed",
         )
 
     if view_mode == "Segmentos atendidos pelo orçamento":
@@ -3309,7 +4626,7 @@ def _render_economic_priority_table(
     view = view.head(400).reset_index(drop=True)
     has_sentido = "Sentido" in view.columns
     rows_markup = []
-    cspan = 12 if has_sentido else 11
+    cspan = 11 if has_sentido else 10
     _mem = prio_memory or {}
     for index, row in enumerate(view.to_dict("records"), start=1):
         snv = str(row["SNV"])
@@ -3319,9 +4636,10 @@ def _render_economic_priority_table(
         detail_chart = _segment_detail_markup(row, budget_items)
         sentido = str(row.get("Sentido", ""))
         sentido_td = f"<td>{html.escape(sentido)}</td>" if has_sentido else ""
-        # Memória de cálculo do nível de prioridade do SEGMENTO (clique no valor).
+        # Memória de cálculo do IPI do SEGMENTO (clique no valor).
         mem = _mem.get(int(seg_id)) if (seg_id is not None and pd.notna(seg_id)) else {}
         mem_markup = _priority_memory_markup(mem or {})
+        ipi_value = float(row.get("IPI", row.get("IPT", 0)) or 0)
         rows_markup.append(
             "<tr class='snv-row'>"
             f"<td class='muted'>{int(row['Prioridade'])}</td>"
@@ -3331,11 +4649,10 @@ def _render_economic_priority_table(
             f"<td>{_format_km(float(row['Km Final']))}</td>"
             f"<td>{_format_km(float(row['Extensão']))} km</td>"
             f"<td>{float(row['IAP']):.2f}</td>"
-            f"<td>{float(row.get('IPT', 0) or 0):.2f}</td>"
-            f"<td>{float(row.get('IPE', 0) or 0):.2f}</td>"
-            f"<td><label for='{prio_id}' style='cursor:pointer;display:inline-flex' title='Ver memória de cálculo'>"
-            f"<span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{int(round(float(row.get('Priorização', 0) or 0)))}</span>"
+            f"<td><label for='{prio_id}' style='cursor:pointer;display:inline-flex' title='Ver memória de cálculo do IPI'>"
+            f"<span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{ipi_value:.2f}</span>"
             "</label></td>"
+            f"<td>{float(row.get('IPE', 0) or 0):.2f}</td>"
             f"<td>{_format_money(float(row['Custo econômico']))}</td>"
             "<td class='detail-toggle-cell'>"
             f"<label class='detail-toggle' for='{toggle_id}'><span class='caret'>▸</span>Ver soluções</label>"
@@ -3366,15 +4683,14 @@ def _render_economic_priority_table(
             <table class="solution-table">
               <thead>
                 <tr>
-                  <th>Prior.</th>
+                  <th>Rank</th>
                   <th>SRE</th>""" + ("<th>Sentido</th>" if has_sentido else "") + """
                   <th>Km Inicial</th>
                   <th>Km Final</th>
                   <th>Extensão</th>
                   <th>IAP</th>
-                  <th>IPT</th>
+                  <th>IPI</th>
                   <th>IPE</th>
-                  <th>Priorização</th>
                   <th>Custo</th>
                   <th>Soluções</th>
                 </tr>
@@ -3406,20 +4722,39 @@ def _attended_segment_ids(segments_df, attended_snv_table) -> set:
     return set(segments_df[segments_df["sre"].astype(str).isin(attended_snvs)]["segment_id"].astype(int))
 
 
-def _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget: int, attended_km: float, attended_ids: set | None = None) -> None:
-    """Mostra no mapa quais trechos o orçamento anual consegue atender (cinza = fora)."""
+def _render_economic_scenario_map(
+    segments_df,
+    attended_snv_table,
+    annual_budget: int,
+    attended_km: float,
+    attended_ids: set | None = None,
+) -> None:
+    """Mostra no mapa quais trechos o orçamento anual consegue atender."""
     if segments_df is None or segments_df.empty or "sre" not in segments_df:
         return
 
     if attended_ids is None:
         attended_ids = _attended_segment_ids(segments_df, attended_snv_table)
+    visible_key_col = "_attendance_key" if "_attendance_key" in segments_df.columns else "segment_id"
+    visible_ids = set(segments_df[visible_key_col].dropna().astype(str)) if visible_key_col in segments_df.columns else set()
+    has_out_of_budget = bool(visible_ids and (visible_ids - set(attended_ids or set())))
     total_km = float((segments_df["km_final"] - segments_df["km_inicial"]).clip(lower=0).sum())
+    subtitle = (
+        "Trechos atendidos pelo orçamento anual · tracejado = fora do orçamento"
+        if has_out_of_budget
+        else "Todos os trechos visíveis estão cobertos pelo orçamento anual"
+    )
+    legend_foot = (
+        '<span class="legend-line" style="width:28px;height:0;background:transparent;border-top:3px dashed #2f6072"></span>Tracejado · fora do orçamento anual'
+        if has_out_of_budget
+        else '<span class="legend-line"></span>Trechos coloridos pela solução corretiva'
+    )
 
     st.markdown(
         '<section class="solution-distribution" style="padding-bottom:16px">'
         '<div class="solution-distribution-head" style="margin-bottom:0">'
         '<div class="solution-distribution-title"><div class="solution-distribution-icon">◎</div>'
-        '<div><h3>Cenário no mapa</h3><p>Trechos atendidos pelo orçamento anual · cinza = fora do orçamento</p></div></div>'
+        f'<div><h3>Cenário no mapa</h3><p>{subtitle}</p></div></div>'
         f'<div class="solution-distribution-meta"><span>Atendido · <strong>{attended_km:.1f} km</strong></span>'
         f'<span>Orçamento · <strong class="accent">{_format_money(annual_budget * 1_000_000)}/ano</strong></span></div>'
         '</div></section>',
@@ -3429,8 +4764,9 @@ def _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget
         segments_df,
         total_km,
         attended_ids=attended_ids,
-        legend_foot='<span class="legend-line" style="background:#46586a"></span>Cinza · trecho fora do orçamento anual',
+        legend_foot=legend_foot,
         color_by="solucao",
+        gap_px=18,
     )
 
 
@@ -3453,9 +4789,31 @@ def _render_economic_page(
     if table_df is not None and not table_df.empty:
         total_snv = int(table_df["SNV"].dropna().astype(str).nunique()) if "SNV" in table_df else int(len(table_df))
 
-    annual_budget, horizon, prio_max = _render_economic_controls(table_df, budget_items, total_snv, scenario_key)
-    budget_items = _limit_budget_to_horizon(budget_items, horizon)
-    metrics, prioritized_table, annual_df = _simulate_economic_scenario(table_df, annual_budget, horizon, "Balanceada")
+    if _has_missing_intervention_cost(table_df, budget_items):
+        st.info("Sem dados de custo para este recorte.")
+        return
+
+    annual_budget, horizon, ipi_min, horizon_start_year, horizon_end_year, scope_mode = _render_economic_controls(
+        table_df,
+        budget_items,
+        total_snv,
+        scenario_key,
+    )
+    calc_start_year = horizon_end_year if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY else horizon_start_year
+    calc_horizon = _analysis_budget_multiplier(scope_mode, horizon_start_year, horizon_end_year)
+    budget_items = _filter_budget_items_to_scope(
+        budget_items,
+        start_year=horizon_start_year,
+        selected_year=horizon_end_year,
+        scope_mode=scope_mode,
+    )
+    metrics, prioritized_table, annual_df = _simulate_economic_scenario(
+        table_df,
+        annual_budget,
+        calc_horizon,
+        "Balanceada",
+        base_year=calc_start_year,
+    )
     if not metrics:
         st.info("Sem dados de intervenção para montar o cenário econômico.")
         return
@@ -3465,20 +4823,65 @@ def _render_economic_page(
 
     # Tabela POR SEGMENTO (uma linha por segmento), ordenada por prioridade, custo real.
     seg_table = _segment_priority_table(prioritized_table, budget_items)
-    # Filtro de nível de prioridade — agora POR SEGMENTO.
-    if prio_max < 10 and "Priorização" in seg_table.columns:
-        seg_table = seg_table[seg_table["Priorização"] <= prio_max].reset_index(drop=True)
+    # Filtro de prioridade — agora por IPI real (0..100), maior = mais prioritário.
+    if ipi_min > 0 and "IPI" in seg_table.columns:
+        seg_table = seg_table[pd.to_numeric(seg_table["IPI"], errors="coerce").fillna(0) >= ipi_min].reset_index(drop=True)
         seg_table["Prioridade"] = range(1, len(seg_table) + 1)
     top_segments = {int(x) for x in seg_table["_segment_id"]} if not seg_table.empty else set()
+    use_scenario_segment_key = "Sentido" in seg_table.columns and seg_table["Sentido"].astype(str).nunique() > 1
+    if use_scenario_segment_key:
+        seg_table = seg_table.copy()
+        seg_table["_attendance_key"] = _economic_segment_key_series(seg_table, "_segment_id", "Sentido")
+        top_segment_keys = set(seg_table["_attendance_key"].astype(str))
+    else:
+        top_segment_keys = {str(value) for value in top_segments}
 
     # Restringe orçamento, prioritized_table e mapa ao escopo prioritário (por segmento).
     if budget_items is not None and not budget_items.empty:
-        budget_items = budget_items[budget_items["_segment_id"].isin(top_segments)].copy()
+        if use_scenario_segment_key and "Sentido" in budget_items.columns:
+            budget_items = budget_items.copy()
+            budget_items["_attendance_key"] = _economic_segment_key_series(budget_items, "_segment_id", "Sentido")
+            budget_items = budget_items[budget_items["_attendance_key"].astype(str).isin(top_segment_keys)].copy()
+        else:
+            budget_items = budget_items[budget_items["_segment_id"].isin(top_segments)].copy()
     if prioritized_table is not None and not prioritized_table.empty:
-        prioritized_table = prioritized_table[prioritized_table["_segment_id"].isin(top_segments)].copy()
+        if use_scenario_segment_key and "Sentido" in prioritized_table.columns:
+            prioritized_table = prioritized_table.copy()
+            prioritized_table["_attendance_key"] = _economic_segment_key_series(prioritized_table, "_segment_id", "Sentido")
+            prioritized_table = prioritized_table[prioritized_table["_attendance_key"].astype(str).isin(top_segment_keys)].copy()
+        else:
+            prioritized_table = prioritized_table[prioritized_table["_segment_id"].isin(top_segments)].copy()
     # Mapa segue a tabela: só os segmentos dentro do nível de prioridade.
     if segments_df is not None and not segments_df.empty and "segment_id" in segments_df.columns:
-        segments_df = segments_df[segments_df["segment_id"].isin(top_segments)].copy()
+        if use_scenario_segment_key and "sentido" in segments_df.columns:
+            segments_df = segments_df.copy()
+            segments_df["_attendance_key"] = _economic_segment_key_series(segments_df, "segment_id", "sentido")
+            segments_df = segments_df[segments_df["_attendance_key"].astype(str).isin(top_segment_keys)].copy()
+        else:
+            segments_df = segments_df[segments_df["segment_id"].isin(top_segments)].copy()
+        if "_solucao_codigo" in seg_table.columns:
+            if use_scenario_segment_key and "_attendance_key" in segments_df.columns:
+                sol_by_segment = (
+                    seg_table.dropna(subset=["_attendance_key"])
+                    .drop_duplicates("_attendance_key")
+                    .set_index("_attendance_key")["_solucao_codigo"]
+                    .astype(str)
+                    .to_dict()
+                )
+                segments_df["intervencao_iap"] = (
+                    segments_df["_attendance_key"].astype(str).map(sol_by_segment).fillna(segments_df["intervencao_iap"])
+                )
+            else:
+                sol_by_segment = (
+                    seg_table.dropna(subset=["_segment_id"])
+                    .drop_duplicates("_segment_id")
+                    .set_index("_segment_id")["_solucao_codigo"]
+                    .astype(str)
+                    .to_dict()
+                )
+                segments_df["intervencao_iap"] = (
+                    segments_df["segment_id"].astype(int).map(sol_by_segment).fillna(segments_df["intervencao_iap"])
+                )
 
     if budget_items is not None and not budget_items.empty:
         total_need = float(budget_items["Custo"].sum())
@@ -3486,26 +4889,35 @@ def _render_economic_page(
         total_need = float(seg_table["Custo econômico"].sum()) if not seg_table.empty else 0.0
     metrics["total_need"] = total_need
     metrics["deficit"] = max(total_need - metrics["total_budget"], 0.0)
+    scope_label = _analysis_scope_label(scope_mode, horizon_start_year, horizon_end_year)
+    available_budget_mi = annual_budget * calc_horizon
+    available_budget = available_budget_mi * 1_000_000
 
     scope_snv = int(len(seg_table))  # nº de segmentos no escopo prioritário
     scope_km = float(seg_table["Extensão"].sum()) if not seg_table.empty else 0.0
-    annual_coverage = min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0
+    annual_coverage = min(available_budget / total_need * 100, 100) if total_need else 0
     # `attended_snv_table` agora guarda os SEGMENTOS atendidos (uma linha por segmento).
-    attended_snv_table, attended_km, attended_ids = _segment_attendance_seg(seg_table, annual_budget)
+    attended_snv_table, attended_km, attended_ids = _segment_attendance_seg(seg_table, available_budget_mi)
+    map_attended_ids = _economic_segment_keys(attended_snv_table) if use_scenario_segment_key else {str(value) for value in attended_ids}
+    if total_need and available_budget >= total_need:
+        attended_snv_table = seg_table.copy()
+        attended_km = scope_km
+        attended_ids = set(top_segments)
+        map_attended_ids = set(top_segment_keys)
 
     render_metric_cards(
         [
             {
                 "title": "NECESSIDADE TOTAL",
                 "value": _format_money(metrics["total_need"]),
-                "subtitle": "Custo estimado para tratar a rede",
+                "subtitle": f"Custo estimado no escopo: {scope_label}",
                 "tone": "cyan",
                 "icon": "$",
             },
             {
-                "title": "COBERTURA ANUAL",
+                "title": "COBERTURA",
                 "value": f"{annual_coverage:.1f}%",
-                "subtitle": f"{_format_money(annual_budget * 1_000_000)} cobre da necessidade",
+                "subtitle": f"{_format_money(available_budget)} disponível no escopo",
                 "tone": "green",
                 "icon": "↗",
             },
@@ -3518,10 +4930,10 @@ def _render_economic_page(
             },
             {
                 "title": "ORÇAMENTO FALTANTE",
-                "value": _format_money(max(total_need - annual_budget * 1_000_000, 0.0)),
+                "value": _format_money(max(total_need - available_budget, 0.0)),
                 "subtitle": (
                     "Necessidade já coberta pelo orçamento"
-                    if annual_budget * 1_000_000 >= total_need
+                    if available_budget >= total_need
                     else "Adicional para cobrir 100% da necessidade"
                 ),
                 "tone": "yellow",
@@ -3529,12 +4941,27 @@ def _render_economic_page(
             },
         ]
     )
-    _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget, attended_km, attended_ids)
+    _render_economic_need_breakdown(seg_table, budget_items)
+    _render_economic_scenario_map(segments_df, attended_snv_table, annual_budget, attended_km, map_attended_ids)
     if budget_items is not None and not budget_items.empty:
         _render_budget_cost_by_year(budget_items)
         _render_budget_cost_by_solution(budget_items)
+        _render_segment_intervention_timeline(
+            budget_items,
+            prioritized_table,
+            start_year=calc_start_year,
+            end_year=horizon_end_year,
+            scope_label=scope_label,
+        )
     else:
         _render_cost_by_solution(prioritized_table)
+        _render_segment_intervention_timeline(
+            None,
+            prioritized_table,
+            start_year=calc_start_year,
+            end_year=horizon_end_year,
+            scope_label=scope_label,
+        )
     _render_economic_priority_table(
         seg_table,
         attended_snv_table,
@@ -3544,19 +4971,13 @@ def _render_economic_page(
         prio_memory=prio_memory,
     )
 
-    if metrics["uses_parametric_cost"] and (budget_items is None or budget_items.empty):
-        st.markdown(
-            '<div class="economic-note">Observação: este cenário usa custo do banco quando disponível. Para trechos sem orçamento no JSON de soluções, foi aplicado custo paramétrico provisório por km para permitir simulação gerencial.</div>',
-            unsafe_allow_html=True,
-        )
-
     _render_work_plan_button(
         scenario_key=scenario_key,
         road=road,
         scenario_label=scenario_label,
         annual_budget=annual_budget,
-        horizon=horizon,
-        top_label="Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}",
+        horizon=calc_horizon,
+        top_label="Todos" if ipi_min <= 0 else f"IPI ≥ {ipi_min:.0f}",
         metrics=metrics,
         annual_coverage=annual_coverage,
         attended_snv_table=attended_snv_table,
@@ -3569,14 +4990,16 @@ def _render_economic_page(
     )
 
     # IAGON desta tela (Cenário econômico — orçamento × cobertura).
-    _nivel = "Todos" if prio_max >= 10 else f"≤ {prio_max}"
+    _nivel = "Todos" if ipi_min <= 0 else f"IPI ≥ {ipi_min:.0f}"
     _eco_dados = (
-        f"Necessidade total (todos os anos do programa): {_format_money(metrics.get('total_need', 0))}\n"
+        f"Escopo selecionado: {scope_label}\n"
+        f"Necessidade total no escopo: {_format_money(metrics.get('total_need', 0))}\n"
         f"Orçamento anual selecionado: {_format_money(annual_budget * 1_000_000)} · "
-        f"Horizonte: {horizon} ano(s) · Nível de prioridade: {_nivel}\n"
-        f"Cobertura anual: {annual_coverage:.1f}% · "
+        f"Orçamento disponível no escopo: {_format_money(available_budget)} · "
+        f"Filtro de IPI: {_nivel}\n"
+        f"Cobertura no escopo: {annual_coverage:.1f}% · "
         f"Trechos atendidos: {attended_km:.1f} de {scope_km:.1f} km ({scope_snv} segmentos no escopo)\n"
-        f"Orçamento faltante p/ cobrir 100%: {_format_money(max(metrics.get('total_need', 0) - annual_budget * 1_000_000, 0))}\n"
+        f"Orçamento faltante p/ cobrir 100%: {_format_money(max(metrics.get('total_need', 0) - available_budget, 0))}\n"
         "Use estes números para montar uma resposta executiva ao gestor (o que dá pra fazer com o "
         "orçamento, o que priorizar primeiro, quanto falta)."
     )
@@ -3584,7 +5007,7 @@ def _render_economic_page(
         _att = attended_snv_table.sort_values("Prioridade").head(15)
         _eco_dados += "\n\nSegmentos ATENDIDOS pelo orçamento (ordem de prioridade):\n" + "\n".join(
             f"- {int(r['Prioridade'])}º {r['SNV']} km {_format_km(float(r['Km Inicial']))}–{_format_km(float(r['Km Final']))} · "
-            f"{float(r['Extensão']):.2f} km · nível {int(round(float(r['Priorização'])))} · "
+            f"{float(r['Extensão']):.2f} km · IPI {float(r.get('IPI', r.get('IPT', 0)) or 0):.2f} · "
             f"{str(r['Solução recomendada']).replace(' + ', ' / ')} · {_format_money(float(r['Custo econômico']))}"
             for _, r in _att.iterrows())
     if annual_df is not None and not annual_df.empty and "Ano" in annual_df.columns:
@@ -3596,11 +5019,11 @@ def _render_economic_page(
         "cenario", f"Cenário econômico · {road}",
         f"<b>Rodovia:</b> {road} &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(str(scenario_label))} &nbsp;·&nbsp; "
         f"<b>Orçamento:</b> {_format_money(annual_budget * 1_000_000)}/ano &nbsp;·&nbsp; "
-        f"<b>Horizonte:</b> {horizon}a &nbsp;·&nbsp; <b>Prioridade:</b> {_nivel}",
+        f"<b>Escopo:</b> {html.escape(scope_label)} &nbsp;·&nbsp; <b>Prioridade:</b> {_nivel}",
         _screen_ctx("Cenário econômico (orçamento × cobertura)",
                     {"Rodovia": road, "Cenário": scenario_label,
                      "Orçamento anual": _format_money(annual_budget * 1_000_000),
-                     "Horizonte": f"{horizon}a", "Nível de prioridade": _nivel},
+                     "Escopo": scope_label, "Filtro de IPI": _nivel},
                     _eco_dados),
         sugestoes=["Análise para o gestor", "O que faço no 1º ano?", "Quanto falta p/ 100%?"],
     )
@@ -3642,31 +5065,29 @@ def _combined_economic_data(road, keys, labels, year: int | None = None):
     }
 
 
-def _render_economic_comparison(per_sentido) -> None:
-    """Cards comparando a necessidade total de cada cenário + o total combinado."""
-    if not per_sentido:
+def _render_economic_need_breakdown(table_df: pd.DataFrame | None, budget_items: pd.DataFrame | None) -> None:
+    """Linha compacta com a necessidade por cenário, sem duplicar o card principal."""
+    if table_df is None or table_df.empty or "Sentido" not in table_df.columns:
         return
-    total = sum(p["need"] for p in per_sentido)
-    cells = ""
-    for p in per_sentido:
-        pct = (p["need"] / total * 100) if total else 0.0
-        cells += (
-            "<div style='flex:1;min-width:170px;background:rgba(7,17,25,.5);"
-            "border:1px solid rgba(148,163,184,.18);border-radius:12px;padding:14px 16px'>"
-            "<div style='font-size:11px;letter-spacing:.08em;color:#9aa8b3;"
-            f"text-transform:uppercase'>{html.escape(p['sentido'])}</div>"
-            "<div style='font-size:22px;font-weight:800;color:#e6edf2;margin-top:4px'>"
-            f"{_format_money(p['need'])}</div>"
-            f"<div style='font-size:12px;color:#7f909c'>{pct:.0f}% do total</div></div>"
-        )
-    # O total combinado é redundante com o card NECESSIDADE TOTAL abaixo — não repetimos.
-    st.markdown(
-        "<div style='margin:6px 0 16px'>"
-        "<div style='font-weight:700;color:#cbd5df;margin-bottom:8px'>"
-        "⚖️ Necessidade total por cenário</div>"
-        f"<div style='display:flex;gap:12px;flex-wrap:wrap'>{cells}</div></div>",
-        unsafe_allow_html=True,
+    source = budget_items if budget_items is not None and not budget_items.empty else table_df
+    cost_col = "Custo" if "Custo" in source.columns else "Custo econômico"
+    if cost_col not in source.columns or "Sentido" not in source.columns:
+        return
+    grouped = (
+        source.groupby("Sentido", as_index=False)[cost_col]
+        .sum()
+        .sort_values(cost_col, ascending=False)
     )
+    if len(grouped) <= 1:
+        return
+    pills = [
+        '<span class="need-breakdown-pill">'
+        f'<span>{html.escape(_timeline_scenario_short(row["Sentido"]))}</span>'
+        f'<strong>{html.escape(_format_money(float(row[cost_col])))}</strong>'
+        '</span>'
+        for row in grouped.to_dict("records")
+    ]
+    st.markdown(f'<div class="need-breakdown">{"".join(pills)}</div>', unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------
@@ -3704,20 +5125,47 @@ def _aplicar_indice_priorizacao_dnit(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _render_dnit_economic_controls(total_need: float, scenario_key: str) -> tuple[int, int, int]:
+def _render_dnit_economic_controls(
+    total_need: float,
+    scenario_key: str,
+    budget_items: pd.DataFrame | None = None,
+    ano_base: int | None = None,
+) -> tuple[int, int, int, int, int, str]:
     """Mesmo layout do controle Paragon, mas com defaults compatíveis com DNIT."""
-    budget_col, horizon_col, prio_col = st.columns([1, 1, 1], gap="medium")
+    budget_col, horizon_col, scope_col, prio_col = st.columns([1, 1, 1.05, 1], gap="medium")
+    start_year, end_year = _budget_year_bounds(
+        budget_items,
+        fallback_start=ano_base,
+        fallback_horizon=30,
+    )
 
     with horizon_col:
         _filter_caption("Horizonte")
-        horizon = st.slider(
-            "Horizonte", 1, 30, 10, 1,
-            key=f"dnit_horizon_{scenario_key}",
-            label_visibility="collapsed",
+        horizon, selected_end_year = _render_horizon_year_selector(
+            key=f"dnit_horizon_end_year_{scenario_key}",
+            start_year=start_year,
+            end_year=end_year,
         )
-        st.markdown(f'<div class="economic-control-value">{horizon} anos</div>', unsafe_allow_html=True)
 
-    need_mi = max(1, int(-(-total_need // 1_000_000)))
+    with scope_col:
+        _filter_caption("Cálculo")
+        scope_mode = _render_scope_mode_selector(f"dnit_scope_mode_{scenario_key}")
+        st.markdown(
+            f'<div class="economic-control-value">{_analysis_scope_label(scope_mode, start_year, selected_end_year)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    horizon_need = total_need
+    if budget_items is not None and not budget_items.empty and "Ano" in budget_items.columns:
+        horizon_budget = _filter_budget_items_to_scope(
+            budget_items,
+            start_year=start_year,
+            selected_year=selected_end_year,
+            scope_mode=scope_mode,
+        )
+        if not horizon_budget.empty and "Custo" in horizon_budget.columns:
+            horizon_need = float(horizon_budget["Custo"].sum())
+    need_mi = max(1, int(-(-horizon_need // 1_000_000)))
     budget_max = max(50, need_mi * 2)
     with budget_col:
         _filter_caption("Orçamento anual")
@@ -3739,7 +5187,7 @@ def _render_dnit_economic_controls(total_need: float, scenario_key: str) -> tupl
         rotulo = "Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}"
         st.markdown(f'<div class="economic-control-value">{rotulo}</div>', unsafe_allow_html=True)
 
-    return annual_budget, horizon, prio_max
+    return annual_budget, horizon, prio_max, start_year, selected_end_year, scope_mode
 
 
 def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
@@ -3785,24 +5233,24 @@ def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
     }
 
 
-def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_year: int | None) -> None:
+def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
     """Cenário econômico DNIT — usa orçamentos gravados em analise_gerencial_orcamentos
     e priorização IRI+IGG. Espelha estrutura visual do Paragon."""
     _dnit_keys = [str(key) for key in scenario_keys if key]
     if not _dnit_keys:
         st.info("Selecione ao menos um cenário para continuar.")
         return
-    scenario_scope_key = f"{road}:{'|'.join(_dnit_keys)}:{selected_year if selected_year is not None else 'all'}"
+    scenario_scope_key = f"{road}:{'|'.join(_dnit_keys)}"
     _dnit_multi = len(_dnit_keys) >= 2
     if _dnit_multi:
         _dnit_labels = {
             str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
             for s in get_available_scenarios(road, "Matriz Cadastrada")
         }
-        data = _combined_dnit_economic_data(road, _dnit_keys, _dnit_labels, year=selected_year)
+        data = _combined_dnit_economic_data(road, _dnit_keys, _dnit_labels)
     else:
         _dkey = _dnit_keys[0]
-        data = get_dnit_economic_data(road, _dkey, year=selected_year)
+        data = get_dnit_economic_data(road, _dkey)
     if not data.get("available") or data.get("table") is None or data["table"].empty:
         disponiveis = get_dnit_available_roads()
         if disponiveis:
@@ -3815,23 +5263,29 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_yea
             st.info("Nenhuma rodovia foi processada com a **Matriz Revitaliza DNIT/RO** ainda.")
         return
 
-    if _dnit_multi:
-        _render_economic_comparison(data["per_sentido"])
-
     table = data["table"].copy()
     segments_df = data["segments"]
     budget_items = data["budget_items"]
     total_need = float(table["Custo estimado"].sum())
 
-    annual_budget, horizon, prio_max = _render_dnit_economic_controls(total_need, scenario_scope_key)
+    ano_base = int(data.get("ano_base") or _budget_year_bounds(budget_items)[0])
+    annual_budget, horizon, prio_max, horizon_start_year, horizon_end_year, scope_mode = _render_dnit_economic_controls(
+        total_need,
+        scenario_scope_key,
+        budget_items=budget_items,
+        ano_base=ano_base,
+    )
 
-    # Limita budget_items ao horizonte selecionado a partir do ano-base.
-    ano_base = int(data.get("ano_base") or 2027)
-    horizon_max = ano_base + horizon - 1
-    if budget_items is not None and not budget_items.empty:
-        budget_items = budget_items[
-            (budget_items["Ano"] >= ano_base) & (budget_items["Ano"] <= horizon_max)
-        ].copy()
+    calc_horizon = _analysis_budget_multiplier(scope_mode, horizon_start_year, horizon_end_year)
+    scope_label = _analysis_scope_label(scope_mode, horizon_start_year, horizon_end_year)
+    available_budget_mi = annual_budget * calc_horizon
+    available_budget = available_budget_mi * 1_000_000
+    budget_items = _filter_budget_items_to_scope(
+        budget_items,
+        start_year=horizon_start_year,
+        selected_year=horizon_end_year,
+        scope_mode=scope_mode,
+    )
 
     # Recalcula total_need considerando o horizonte recortado.
     if budget_items is not None and not budget_items.empty:
@@ -3877,16 +5331,16 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_yea
 
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
     attended_snv_table, attended_km, attended_ids = _segment_attendance(
-        snv_budget_table, budget_items, annual_budget, work
+        snv_budget_table, budget_items, available_budget_mi, work
     )
-    annual_coverage = min((annual_budget * 1_000_000) / total_need * 100, 100) if total_need else 0
-    faltante = max(total_need - annual_budget * 1_000_000, 0.0)
+    annual_coverage = min(available_budget / total_need * 100, 100) if total_need else 0
+    faltante = max(total_need - available_budget, 0.0)
 
     render_metric_cards([
         {"title": "NECESSIDADE TOTAL", "value": _format_money(total_need),
-         "subtitle": f"Custo no horizonte de {horizon} anos", "tone": "cyan", "icon": "$"},
-        {"title": "COBERTURA ANUAL", "value": f"{annual_coverage:.1f}%",
-         "subtitle": f"{_format_money(annual_budget * 1_000_000)} cobre da necessidade", "tone": "green", "icon": "↗"},
+         "subtitle": f"Custo estimado no escopo: {scope_label}", "tone": "cyan", "icon": "$"},
+        {"title": "COBERTURA", "value": f"{annual_coverage:.1f}%",
+         "subtitle": f"{_format_money(available_budget)} disponível no escopo", "tone": "green", "icon": "↗"},
         {"title": "TRECHOS ATENDIDOS", "value": f"{attended_km:.1f} / {scope_km:.1f} km",
          "subtitle": "Km de segmentos cobertos pelo orçamento", "tone": "orange", "icon": "#"},
         {"title": "ORÇAMENTO FALTANTE", "value": _format_money(faltante),
@@ -3894,6 +5348,7 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_yea
                       else "Adicional para cobrir 100% da necessidade"),
          "tone": "yellow", "icon": "△"},
     ])
+    _render_economic_need_breakdown(snv_budget_table, budget_items)
 
     # Mapa do cenário: restringe os segmentos aos SNVs que passaram pelo filtro de
     # nível de prioridade. Sem isso, o mapa ignora o slider.
@@ -3905,7 +5360,7 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_yea
             '<div class="solution-distribution-title"><div class="solution-distribution-icon">◎</div>'
             '<div><h3>Cenário no mapa</h3><p>Trechos no nível de prioridade selecionado</p></div></div>'
             f'<div class="solution-distribution-meta"><span>Atendido · <strong>{attended_km:.1f} km</strong></span>'
-            f'<span>Orçamento · <strong class="accent">{_format_money(annual_budget * 1_000_000)}/ano</strong></span></div>'
+            f'<span>Orçamento · <strong class="accent">{_format_money(available_budget)}</strong></span></div>'
             '</div></section>',
             unsafe_allow_html=True,
         )
@@ -3937,12 +5392,20 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_yea
             budget_items,
             color_fn=lambda label: solucao_iri_color.get(str(label), "#9fb9d9"),
         )
+        _render_segment_intervention_timeline(
+            budget_items,
+            work,
+            start_year=horizon_end_year if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY else horizon_start_year,
+            end_year=horizon_end_year,
+            scope_label=scope_label,
+            color_fn=lambda label: solucao_iri_color.get(str(label), "#9fb9d9"),
+        )
 
     # Tabela de SNVs com priorização DNIT.
     _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, annual_budget)
 
     # Botão de exportação do PDF (mesma infra do Paragon, com adaptações DNIT).
-    metrics = {"total_need": total_need, "total_budget": annual_budget * horizon * 1_000_000}
+    metrics = {"total_need": total_need, "total_budget": available_budget}
     scope_snv = int(len(snv_budget_table))
     top_label = "Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}"
 
@@ -3957,7 +5420,7 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str], selected_yea
         road=road,
         scenario_label="Matriz Revitaliza DNIT/RO",
         annual_budget=annual_budget,
-        horizon=horizon,
+        horizon=calc_horizon,
         top_label=top_label,
         metrics=metrics,
         annual_coverage=annual_coverage,
@@ -4028,28 +5491,61 @@ def _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, a
 
 
 # ----------------------------------------------------------------------------
-# Comparativo Paragon × DNIT (dentro de Cenário Econômico)
+# Comparativo flexível A × B
 # ----------------------------------------------------------------------------
-def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int, attended_budget_mi: int | None = None) -> dict:
+def _compute_paragon_pipeline(
+    road: str,
+    annual_budget: int,
+    horizon: int,
+    attended_budget_mi: int | None = None,
+    scenario_key: str | list[str] | None = None,
+    scenario_labels: dict[str, str] | None = None,
+    scope_mode: str = _ECONOMIC_SCOPE_ACCUMULATED,
+    selected_year: int | None = None,
+) -> dict:
     """Roda o pipeline Paragon e devolve métricas + budget agregado por ano.
 
     `attended_budget_mi` (R$ mi) = orçamento usado em "trechos atendidos"/cobertura.
     None → 1 ano (`annual_budget`, carteira anual = tela Cenário Econômico).
     Comparativo/compare passam `annual_budget * horizon` (escopo do horizonte).
     """
-    scenarios = get_available_scenarios(road)
+    scenarios = get_available_scenarios(road, "Paragon")
     if not scenarios:
         return {"available": False}
-    scenario_key = scenarios[0]["key"]
-    data = get_solutions_data(road, scenario_key=scenario_key)
+    scenario_keys = [str(value) for value in scenario_key] if isinstance(scenario_key, list) else ([str(scenario_key)] if scenario_key else [str(scenarios[0]["key"])])
+    if len(scenario_keys) > 1:
+        labels = scenario_labels or {
+            str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
+            for s in scenarios
+        }
+        data = _combined_economic_data(road, scenario_keys, labels)
+        scenario_label = f"{len(scenario_keys)} cenários Paragon"
+    else:
+        data = get_solutions_data(road, scenario_key=scenario_keys[0])
+        scenario_label = get_scenario_label(road, scenario_keys[0]) or str(scenario_keys[0])
     table = data.get("table")
     budget_items = data.get("budget_items")
     if table is None or table.empty:
         return {"available": False}
+    if _has_missing_intervention_cost(table, budget_items):
+        return {"available": False, "error": "Sem dados de custo para este recorte."}
 
-    budget_items = _limit_budget_to_horizon(budget_items, horizon)
+    horizon_start_year, _ = _budget_year_bounds(budget_items)
+    selected_year = int(selected_year or (horizon_start_year + int(horizon) - 1))
+    budget_items = _filter_budget_items_to_scope(
+        budget_items,
+        start_year=horizon_start_year,
+        selected_year=selected_year,
+        scope_mode=scope_mode,
+    )
+    calc_horizon = _analysis_budget_multiplier(scope_mode, horizon_start_year, selected_year)
+    calc_start_year = selected_year if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY else horizon_start_year
     metrics, prioritized_table, _ = _simulate_economic_scenario(
-        table, annual_budget, horizon, "Balanceada"
+        table,
+        annual_budget,
+        calc_horizon,
+        "Balanceada",
+        base_year=calc_start_year,
     )
     snv_budget_table = _group_budget_by_snv(budget_items, prioritized_table)
 
@@ -4062,7 +5558,10 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int, atten
     # = tela Cenário Econômico). Comparativo/compare passam anual×horizonte (senão um SNV
     # multi-ano nunca cabe em 1 ano → gerava 0 km na Paragon).
     eff_budget_mi = attended_budget_mi if attended_budget_mi is not None else annual_budget
-    attended_tbl, attended_km, _ = _segment_attendance(snv_budget_table, budget_items, eff_budget_mi, prioritized_table)
+    attended_tbl, attended_km, attended_segment_keys = _segment_attendance(
+        snv_budget_table, budget_items, eff_budget_mi, prioritized_table
+    )
+    budget_segment_keys = _economic_segment_keys(budget_items)
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
     custo_por_ano = pd.DataFrame()
@@ -4084,6 +5583,8 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int, atten
         "annual_coverage": min((eff_budget_mi * 1_000_000) / total_need * 100, 100) if total_need else 0,
         "attended_km": attended_km,
         "scope_km": scope_km,
+        "attended_segment_keys": attended_segment_keys,
+        "budget_segment_keys": budget_segment_keys,
         "custo_por_ano": custo_por_ano,
         "custo_por_snv": custo_por_snv,
         "attended_snv": (
@@ -4092,31 +5593,56 @@ def _compute_paragon_pipeline(road: str, annual_budget: int, horizon: int, atten
              for r in attended_tbl.to_dict("records")]
             if attended_tbl is not None and not attended_tbl.empty else []
         ),
-        "scenario_label": scenarios[0]["cenario"],
+        "scenario_label": scenario_label,
     }
 
 
-def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended_budget_mi: int | None = None) -> dict:
+def _compute_dnit_pipeline(
+    road: str,
+    annual_budget: int,
+    horizon: int,
+    attended_budget_mi: int | None = None,
+    scenario_key: str | list[str] | None = None,
+    scenario_labels: dict[str, str] | None = None,
+    scope_mode: str = _ECONOMIC_SCOPE_ACCUMULATED,
+    selected_year: int | None = None,
+) -> dict:
     """Roda o pipeline DNIT e devolve métricas + budget agregado por ano.
 
     `attended_budget_mi`: ver _compute_paragon_pipeline (None = carteira de 1 ano).
     """
-    data = get_dnit_economic_data(road)
+    scenario_keys = [str(value) for value in scenario_key] if isinstance(scenario_key, list) else ([str(scenario_key)] if scenario_key else [])
+    if len(scenario_keys) > 1:
+        labels = scenario_labels or {
+            str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
+            for s in get_available_scenarios(road, "Matriz Cadastrada")
+        }
+        data = _combined_dnit_economic_data(road, scenario_keys, labels)
+        scenario_label = f"{len(scenario_keys)} cenários Matriz"
+    else:
+        selected_key = scenario_keys[0] if scenario_keys else None
+        data = get_dnit_economic_data(road, scenario_key=selected_key)
+        scenario_label = get_scenario_label(road, selected_key) if selected_key else "Matriz Revitaliza DNIT/RO"
     if not data.get("available") or data["table"].empty:
         return {"available": False}
 
-    ano_base = int(data.get("ano_base") or 2027)
-    horizon_max = ano_base + horizon - 1
     budget_items = data["budget_items"]
-    if budget_items is not None and not budget_items.empty:
-        budget_items = budget_items[
-            (budget_items["Ano"] >= ano_base) & (budget_items["Ano"] <= horizon_max)
-        ].copy()
+    ano_base, _ = _budget_year_bounds(budget_items, fallback_start=data.get("ano_base"), fallback_horizon=30)
+    selected_year = int(selected_year or (ano_base + int(horizon) - 1))
+    budget_items = _filter_budget_items_to_scope(
+        budget_items,
+        start_year=ano_base,
+        selected_year=selected_year,
+        scope_mode=scope_mode,
+    )
 
     table = data["table"].copy()
     if budget_items is not None and not budget_items.empty:
-        custo_seg = budget_items.groupby("_segment_id")["Custo"].sum().to_dict()
-        table["Custo estimado"] = table["_segment_id"].astype(int).map(custo_seg).fillna(0.0)
+        merge_keys = ["_segment_id", "Sentido"] if "Sentido" in table.columns and "Sentido" in budget_items.columns else ["_segment_id"]
+        real = budget_items.groupby(merge_keys, as_index=False)["Custo"].sum().rename(columns={"Custo": "_custo_real"})
+        table = table.merge(real, on=merge_keys, how="left")
+        table["Custo estimado"] = table["_custo_real"].fillna(0.0)
+        table = table.drop(columns=["_custo_real"])
         total_need = float(budget_items["Custo"].sum())
     else:
         total_need = float(table["Custo estimado"].sum())
@@ -4125,8 +5651,9 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended
     work["Custo econômico"] = work["Custo estimado"].astype(float)
     work = _aplicar_indice_priorizacao_dnit(work)
 
+    group_keys = ["SNV", "Sentido"] if "Sentido" in work.columns else ["SNV"]
     snv_budget_table = (
-        work.groupby("SNV", as_index=False)
+        work.groupby(group_keys, as_index=False)
         .agg({"Prioridade": "min", "Priorização": "max", "Classe prioridade": "first",
               "Km Inicial": "min", "Km Final": "max", "Extensão": "sum",
               "Custo econômico": "sum"})
@@ -4137,7 +5664,10 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended
     # = tela Cenário Econômico). Comparativo/compare passam anual×horizonte (senão um SNV
     # multi-ano nunca cabe em 1 ano → gerava 0 km na Paragon).
     eff_budget_mi = attended_budget_mi if attended_budget_mi is not None else annual_budget
-    attended_tbl, attended_km, _ = _segment_attendance(snv_budget_table, budget_items, eff_budget_mi, work)
+    attended_tbl, attended_km, attended_segment_keys = _segment_attendance(
+        snv_budget_table, budget_items, eff_budget_mi, work
+    )
+    budget_segment_keys = _economic_segment_keys(budget_items)
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
 
     custo_por_ano = pd.DataFrame()
@@ -4159,6 +5689,8 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended
         "annual_coverage": min((eff_budget_mi * 1_000_000) / total_need * 100, 100) if total_need else 0,
         "attended_km": attended_km,
         "scope_km": scope_km,
+        "attended_segment_keys": attended_segment_keys,
+        "budget_segment_keys": budget_segment_keys,
         "custo_por_ano": custo_por_ano,
         "custo_por_snv": custo_por_snv,
         "attended_snv": (
@@ -4167,12 +5699,303 @@ def _compute_dnit_pipeline(road: str, annual_budget: int, horizon: int, attended
              for r in attended_tbl.to_dict("records")]
             if attended_tbl is not None and not attended_tbl.empty else []
         ),
-        "scenario_label": "Matriz Revitaliza DNIT/RO",
+        "scenario_label": scenario_label,
     }
 
 
-def _render_compare_kpi(title: str, value_p: str, value_d: str) -> None:
-    """Linha de comparação Paragon × DNIT — 1 KPI lado a lado."""
+def _compute_comparison_pipeline(
+    road: str,
+    side: dict,
+    annual_budget: int,
+    horizon: int,
+    attended_budget_mi: int,
+    scope_mode: str,
+    selected_year: int,
+) -> dict:
+    if side["matrix_type"] == "Matriz Cadastrada":
+        result = _compute_dnit_pipeline(
+            road,
+            annual_budget,
+            horizon,
+            attended_budget_mi=attended_budget_mi,
+            scenario_key=side["scenario_keys"],
+            scenario_labels=side["labels"],
+            scope_mode=scope_mode,
+            selected_year=selected_year,
+        )
+    else:
+        result = _compute_paragon_pipeline(
+            road,
+            annual_budget,
+            horizon,
+            attended_budget_mi=attended_budget_mi,
+            scenario_key=side["scenario_keys"],
+            scenario_labels=side["labels"],
+            scope_mode=scope_mode,
+            selected_year=selected_year,
+        )
+    if result.get("available"):
+        result["side_label"] = side["display_label"]
+        result["matrix_type"] = side["matrix_type"]
+    return result
+
+
+_COMPARISON_COST_COLORS = ["#bfdbfe", "#7dd3fc", "#38bdf8", "#2563eb", "#0b2a6f"]
+
+
+def _comparison_cost_scale(result_a: dict, result_b: dict) -> tuple[float, dict[str, str], list[str]]:
+    """Cria uma escala financeira única para os mapas A e B serem comparáveis."""
+    values: list[float] = []
+    for result in (result_a, result_b):
+        costs = result.get("custo_por_snv") if result else None
+        if costs is not None and not costs.empty and "Custo" in costs.columns:
+            grouped = pd.to_numeric(costs["Custo"], errors="coerce").fillna(0.0)
+            values.extend(float(value) for value in grouped if float(value) > 0)
+    max_cost = max(values, default=0.0)
+    if max_cost <= 0:
+        return 0.0, {"Sem custo": "#cbd5e1"}, ["Sem custo"]
+
+    labels = ["Sem custo"]
+    colors = {"Sem custo": "#cbd5e1"}
+    for index, color in enumerate(_COMPARISON_COST_COLORS):
+        lower = max_cost * index / len(_COMPARISON_COST_COLORS)
+        upper = max_cost * (index + 1) / len(_COMPARISON_COST_COLORS)
+        label = (
+            f"Até {_format_money(upper)}"
+            if index == 0 else
+            f"{_format_money(lower)} a {_format_money(upper)}"
+        )
+        labels.append(label)
+        colors[label] = color
+    return max_cost, colors, labels
+
+
+def _comparison_map_preview(road: str, side: dict) -> dict:
+    """Carrega para o mapa a mesma geometria técnica usada no Diagnóstico."""
+    matrix_type = str(side.get("matrix_type") or "Paragon")
+    scenario_keys = [str(key) for key in (side.get("scenario_keys") or []) if key]
+    if matrix_type == "Matriz Cadastrada":
+        parts = _scenario_offset_parts(
+            road,
+            scenario_keys,
+            matrix_type=matrix_type,
+            year=None,
+            data_loader=lambda selected_road, scenario_key, year: get_dnit_overview_data(
+                selected_road,
+                scenario_key=scenario_key,
+                year=year,
+            ),
+        )
+        if parts:
+            preview = dict(parts[0])
+            preview["segments"] = _concat_segments(parts)
+            return preview
+        return get_dnit_overview_data(
+            road,
+            scenario_key=scenario_keys[0] if scenario_keys else None,
+            year=None,
+        ) or {}
+
+    parts = _scenario_offset_parts(
+        road,
+        scenario_keys,
+        matrix_type=matrix_type,
+        year=None,
+        data_loader=lambda selected_road, scenario_key, year: get_overview_data(
+            selected_road,
+            scenario_key=scenario_key,
+            year=year,
+        ),
+    )
+    if parts:
+        preview = dict(parts[0])
+        preview["segments"] = _concat_segments(parts)
+        return preview
+    return get_overview_data(
+        road,
+        scenario_key=scenario_keys[0] if scenario_keys else None,
+        year=None,
+    ) or {}
+
+
+def _comparison_financial_segments(
+    preview: dict,
+    cost_df: pd.DataFrame | None,
+    matrix_type: str,
+    max_cost: float,
+    scale_labels: list[str],
+    scale_colors: dict[str, str],
+    attended_segment_keys: set[str] | None = None,
+    budget_segment_keys: set[str] | None = None,
+) -> tuple[pd.DataFrame, set[str]]:
+    """Aplica aos segmentos o custo total do respectivo SRE no escopo financeiro."""
+    segments = preview.get("segments") if preview else None
+    if segments is None or segments.empty:
+        return pd.DataFrame(), set()
+    work = segments.copy()
+    if cost_df is not None and not cost_df.empty and {"SNV", "Custo"}.issubset(cost_df.columns):
+        cost_by_sre = (
+            cost_df.assign(Custo=pd.to_numeric(cost_df["Custo"], errors="coerce").fillna(0.0))
+            .groupby("SNV")["Custo"]
+            .sum()
+            .to_dict()
+        )
+    else:
+        cost_by_sre = {}
+    work["_custo_sre"] = work["sre"].astype(str).map(
+        {str(key): float(value) for key, value in cost_by_sre.items()}
+    ).fillna(0.0)
+    work["_custo_sre_label"] = work["_custo_sre"].map(_format_money)
+
+    tier_labels = scale_labels[1:] if len(scale_labels) > 1 else []
+    def _cost_class(value: float) -> str:
+        value = max(float(value or 0), 0.0)
+        if value <= 0 or max_cost <= 0 or not tier_labels:
+            return "Sem custo"
+        index = min(max(int(math.ceil(value / max_cost * len(tier_labels))) - 1, 0), len(tier_labels) - 1)
+        return tier_labels[index]
+
+    work["_custo_sre_faixa"] = work["_custo_sre"].map(_cost_class)
+    if matrix_type == "Matriz Cadastrada":
+        work["matriz_categoria"] = work["_custo_sre_faixa"]
+        work["matriz_color"] = work["matriz_categoria"].map(scale_colors).fillna("#cbd5e1")
+    else:
+        work["classe_iap"] = work["_custo_sre_faixa"]
+    work["_attendance_key"] = _economic_segment_key_series(work, "segment_id", "sentido").astype(str)
+    all_segment_keys = set(work["_attendance_key"].astype(str))
+    funded_keys = {str(value) for value in (attended_segment_keys or set())}
+    intervention_keys = {str(value) for value in (budget_segment_keys or set())}
+    # Segmentos sem custo previsto não devem aparecer como estourados pelo orçamento.
+    inside_budget_keys = funded_keys | (all_segment_keys - intervention_keys)
+    return work, inside_budget_keys
+
+
+def _render_comparison_condition_map(
+    side: dict,
+    preview: dict,
+    *,
+    mode: str = "Técnico",
+    cost_df: pd.DataFrame | None = None,
+    financial_scale: tuple[float, dict[str, str], list[str]] | None = None,
+    attended_segment_keys: set[str] | None = None,
+    budget_segment_keys: set[str] | None = None,
+) -> None:
+    """Mapa de um lado do comparativo, alternando condição técnica e custo por SRE."""
+    matrix_type = str(side.get("matrix_type") or "Paragon")
+    side_label = str(side.get("display_label") or side.get("side") or "Cenário")
+    is_financial = mode == "Financeiro"
+    criterion = (
+        "Custo total por SRE"
+        if is_financial else
+        ("Classe do IRI" if matrix_type == "Matriz Cadastrada" else "Conceito IAP")
+    )
+    st.markdown(
+        '<div style="margin:0 0 8px;padding:0 2px">'
+        f'<div style="font-size:13px;font-weight:850;color:#e8f1f8">{html.escape(side_label)}</div>'
+        f'<div style="font-size:11px;color:#8f9eaa;margin-top:3px">Mapa colorido por {html.escape(criterion)}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    segments = preview.get("segments") if preview else None
+    inside_budget_keys = None
+    scale_colors = scale_order = None
+    if is_financial:
+        max_cost, scale_colors, scale_order = financial_scale or (0.0, {"Sem custo": "#cbd5e1"}, ["Sem custo"])
+        segments, inside_budget_keys = _comparison_financial_segments(
+            preview,
+            cost_df,
+            matrix_type,
+            max_cost,
+            scale_order,
+            scale_colors,
+            attended_segment_keys,
+            budget_segment_keys,
+        )
+    if matrix_type == "Matriz Cadastrada":
+        render_dnit_map(
+            segments,
+            zona_colors=scale_colors if is_financial else (preview.get("zona_colors") if preview else None),
+            zona_order=scale_order if is_financial else (preview.get("zona_order") if preview else None),
+            gap_px=18,
+            legend_title="CUSTO TOTAL POR SRE" if is_financial else "CLASSE IRI (MATRIZ DNIT)",
+            attended_ids=inside_budget_keys if is_financial else None,
+            unattended_color="#ef4444",
+            legend_extra_items={"Fora do orçamento": "#ef4444"} if is_financial else None,
+        )
+        return
+
+    extent_km = 0.0
+    if segments is not None and not segments.empty and {"km_inicial", "km_final"}.issubset(segments.columns):
+        extent_km = float(
+            (segments["km_final"].astype(float) - segments["km_inicial"].astype(float))
+            .clip(lower=0)
+            .sum()
+        )
+    render_overview_map(
+        segments,
+        extent_km,
+        color_by="iap",
+        gap_px=18,
+        class_colors=scale_colors if is_financial else None,
+        class_legend_title="CUSTO TOTAL POR SRE" if is_financial else None,
+        class_tooltip_label="Faixa de custo" if is_financial else None,
+        attended_ids=inside_budget_keys if is_financial else None,
+        unattended_color="#ef4444" if is_financial else "#2f6072",
+        unattended_dash=None if is_financial else "4 14",
+        legend_extra_items={"Fora do orçamento": "#ef4444"} if is_financial else None,
+        legend_foot="" if is_financial else None,
+    )
+
+
+def _compare_mini_chart(
+    chart_value_p: float | None,
+    chart_value_d: float | None,
+    *,
+    equal_text: str = "sem diferença",
+    chart_max: float | None = None,
+) -> str:
+    """Mini barras comparativas para um card. Renderiza texto simples quando não há diferença."""
+    if chart_value_p is None or chart_value_d is None:
+        return ""
+    p_val = max(float(chart_value_p or 0), 0.0)
+    d_val = max(float(chart_value_d or 0), 0.0)
+    if math.isclose(p_val, d_val, rel_tol=1e-9, abs_tol=1e-9):
+        return (
+            '<div style="margin-top:10px;font-size:11px;color:#9fb0bd;'
+            'font-weight:800;letter-spacing:.08em;text-transform:uppercase">✓ '
+            f'{html.escape(equal_text)}</div>'
+        )
+
+    max_val = max(float(chart_max), 1.0) if chart_max is not None else max(p_val, d_val, 1.0)
+    p_width = max((p_val / max_val) * 100, 2 if p_val > 0 else 0)
+    d_width = max((d_val / max_val) * 100, 2 if d_val > 0 else 0)
+    return f"""
+      <div style="margin-top:12px;display:grid;gap:6px">
+        <div style="height:7px;background:rgba(148,163,184,.16);border-radius:999px;overflow:hidden">
+          <div style="width:{p_width:.2f}%;height:100%;background:#00c2e8;border-radius:999px"></div>
+        </div>
+        <div style="height:7px;background:rgba(148,163,184,.16);border-radius:999px;overflow:hidden">
+          <div style="width:{d_width:.2f}%;height:100%;background:#f2a51a;border-radius:999px"></div>
+        </div>
+      </div>
+    """
+
+
+def _render_compare_kpi(
+    title: str,
+    value_a: str,
+    value_b: str,
+    *,
+    chart_value_p: float | None = None,
+    chart_value_d: float | None = None,
+    equal_text: str = "sem diferença",
+    chart_max: float | None = None,
+    label_a: str = "A",
+    label_b: str = "B",
+) -> None:
+    """Linha de comparação A × B — valor numérico + mini comparação visual."""
+    mini_chart = _compare_mini_chart(chart_value_p, chart_value_d, equal_text=equal_text, chart_max=chart_max)
     st.markdown(
         f"""
         <div class="status-pill" style="width:100%;display:grid;
@@ -4182,21 +6005,32 @@ def _render_compare_kpi(title: str, value_p: str, value_d: str) -> None:
           <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;
                color:#8f9eaa;font-weight:800">{html.escape(title)}</div>
           <div style="text-align:center">
-            <div style="font-size:10px;color:#00c2e8;font-weight:800;letter-spacing:.12em">PARAGON</div>
-            <div style="font-size:18px;color:#f4f7fb;font-weight:850;margin-top:2px">{value_p}</div>
+            <div style="font-size:10px;color:#00c2e8;font-weight:800;letter-spacing:.12em">{html.escape(label_a.upper())}</div>
+            <div style="font-size:18px;color:#f4f7fb;font-weight:850;margin-top:2px">{value_a}</div>
           </div>
           <div style="text-align:center">
-            <div style="font-size:10px;color:#f2a51a;font-weight:800;letter-spacing:.12em">DNIT</div>
-            <div style="font-size:18px;color:#f4f7fb;font-weight:850;margin-top:2px">{value_d}</div>
+            <div style="font-size:10px;color:#f2a51a;font-weight:800;letter-spacing:.12em">{html.escape(label_b.upper())}</div>
+            <div style="font-size:18px;color:#f4f7fb;font-weight:850;margin-top:2px">{value_b}</div>
           </div>
+          <div style="grid-column:2 / 4">{mini_chart}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def _render_compare_anual_bars(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
-    """Barras duplas Paragon × DNIT por ano (custo em R$ mi)."""
+def _format_attended_km(attended_km: float, total_km: float) -> str:
+    pct = (float(attended_km) / float(total_km) * 100) if total_km else 0.0
+    return f"{float(attended_km):.1f} km de {float(total_km):.1f} km ({pct:.1f}%)"
+
+
+def _render_compare_anual_bars(
+    p_df: pd.DataFrame,
+    d_df: pd.DataFrame,
+    label_a: str = "A",
+    label_b: str = "B",
+) -> None:
+    """Barras duplas A × B por ano (custo em R$ mi)."""
     if (p_df is None or p_df.empty) and (d_df is None or d_df.empty):
         return
     anos = sorted(set(
@@ -4228,9 +6062,9 @@ def _render_compare_anual_bars(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
         bars.append(
             f'<div class="economic-bar-item" style="display:flex;gap:2px;align-items:flex-end;justify-content:center">'
             f'<div class="economic-bar" style="height:{h_p:.2f}%;background:#00c2e8;flex:1;max-width:14px" '
-            f'title="Paragon · {_format_money(p_mi * 1_000_000)}"></div>'
+            f'title="{html.escape(label_a)} · {_format_money(p_mi * 1_000_000)}"></div>'
             f'<div class="economic-bar" style="height:{h_d:.2f}%;background:#f2a51a;flex:1;max-width:14px" '
-            f'title="DNIT · {_format_money(d_mi * 1_000_000)}"></div>'
+            f'title="{html.escape(label_b)} · {_format_money(d_mi * 1_000_000)}"></div>'
             '</div>'
         )
         labels.append(f'<div>{int(a)}</div>')
@@ -4241,11 +6075,11 @@ def _render_compare_anual_bars(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
         '<section class="economic-panel">'
         '<div class="economic-head">'
         '<div class="economic-title"><div class="economic-icon">$</div>'
-        '<div><h3>Custo por ano · Paragon × DNIT</h3>'
-        '<p>Programação anual em R$ mi · azul = Paragon · laranja = DNIT</p></div></div>'
+        f'<div><h3>Custo por ano · {html.escape(label_a)} × {html.escape(label_b)}</h3>'
+        f'<p>Programação anual em R$ mi · azul = {html.escape(label_a)} · laranja = {html.escape(label_b)}</p></div></div>'
         f'<div class="solution-distribution-meta">'
-        f'<span>Paragon · <strong style="color:#00c2e8">{_format_money(total_p)}</strong></span>'
-        f'<span>DNIT · <strong style="color:#f2a51a">{_format_money(total_d)}</strong></span>'
+        f'<span>{html.escape(label_a)} · <strong style="color:#00c2e8">{_format_money(total_p)}</strong></span>'
+        f'<span>{html.escape(label_b)} · <strong style="color:#f2a51a">{_format_money(total_d)}</strong></span>'
         '</div></div>'
         '<div class="economic-chart">'
         f'<div class="economic-y-axis">{tick_markup}</div>'
@@ -4259,8 +6093,13 @@ def _render_compare_anual_bars(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
     )
 
 
-def _render_compare_diff_table(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
-    """Tabela com custo por SRE em cada metodologia + delta."""
+def _render_compare_diff_table(
+    p_df: pd.DataFrame,
+    d_df: pd.DataFrame,
+    label_a: str = "A",
+    label_b: str = "B",
+) -> None:
+    """Tabela com custo por SRE em cada lado da comparação + delta."""
     p_by = dict(zip(p_df["SNV"].astype(str), p_df["Custo"])) if p_df is not None and not p_df.empty else {}
     d_by = dict(zip(d_df["SNV"].astype(str), d_df["Custo"])) if d_df is not None and not d_df.empty else {}
     p_ext = dict(zip(p_df["SNV"].astype(str), p_df["Extensão"])) if p_df is not None and not p_df.empty else {}
@@ -4281,9 +6120,9 @@ def _render_compare_diff_table(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
         delta_arrow = "▼" if delta < 0 else ("▲" if delta > 0 else "—")
         status = ""
         if not p_by.get(sre):
-            status = " <span style='color:#8f9eaa;font-size:10px'>(só DNIT)</span>"
+            status = f" <span style='color:#8f9eaa;font-size:10px'>(só {html.escape(label_b)})</span>"
         elif not d_by.get(sre):
-            status = " <span style='color:#8f9eaa;font-size:10px'>(só Paragon)</span>"
+            status = f" <span style='color:#8f9eaa;font-size:10px'>(só {html.escape(label_a)})</span>"
 
         rows_html.append(
             "<tr>"
@@ -4300,17 +6139,17 @@ def _render_compare_diff_table(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
         f"""
         <section class="solution-card">
           <div class="solution-card-head">
-            <h3>Custo por trecho (SRE) · Paragon × DNIT</h3>
-            <p>Delta positivo (vermelho) = Paragon mais caro · negativo (verde) = DNIT mais caro</p>
+            <h3>Custo por trecho (SRE) · {html.escape(label_a)} × {html.escape(label_b)}</h3>
+            <p>Delta positivo (vermelho) = {html.escape(label_a)} mais caro · negativo (verde) = {html.escape(label_b)} mais caro</p>
           </div>
           <div class="solution-table-wrap"><table class="solution-table">
             <thead><tr>
               <th>SRE</th>
-              <th style='text-align:right;color:#00c2e8'>PARAGON · R$</th>
+              <th style='text-align:right;color:#00c2e8'>{html.escape(label_a.upper())} · R$</th>
               <th style='text-align:right;color:#00c2e8'>EXT.</th>
-              <th style='text-align:right;color:#f2a51a'>DNIT · R$</th>
+              <th style='text-align:right;color:#f2a51a'>{html.escape(label_b.upper())} · R$</th>
               <th style='text-align:right;color:#f2a51a'>EXT.</th>
-              <th style='text-align:right'>DELTA (P − D)</th>
+              <th style='text-align:right'>DELTA (A − B)</th>
             </tr></thead>
             <tbody>{''.join(rows_html)}</tbody>
           </table></div>
@@ -4320,109 +6159,275 @@ def _render_compare_diff_table(p_df: pd.DataFrame, d_df: pd.DataFrame) -> None:
     )
 
 
-def _render_comparativo_page(road: str, scenario_key: str | None) -> None:
-    """Página Comparativo Paragon × DNIT — usa sliders compartilhados de orçamento e horizonte."""
-    if road not in set(get_dnit_available_roads()):
+def _render_comparativo_page(
+    road: str,
+    side_a: dict,
+    side_b: dict,
+    view_mode: str = "Técnico",
+) -> None:
+    """Página Comparativo — usa sliders compartilhados de orçamento e horizonte."""
+    if "Matriz Cadastrada" in {side_a["matrix_type"], side_b["matrix_type"]} and road not in set(get_dnit_available_roads()):
         st.info(
             f"A rodovia **{road}** não tem cálculo DNIT no banco. "
-            f"O comparativo precisa das duas metodologias. Disponíveis: "
+            f"O comparativo com Matriz Cadastrada precisa desse cálculo. Disponíveis: "
             f"{', '.join(f'**{r}**' for r in get_dnit_available_roads()) or '_nenhuma_'}."
         )
         return
+    if not side_a["scenario_keys"] or not side_b["scenario_keys"]:
+        st.info("Selecione ao menos um cenário em cada lado da comparação.")
+        return
+    if _comparison_signature(side_a) == _comparison_signature(side_b):
+        st.info("Escolha recortes diferentes para comparar. Os dois lados estão com o mesmo tipo de matriz e os mesmos cenários.")
+        return
 
-    # Sliders compartilhados (orçamento + horizonte). Sem slider de prioridade.
+    side_a_label = side_a["display_label"]
+    side_b_label = side_b["display_label"]
+    if side_a["matrix_type"] == "Matriz Cadastrada":
+        side_a_preview = (
+            _combined_dnit_economic_data(road, side_a["scenario_keys"], side_a["labels"])
+            if len(side_a["scenario_keys"]) > 1
+            else get_dnit_economic_data(road, scenario_key=side_a["scenario_keys"][0])
+        )
+    else:
+        side_a_preview = (
+            _combined_economic_data(road, side_a["scenario_keys"], side_a["labels"])
+            if len(side_a["scenario_keys"]) > 1
+            else get_solutions_data(road, scenario_key=side_a["scenario_keys"][0])
+        )
+    if side_b["matrix_type"] == "Matriz Cadastrada":
+        side_b_preview = (
+            _combined_dnit_economic_data(road, side_b["scenario_keys"], side_b["labels"])
+            if len(side_b["scenario_keys"]) > 1
+            else get_dnit_economic_data(road, scenario_key=side_b["scenario_keys"][0])
+        )
+    else:
+        side_b_preview = (
+            _combined_economic_data(road, side_b["scenario_keys"], side_b["labels"])
+            if len(side_b["scenario_keys"]) > 1
+            else get_solutions_data(road, scenario_key=side_b["scenario_keys"][0])
+        )
+    side_a_map_preview = _comparison_map_preview(road, side_a)
+    side_b_map_preview = _comparison_map_preview(road, side_b)
+
+    if view_mode == "Técnico":
+        st.markdown(
+            '<div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;'
+            'color:#8f9eaa;font-weight:850;margin:6px 0 10px">MAPAS DOS CENÁRIOS</div>',
+            unsafe_allow_html=True,
+        )
+        map_col_a, map_col_b = st.columns(2, gap="medium")
+        with map_col_a:
+            _render_comparison_condition_map(
+                side_a,
+                side_a_map_preview,
+                mode="Técnico",
+            )
+        with map_col_b:
+            _render_comparison_condition_map(
+                side_b,
+                side_b_map_preview,
+                mode="Técnico",
+            )
+        _render_comparison_dnit_performance_block(road, side_a, side_b)
+        st.info("Visualização técnica ativa. Os blocos econômicos ficam disponíveis ao trocar a visualização para Econômico.")
+        return
+
+    side_a_start_year, side_a_end_year = _budget_year_bounds(
+        side_a_preview.get("budget_items"),
+        fallback_start=side_a_preview.get("ano_base"),
+        fallback_horizon=30 if side_a["matrix_type"] == "Matriz Cadastrada" else _ECONOMIC_DEFAULT_HORIZON,
+    )
+    side_b_start_year, side_b_end_year = _budget_year_bounds(
+        side_b_preview.get("budget_items"),
+        fallback_start=side_b_preview.get("ano_base"),
+        fallback_horizon=30 if side_b["matrix_type"] == "Matriz Cadastrada" else _ECONOMIC_DEFAULT_HORIZON,
+    )
+    timeline_start_year = min(side_a_start_year, side_b_start_year)
+    timeline_end_year = max(side_a_end_year, side_b_end_year)
+
+    with st.expander("Ajustar parâmetros da simulação", expanded=False):
+        horizon_col, budget_col = st.columns([1, 1], gap="large")
+        with horizon_col:
+            _filter_caption("Horizonte")
+            _, selected_end_year = _render_horizon_year_selector(
+                key=f"cmp_horizon_end_year_{road}",
+                start_year=timeline_start_year,
+                end_year=timeline_end_year,
+            )
+        with budget_col:
+            _filter_caption("Orçamento anual (R$ mi)")
+            annual_budget = st.slider(
+                "Orçamento (R$ mi)", 1, 200, 50, 1,
+                key=f"cmp_budget_{road}",
+                label_visibility="collapsed",
+            )
+            st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="comparison-param-row"></div>', unsafe_allow_html=True)
+        scope_col, scope_spacer = st.columns([1, 1], gap="large")
+        with scope_col:
+            _filter_caption("Cálculo")
+            scope_mode = _render_scope_mode_selector(f"cmp_scope_mode_{road}")
+            scope_label = _analysis_scope_label(scope_mode, timeline_start_year, selected_end_year)
+            st.markdown(f'<div class="economic-control-value">{scope_label}</div>', unsafe_allow_html=True)
+        with scope_spacer:
+            st.empty()
+    side_a_horizon = (
+        1 if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY
+        else _horizon_from_end_year(side_a_start_year, selected_end_year)
+    )
+    side_b_horizon = (
+        1 if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY
+        else _horizon_from_end_year(side_b_start_year, selected_end_year)
+    )
+    common_period_horizon = _analysis_budget_multiplier(scope_mode, timeline_start_year, selected_end_year)
     st.markdown(
-        """
-        <section class="economic-panel">
-          <div class="economic-head">
-            <div class="economic-title">
-              <div class="economic-icon">≋</div>
-              <div><h3>Comparativo orçamentário</h3>
-                   <p>Paragon × DNIT · mesmos parâmetros aplicados às duas metodologias</p></div>
-            </div>
-          </div>
-        </section>
-        """,
+        '<div class="comparison-param-summary">'
+        f'<span class="comparison-param-chip">Horizonte: <b>{html.escape(scope_label)}</b></span>'
+        f'<span class="comparison-param-chip">Orçamento: <b>{html.escape(_format_money(annual_budget * 1_000_000))}/ano</b></span>'
+        '</div>',
         unsafe_allow_html=True,
     )
-    horizon_col, budget_col = st.columns([1, 1], gap="medium")
-    with horizon_col:
-        _filter_caption("Horizonte")
-        horizon = st.slider(
-            "Horizonte (anos)", 1, 30, _ECONOMIC_DEFAULT_HORIZON, 1,
-            key=f"cmp_horizon_{road}",
-            label_visibility="collapsed",
-        )
-        st.markdown(f'<div class="economic-control-value">{horizon} anos</div>', unsafe_allow_html=True)
-    with budget_col:
-        _filter_caption("Orçamento anual (R$ mi)")
-        annual_budget = st.slider(
-            "Orçamento (R$ mi)", 1, 200, 50, 1,
-            key=f"cmp_budget_{road}",
-            label_visibility="collapsed",
-        )
-        st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
 
     # Pipelines paralelos.
-    paragon = _compute_paragon_pipeline(road, annual_budget, horizon, attended_budget_mi=annual_budget * horizon)
-    dnit = _compute_dnit_pipeline(road, annual_budget, horizon, attended_budget_mi=annual_budget * horizon)
+    result_a = _compute_comparison_pipeline(
+        road,
+        side_a,
+        annual_budget,
+        side_a_horizon,
+        attended_budget_mi=annual_budget * common_period_horizon,
+        scope_mode=scope_mode,
+        selected_year=selected_end_year,
+    )
+    result_b = _compute_comparison_pipeline(
+        road,
+        side_b,
+        annual_budget,
+        side_b_horizon,
+        attended_budget_mi=annual_budget * common_period_horizon,
+        scope_mode=scope_mode,
+        selected_year=selected_end_year,
+    )
 
-    if not paragon.get("available") or not dnit.get("available"):
-        st.info("Pipeline incompleto: uma das metodologias não retornou dados.")
+    if not result_a.get("available") or not result_b.get("available"):
+        reason_a = result_a.get("error") if not result_a.get("available") else None
+        reason_b = result_b.get("error") if not result_b.get("available") else None
+        reason = reason_a or reason_b or "um dos lados da comparação não retornou dados."
+        st.info(reason)
         return
+
+    st.markdown(
+        '<div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;'
+        'color:#8f9eaa;font-weight:850;margin:6px 0 10px">MAPAS DOS CENÁRIOS</div>',
+        unsafe_allow_html=True,
+    )
+    financial_scale = _comparison_cost_scale(result_a, result_b)
+    map_col_a, map_col_b = st.columns(2, gap="medium")
+    with map_col_a:
+        _render_comparison_condition_map(
+            side_a,
+            side_a_map_preview,
+            mode="Financeiro",
+            cost_df=result_a.get("custo_por_snv"),
+            financial_scale=financial_scale,
+            attended_segment_keys=result_a.get("attended_segment_keys"),
+            budget_segment_keys=result_a.get("budget_segment_keys"),
+        )
+    with map_col_b:
+        _render_comparison_condition_map(
+            side_b,
+            side_b_map_preview,
+            mode="Financeiro",
+            cost_df=result_b.get("custo_por_snv"),
+            financial_scale=financial_scale,
+            attended_segment_keys=result_b.get("attended_segment_keys"),
+            budget_segment_keys=result_b.get("budget_segment_keys"),
+        )
 
     st.markdown("<div style='height: 18px'></div>", unsafe_allow_html=True)
     st.markdown(
         '<div style="font-size:13px;letter-spacing:.12em;text-transform:uppercase;'
-        'color:#8f9eaa;font-weight:850;margin-bottom:10px">RESUMO COMPARATIVO</div>',
+        'color:#8f9eaa;font-weight:850;margin-bottom:4px">RESUMO COMPARATIVO</div>'
+        f'<div style="font-size:12px;color:#00c2e8;font-weight:800;margin-bottom:4px">{scope_label}</div>'
+        f'<div style="font-size:12px;color:#9fb0bd;font-weight:700;margin-bottom:12px">'
+        f'Orçamento disponível no escopo: {_format_money(annual_budget * common_period_horizon * 1_000_000)}</div>',
         unsafe_allow_html=True,
     )
-    _render_compare_kpi(
-        "Necessidade total no horizonte",
-        _format_money(paragon["total_need"]),
-        _format_money(dnit["total_need"]),
+    side_a_missing = max(result_a["total_need"] - annual_budget * common_period_horizon * 1_000_000, 0)
+    side_b_missing = max(result_b["total_need"] - annual_budget * common_period_horizon * 1_000_000, 0)
+    coverage_equal_text = (
+        "cobertura total"
+        if math.isclose(float(result_a["annual_coverage"]), 100.0, abs_tol=1e-9)
+        and math.isclose(float(result_b["annual_coverage"]), 100.0, abs_tol=1e-9)
+        else "sem diferença"
     )
     _render_compare_kpi(
-        f"Cobertura no horizonte ({horizon} anos × orçamento)",
-        f"{paragon['annual_coverage']:.1f}%",
-        f"{dnit['annual_coverage']:.1f}%",
+        "Necessidade total",
+        _format_money(result_a["total_need"]),
+        _format_money(result_b["total_need"]),
+        chart_value_p=result_a["total_need"],
+        chart_value_d=result_b["total_need"],
+        label_a=side_a_label,
+        label_b=side_b_label,
     )
     _render_compare_kpi(
-        "Trechos atendidos no horizonte (km)",
-        f"{paragon['attended_km']:.1f} / {paragon['scope_km']:.1f} km",
-        f"{dnit['attended_km']:.1f} / {dnit['scope_km']:.1f} km",
+        "Orçamento faltante",
+        _format_money(side_a_missing),
+        _format_money(side_b_missing),
+        chart_value_p=side_a_missing,
+        chart_value_d=side_b_missing,
+        equal_text="sem déficit" if math.isclose(side_a_missing, 0.0, abs_tol=1e-9) else "sem diferença",
+        label_a=side_a_label,
+        label_b=side_b_label,
     )
     _render_compare_kpi(
-        "Orçamento faltante no horizonte",
-        _format_money(max(paragon["total_need"] - annual_budget * horizon * 1_000_000, 0)),
-        _format_money(max(dnit["total_need"] - annual_budget * horizon * 1_000_000, 0)),
+        "Cobertura financeira",
+        f"{result_a['annual_coverage']:.1f}%",
+        f"{result_b['annual_coverage']:.1f}%",
+        chart_value_p=result_a["annual_coverage"],
+        chart_value_d=result_b["annual_coverage"],
+        equal_text=coverage_equal_text,
+        chart_max=100,
+        label_a=side_a_label,
+        label_b=side_b_label,
+    )
+    _render_compare_kpi(
+        "Trechos atendidos",
+        _format_attended_km(result_a["attended_km"], result_a["scope_km"]),
+        _format_attended_km(result_b["attended_km"], result_b["scope_km"]),
+        chart_value_p=result_a["scope_km"],
+        chart_value_d=result_b["scope_km"],
+        equal_text="malhas iguais",
+        label_a=side_a_label,
+        label_b=side_b_label,
     )
 
     st.markdown("<div style='height: 18px'></div>", unsafe_allow_html=True)
-    _render_compare_anual_bars(paragon["custo_por_ano"], dnit["custo_por_ano"])
+    _render_compare_anual_bars(result_a["custo_por_ano"], result_b["custo_por_ano"], side_a_label, side_b_label)
     st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
-    _render_compare_diff_table(paragon["custo_por_snv"], dnit["custo_por_snv"])
+    _render_compare_diff_table(result_a["custo_por_snv"], result_b["custo_por_snv"], side_a_label, side_b_label)
 
     st.markdown(
         '<div class="economic-note" style="margin-top:14px">'
         'Observação: cada metodologia segmenta a rodovia de forma diferente. O comparativo '
         'por SRE só é direto quando o mesmo trecho existe nas duas análises. '
-        '<span style="color:#00c2e8;font-weight:700">Paragon</span> usa o cenário '
-        f'<em>{html.escape(paragon["scenario_label"])}</em>; '
-        '<span style="color:#f2a51a;font-weight:700">DNIT</span> usa '
-        f'<em>{html.escape(dnit["scenario_label"])}</em>.'
+        f'Escopo selecionado: <strong>{html.escape(scope_label)}</strong>. '
+        f'<span style="color:#00c2e8;font-weight:700">{html.escape(side_a_label)}</span> usa '
+        f'<em>{html.escape(result_a["scenario_label"])}</em>; '
+        f'<span style="color:#f2a51a;font-weight:700">{html.escape(side_b_label)}</span> usa '
+        f'<em>{html.escape(result_b["scenario_label"])}</em>.'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    _render_iagon_comparativo(road, paragon, dnit, annual_budget, horizon)
+    _render_iagon_comparativo(road, result_a, result_b, annual_budget, common_period_horizon, side_a_label, side_b_label)
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _iagon_comparativo_text(
     road: str, p_total: float, d_total: float, p_cov: float, d_cov: float,
-    p_att: float, d_att: float, scope: float, annual_budget: int, horizon: int,
-    top_snv_lines: str,
+    p_att: float, d_att: float, p_scope: float, d_scope: float, annual_budget: int, horizon: int,
+    top_snv_lines: str, label_a: str, label_b: str,
 ) -> str:
     """Chama a IAGON (system prompt + memória) para interpretar o comparativo.
     Cacheado pelos números → não re-chama a API em reruns/sliders inalterados."""
@@ -4435,23 +6440,22 @@ def _iagon_comparativo_text(
     razao = (p_total / d_total) if d_total else 0.0
     contexto = (
         f"Rodovia: BR-{road}.\n"
-        f"Comparativo: metodologia Paragon × Matriz Revitaliza DNIT (mesma rodovia, mesmos km).\n"
+        f"Comparativo: {label_a} × {label_b}.\n"
         f"Horizonte: {horizon} anos · Orçamento: R$ {annual_budget} mi/ano "
         f"(R$ {annual_budget * horizon} mi no horizonte).\n\n"
-        f"NECESSIDADE TOTAL NO HORIZONTE: Paragon R$ {p_total / 1e6:.1f} mi · "
-        f"DNIT R$ {d_total / 1e6:.1f} mi (Paragon = {razao:.1f}× o DNIT).\n"
-        f"COBERTURA NO HORIZONTE com este orçamento: Paragon {p_cov:.1f}% · DNIT {d_cov:.1f}%.\n"
-        f"TRECHOS ATENDIDOS NO HORIZONTE: Paragon {p_att:.1f}/{scope:.1f} km · "
-        f"DNIT {d_att:.1f}/{scope:.1f} km.\n\n"
-        f"CUSTO POR TRECHO (SRE) — Paragon vs DNIT (delta = Paragon − DNIT):\n{top_snv_lines}\n"
+        f"NECESSIDADE TOTAL NO HORIZONTE: {label_a} R$ {p_total / 1e6:.1f} mi · "
+        f"{label_b} R$ {d_total / 1e6:.1f} mi ({label_a} = {razao:.1f}× {label_b}).\n"
+        f"COBERTURA NO HORIZONTE com este orçamento: {label_a} {p_cov:.1f}% · {label_b} {d_cov:.1f}%.\n"
+        f"TRECHOS ATENDIDOS NO HORIZONTE: {label_a} {p_att:.1f}/{p_scope:.1f} km · "
+        f"{label_b} {d_att:.1f}/{d_scope:.1f} km.\n\n"
+        f"CUSTO POR TRECHO (SRE) — {label_a} vs {label_b} (delta = {label_a} − {label_b}):\n{top_snv_lines}\n"
     )
     pergunta = (
         "Você é a IAGON. Com base SOMENTE nos números acima, escreva uma análise técnica "
         "e objetiva (3 a 5 frases, em português, em prosa corrida — sem listas nem markdown) "
-        "do comparativo Paragon × DNIT desta rodovia, para um gestor de pavimentos: "
-        "(1) a diferença de custo total e o porquê — a Paragon prescreve soluções mais pesadas "
-        "(reconstrução/fresagem) e a Revitaliza DNIT intervenções mais leves sobre os mesmos km; "
-        "(2) o que o orçamento informado cobre em cada metodologia; "
+        "do comparativo desta rodovia, para um gestor de pavimentos: "
+        "(1) a diferença de custo total entre os dois recortes; "
+        "(2) o que o orçamento informado cobre em cada lado da comparação; "
         "(3) feche com uma recomendação prática. Não invente números além dos fornecidos."
     )
     try:
@@ -4460,7 +6464,7 @@ def _iagon_comparativo_text(
         return ""
 
 
-def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budget: int, horizon: int) -> None:
+def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budget: int, horizon: int, label_a: str, label_b: str) -> None:
     """Bloco final: interpretação do comparativo gerada pela IAGON (com memória)."""
     try:
         from services import iagon
@@ -4469,7 +6473,7 @@ def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budge
     if not iagon.is_configured():
         return
 
-    # Top trechos por delta (Paragon − DNIT), em texto, para alimentar o modelo.
+    # Top trechos por delta (A − B), em texto, para alimentar o modelo.
     p, d = paragon.get("custo_por_snv"), dnit.get("custo_por_snv")
     linhas = ""
     if p is not None and not p.empty and d is not None and not d.empty:
@@ -4479,7 +6483,7 @@ def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budge
             m["delta"] = m["cp"] - m["cd"]
             m = m.sort_values("delta", ascending=False).head(6)
             linhas = "\n".join(
-                f"- {r.SNV}: Paragon R$ {r.cp / 1e6:.1f} mi · DNIT R$ {r.cd / 1e6:.1f} mi · "
+                f"- {r.SNV}: {label_a} R$ {r.cp / 1e6:.1f} mi · {label_b} R$ {r.cd / 1e6:.1f} mi · "
                 f"{r.ext:.1f} km · delta R$ {r.delta / 1e6:+.1f} mi"
                 for r in m.itertuples()
             )
@@ -4489,7 +6493,8 @@ def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budge
             road, float(paragon["total_need"]), float(dnit["total_need"]),
             float(paragon["annual_coverage"]), float(dnit["annual_coverage"]),
             float(paragon["attended_km"]), float(dnit["attended_km"]),
-            float(paragon["scope_km"]), int(annual_budget), int(horizon), linhas,
+            float(paragon["scope_km"]), float(dnit["scope_km"]),
+            int(annual_budget), int(horizon), linhas, label_a, label_b,
         )
     if not texto:
         return
@@ -4948,6 +6953,228 @@ def _render_dnit_iri_chart(series: dict, sre: str) -> None:
         "<script>" + js + "</script></body></html>"
     )
     components.html(doc, height=540, scrolling=False)
+
+
+_PROJECTION_SCENARIO_COLORS = [
+    "#00c2e8",
+    "#ffb21a",
+    "#8bdc65",
+    "#ff4d5a",
+    "#7c8cff",
+    "#23d3a6",
+]
+
+
+def _render_dnit_performance_chart(data: dict, metric: str) -> None:
+    """Gráfico anual de desempenho DNIT: uma linha por cenário e ponto nos anos com obra."""
+    df = data.get("series")
+    if df is None or df.empty:
+        return
+    metric_df = df[df["Indicador"].astype(str) == metric].copy()
+    if metric_df.empty:
+        return
+
+    theme = _dashboard_theme()
+    light = theme == "light"
+    bg = "#ffffff" if light else "#0b1d28"
+    card_bg = "#ffffff" if light else "#0b1d28"
+    text_color = "#132432" if light else "#f4f7fb"
+    muted = "#516778" if light else "#92a1ad"
+    grid = "rgba(91,119,138,.18)" if light else "rgba(148,163,184,.13)"
+    axis = "#8aa0ae" if light else "#8f9eaa"
+
+    years = sorted(metric_df["Ano"].dropna().astype(int).unique().tolist())
+    if not years:
+        return
+
+    min_year, max_year = min(years), max(years)
+    values = [float(v) for v in metric_df["Valor"].dropna().tolist()]
+    if not values:
+        return
+    y_max = max(values)
+    if y_max <= 0:
+        y_max = 1.0
+    y_max *= 1.15
+
+    W, H = 1060, 300
+    L, R, T, B = 46, 78, 30, 44
+    pw, ph = W - L - R, H - T - B
+
+    def X(year: int) -> float:
+        if max_year == min_year:
+            return L + pw / 2
+        return L + ((int(year) - min_year) / (max_year - min_year)) * pw
+
+    def Y(value: float) -> float:
+        return T + ph - (max(float(value), 0.0) / y_max) * ph
+
+    interventions = data.get("interventions") or []
+    by_marker: dict[tuple[str, int], dict] = {}
+    for marker in interventions:
+        try:
+            key = (str(marker.get("_scenario_key")), int(marker.get("Ano")))
+        except Exception:
+            continue
+        by_marker[key] = marker
+
+    lines: list[str] = []
+    legend: list[str] = []
+    has_interventions = False
+    scenario_keys = list(data.get("scenario_labels", {}).keys())
+    if not scenario_keys:
+        scenario_keys = sorted(metric_df["_scenario_key"].dropna().astype(str).unique().tolist())
+    color_by_scenario = {
+        key: _PROJECTION_SCENARIO_COLORS[idx % len(_PROJECTION_SCENARIO_COLORS)]
+        for idx, key in enumerate(scenario_keys)
+    }
+
+    for tick in range(0, 5):
+        ratio = tick / 4
+        y = T + ph - ratio * ph
+        val = y_max * ratio
+        lines.append(f'<line x1="{L}" y1="{y:.1f}" x2="{L + pw}" y2="{y:.1f}" stroke="{grid}" stroke-width="1"/>')
+        lines.append(f'<text x="{L + pw + 9}" y="{y + 3:.1f}" fill="{axis}" font-size="10">{val:.1f}</text>')
+
+    for year in years:
+        x = X(year)
+        lines.append(f'<text x="{x:.1f}" y="{T + ph + 22}" fill="{axis}" font-size="10" text-anchor="middle">{year}</text>')
+
+    for scenario_key, sub in metric_df.groupby("_scenario_key", sort=False):
+        scenario_key = str(scenario_key)
+        sub = sub.sort_values("Ano")
+        color = color_by_scenario.get(scenario_key, "#00c2e8")
+        label = str(sub["_scenario_label"].iloc[0])
+        points = " ".join(f'{X(int(r["Ano"])):.1f},{Y(float(r["Valor"])):.1f}' for _, r in sub.iterrows())
+        if points:
+            lines.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>')
+        legend.append(
+            f'<span class="legend-item"><span class="legend-line" style="background:{color}"></span>{html.escape(_network_scenario_label({"cenario": label}) or label)}</span>'
+        )
+
+        show_labels = len(sub) <= 34 and len(scenario_keys) <= 3
+        for _, r in sub.iterrows():
+            year = int(r["Ano"])
+            value = float(r["Valor"])
+            x, y = X(year), Y(value)
+            marker = by_marker.get((scenario_key, year))
+            if marker:
+                has_interventions = True
+                tip = html.escape(f"{metric}: {value:.2f} · {marker.get('Soluções') or 'Intervenção'}", quote=True)
+                lines.append(
+                    f'<circle class="proj-point" data-tip="{tip}" cx="{x:.1f}" cy="{y:.1f}" r="6.2" '
+                    f'fill="#94a3b8" stroke="{color}" stroke-width="2.2"/>'
+                )
+            else:
+                tip = html.escape(f"{metric}: {value:.2f}", quote=True)
+                lines.append(
+                    f'<circle class="proj-point" data-tip="{tip}" cx="{x:.1f}" cy="{y:.1f}" r="3.2" '
+                    f'fill="{color}" stroke="{bg}" stroke-width="1"/>'
+                )
+            if show_labels:
+                lines.append(f'<text x="{x:.1f}" y="{y - 10:.1f}" fill="{muted}" font-size="9" text-anchor="middle">{value:.2f}</text>')
+
+    if has_interventions:
+        legend.append(
+            '<span class="legend-item"><span class="legend-dot" style="background:#94a3b8"></span>Intervenção</span>'
+        )
+
+    scenario_legend = "".join(legend)
+    if scenario_legend:
+        scenario_legend = f'<div class="legend-row scenario-row"><b>Cenários:</b>{scenario_legend}</div>'
+
+    svg = (
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet" '
+        f'style="display:block;width:100%;height:auto">{"".join(lines)}</svg>'
+    )
+
+    css = (
+        f'html,body{{margin:0;padding:0;background:{card_bg};font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;}}'
+        f'.card{{background:{card_bg};color:{text_color};padding:18px 20px 14px;border-radius:18px;}}'
+        f'.title{{margin:0 0 6px;font-size:15px;font-weight:850;color:{text_color};letter-spacing:0;}}'
+        f'.subtitle{{color:{muted};font-size:12px;line-height:1.45;margin:0 0 8px;}}'
+        '.legend-row{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:11px;font-weight:700;}'
+        f'.legend-row{{color:{muted};}}'
+        f'.scenario-row{{margin:10px 0 6px;color:{text_color};}}'
+        '.legend-item{display:inline-flex;align-items:center;gap:6px;}'
+        '.legend-line{display:inline-block;width:22px;height:3px;border-radius:999px;}'
+        '.legend-dot{display:inline-block;width:10px;height:10px;border-radius:999px;}'
+        '.proj-point{cursor:pointer;}'
+        '#tip{position:fixed;pointer-events:none;background:rgba(7,17,25,.97);border:1px solid #244257;color:#f4f7fb;'
+        'font-size:12px;font-weight:650;padding:7px 10px;border-radius:8px;opacity:0;transition:opacity .08s;white-space:nowrap;'
+        'z-index:99;box-shadow:0 10px 30px rgba(0,0,0,.35);}'
+    )
+    js = (
+        "var tip=document.getElementById('tip');"
+        "document.querySelectorAll('.proj-point').forEach(function(el){"
+        "el.addEventListener('mousemove',function(e){tip.textContent=el.getAttribute('data-tip');tip.style.opacity='1';"
+        "tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-6)+'px';});"
+        "el.addEventListener('mouseleave',function(){tip.style.opacity='0';});});"
+    )
+    doc = (
+        "<!doctype html><html><head><meta charset='utf-8'><style>" + css + "</style></head><body>"
+        f"<div class='card'><div class='title'>{html.escape(metric)}</div>"
+        f"{scenario_legend}{svg}</div>"
+        "<div id='tip'></div><script>" + js + "</script></body></html>"
+    )
+    components.html(doc, height=420, scrolling=False)
+
+
+def _render_comparison_dnit_performance_block(road: str, side_a: dict, side_b: dict) -> None:
+    """Indicadores técnicos do comparativo: usa os cenários já filtrados na tela."""
+    selected: list[str] = []
+    for side in (side_a, side_b):
+        selected.extend(str(key) for key in (side.get("scenario_keys") or []) if key)
+
+    selected = list(dict.fromkeys(selected))
+    if not selected:
+        return
+
+    st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;'
+        'color:#8f9eaa;font-weight:850;margin:6px 0 10px">INDICADORES TÉCNICOS DOS CENÁRIOS</div>',
+        unsafe_allow_html=True,
+    )
+
+    data = get_dnit_performance_projection(road, tuple(selected))
+    if not data.get("available"):
+        st.info("Sem dados de desempenho para este recorte.")
+        return
+
+    segment_options = data.get("segments") or []
+    if not segment_options:
+        st.info("Sem segmentos de desempenho para este recorte.")
+        return
+
+    labels_by_segment = {str(item["token"]): str(item["label"]) for item in segment_options}
+    segment_tokens = list(labels_by_segment.keys())
+    selected_segment = st.selectbox(
+        "Segmento",
+        segment_tokens,
+        index=0,
+        format_func=lambda token: labels_by_segment.get(str(token), str(token)),
+        key=f"comparison_performance_segment_{_normalize_road_code(road) or road}_{'|'.join(selected)}",
+    )
+    data = dict(data)
+    series = data.get("series")
+    if series is not None and not series.empty:
+        data["series"] = series[series["_segment_token"].astype(str) == str(selected_segment)].copy()
+    data["interventions"] = [
+        marker for marker in (data.get("interventions") or [])
+        if str(marker.get("_segment_token")) == str(selected_segment)
+    ]
+    if data.get("series") is None or data["series"].empty:
+        st.info("Sem dados de desempenho para este segmento.")
+        return
+
+    metric_order = ["IRI", "Afundamento nas trilhas de roda", "FC2 + FC3", "Panelas"]
+    available_metrics = [metric for metric in metric_order if metric in set(data.get("metrics") or [])]
+    if not available_metrics:
+        st.info("Sem indicadores técnicos disponíveis para este recorte.")
+        return
+
+    for metric in available_metrics:
+        _render_dnit_performance_chart(data, metric)
 
 
 def _chip_text_color(hex_color: str) -> str:
@@ -5524,9 +7751,71 @@ def _dnit_distribution(segments_df, classe_col: str, color_col: str):
     return grp.sort_values("_o")[["classe", "percentual", "color"]].reset_index(drop=True)
 
 
-def _render_dnit_overview(road: str, scenario_key: str | None, year: int | None = None) -> None:
+def _render_dnit_distributions_for_scenarios(
+    parts: list[dict],
+    *,
+    km_range: tuple[float, float] | None,
+    selected_iri_class: str,
+) -> None:
+    if len(parts) <= 1:
+        return
+    prepared = []
+    for part in parts:
+        segments = _filter_by_km_range(part.get("segments"), km_range)
+        segments = _filter_by_iap_class(segments, selected_iri_class, class_col="iri_classe")
+        prepared.append(
+            {
+                "label": str(part.get("_scenario_label") or "Cenário"),
+                "iri_distribution": _dnit_distribution(segments, "iri_classe", "iri_color"),
+                "igg_distribution": _dnit_distribution(segments, "igg_classe", "igg_color"),
+                "iri_avg": _weighted_metric_from_segments(segments, "iri", float(part.get("iri_avg") or 0.0)),
+                "igg_avg": _weighted_metric_from_segments(segments, "igg", float(part.get("igg_avg") or 0.0)),
+            }
+        )
+
+    st.markdown('<div class="solution-filter-label">IRI por cenário</div>', unsafe_allow_html=True)
+    iri_cols = st.columns(min(len(prepared), 3), gap="medium")
+    for idx, item in enumerate(prepared):
+        with iri_cols[idx % len(iri_cols)]:
+            render_iap_distribution(
+                item["iri_distribution"],
+                item["iri_avg"],
+                title=f"IRI · {item['label']}",
+                subtitle=(
+                    "Faixa em km e faixa IRI aplicadas ao mapa e à distribuição"
+                    if selected_iri_class == "Todas" else
+                    f"Mostrando apenas a faixa {selected_iri_class}"
+                ),
+                center_label="IRI MÉDIO",
+                value_fmt="{:.2f}",
+            )
+    st.markdown('<div style="height:12px"></div><div class="solution-filter-label">IGG por cenário</div>', unsafe_allow_html=True)
+    igg_cols = st.columns(min(len(prepared), 3), gap="medium")
+    for idx, item in enumerate(prepared):
+        with igg_cols[idx % len(igg_cols)]:
+            render_iap_distribution(
+                item["igg_distribution"],
+                item["igg_avg"],
+                title=f"IGG · {item['label']}",
+                subtitle="Distribuição do recorte visível no mapa",
+                center_label="IGG MÉDIO",
+                value_fmt="{:.1f}",
+            )
+
+
+def _render_dnit_overview(road: str, scenario_keys: list[str] | str | None, year: int | None = None) -> None:
     """Visão geral DNIT: KPIs + mapa colorido pela matriz + diagrama linear (IRI/IGG/deflexão)."""
-    data = get_dnit_overview_data(road, scenario_key=scenario_key, year=year)
+    if isinstance(scenario_keys, str):
+        scenario_keys = [scenario_keys]
+    scenario_keys = [str(key) for key in (scenario_keys or []) if key]
+    dnit_parts = _scenario_offset_parts(
+        road,
+        scenario_keys,
+        matrix_type="Matriz Cadastrada",
+        year=year,
+        data_loader=lambda road, key, year: get_dnit_overview_data(road, scenario_key=key, year=year),
+    )
+    data = dnit_parts[0] if dnit_parts else get_dnit_overview_data(road, scenario_key=None, year=year)
     if not data or data.get("segments") is None or data["segments"].empty:
         st.info("Sem dados de IRI/IGG para esta rodovia/cenário.")
         return
@@ -5557,8 +7846,16 @@ def _render_dnit_overview(road: str, scenario_key: str | None, year: int | None 
         ]
     )
     st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
-    _km_range = _diagnosis_km_range_from_state(data["segments"], "dnit_linear_zoom")
-    _segments_km = _filter_by_km_range(data["segments"], _km_range)
+    _linear_part = _select_diagnosis_linear_part(
+        dnit_parts,
+        data,
+        key="dnit_linear_scenario_selector",
+        render_control=False,
+    )
+    _linear_segments = _linear_part.get("segments") if _linear_part else data["segments"]
+    _km_range = _diagnosis_km_range_from_state(_linear_segments, "dnit_linear_zoom")
+    _segments_source = _concat_segments(dnit_parts) if len(dnit_parts) > 1 else data["segments"]
+    _segments_km = _filter_by_km_range(_segments_source, _km_range)
     _iri_distribution_km = _dnit_distribution(_segments_km, "iri_classe", "iri_color")
     _selected_iri_class = _render_diagnosis_iap_class_filter(
         _iri_distribution_km,
@@ -5576,36 +7873,58 @@ def _render_dnit_overview(road: str, scenario_key: str | None, year: int | None 
         zona_order=data.get("zona_order"),
     )
     # Donuts de distribuição IRI + IGG (entre o mapa e o diagrama linear).
-    _c_iri, _c_igg = st.columns(2)
-    with _c_iri:
-        render_iap_distribution(
-            _iri_distribution_filtered if not _iri_distribution_filtered.empty else _iri_distribution_km,
-            _iri_avg_filtered,
-            title="IRI",
-            subtitle=(
-                "Faixa em km e faixa IRI aplicadas ao mapa e à distribuição"
-                if _selected_iri_class == "Todas" else
-                f"Mostrando no mapa e na distribuição apenas a faixa {_selected_iri_class}"
-            ),
-            center_label="IRI MÉDIO", value_fmt="{:.2f}",
+    if len(dnit_parts) > 1:
+        _render_dnit_distributions_for_scenarios(
+            dnit_parts,
+            km_range=_km_range,
+            selected_iri_class=_selected_iri_class,
         )
-    with _c_igg:
-        render_iap_distribution(
-            _igg_distribution_filtered,
-            _igg_avg_filtered,
-            title="IGG", subtitle="Distribuição do recorte visível no mapa",
-            center_label="IGG MÉDIO", value_fmt="{:.1f}",
-        )
-    _render_dnit_linear(data["segments"], key="dnit_linear_zoom")
+    else:
+        _c_iri, _c_igg = st.columns(2)
+        with _c_iri:
+            render_iap_distribution(
+                _iri_distribution_filtered if not _iri_distribution_filtered.empty else _iri_distribution_km,
+                _iri_avg_filtered,
+                title="IRI",
+                subtitle=(
+                    "Faixa em km e faixa IRI aplicadas ao mapa e à distribuição"
+                    if _selected_iri_class == "Todas" else
+                    f"Mostrando no mapa e na distribuição apenas a faixa {_selected_iri_class}"
+                ),
+                center_label="IRI MÉDIO", value_fmt="{:.2f}",
+            )
+        with _c_igg:
+            render_iap_distribution(
+                _igg_distribution_filtered,
+                _igg_avg_filtered,
+                title="IGG", subtitle="Distribuição do recorte visível no mapa",
+                center_label="IGG MÉDIO", value_fmt="{:.1f}",
+            )
+    st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
+    _linear_part = _select_diagnosis_linear_part(
+        dnit_parts,
+        data,
+        key="dnit_linear_scenario_selector",
+        render_control=True,
+    )
+    _linear_segments = _linear_part.get("segments") if _linear_part else data["segments"]
+    _render_dnit_linear(_linear_segments, key="dnit_linear_zoom")
 
 
 def _filter_map_segments(segments_df, filtered_table):
     """Restringe os segmentos geográficos aos que sobraram na tabela filtrada
-    (casando por `_segment_id`), para o mapa acompanhar os filtros da tabela."""
+    (casando por `_segment_id` e, quando houver múltiplos cenários, também pelo
+    sentido), para o mapa acompanhar os filtros da tabela."""
     if segments_df is None or segments_df.empty:
         return segments_df
     if filtered_table is None or filtered_table.empty or "_segment_id" not in filtered_table:
         return segments_df.iloc[0:0]
+
+    if "sentido" in segments_df.columns and "Sentido" in filtered_table.columns:
+        segment_keys = _economic_segment_key_series(segments_df, "segment_id", "sentido")
+        selected_keys = _economic_segment_key_set(filtered_table, "_segment_id", "Sentido")
+        if selected_keys:
+            return segments_df[segment_keys.isin(selected_keys)].copy()
 
     selected_ids = set(filtered_table["_segment_id"].astype(int).tolist())
     return segments_df[segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
@@ -5636,6 +7955,8 @@ def _build_network_overview_impl(
     rows = []
     paragon_segments = []
     dnit_segments = []
+    paragon_map_keys_added: set[tuple[str, str | None]] = set()
+    dnit_map_keys_added: set[tuple[str, str | None]] = set()
     zona_colors = None
     zona_order = None
 
@@ -5645,13 +7966,20 @@ def _build_network_overview_impl(
         if selected_scenario_tokens and road_code not in scenario_map:
             continue
         road_years = selected_year_values or [None]
+        scenario_offset_values = {
+            scenario_key: idx - (len(road_scenarios) - 1) / 2.0
+            for idx, scenario_key in enumerate(road_scenarios)
+        }
+        use_scenario_offset = len(road_scenarios) > 1
 
         for scenario_key in road_scenarios:
             for year in road_years:
                 label_parts = [road]
+                map_slice_label = ""
                 if scenario_key:
                     raw_label = get_scenario_label(road, scenario_key)
                     short_label = _network_scenario_label({"cenario": raw_label, "key": scenario_key}) or str(scenario_key)
+                    map_slice_label = short_label
                     label_parts.append(short_label)
                 if year is not None:
                     label_parts.append(str(year))
@@ -5716,7 +8044,14 @@ def _build_network_overview_impl(
                         }
                     )
 
-                    dnit_segments.append(segs)
+                    map_key = (road_code, str(scenario_key) if scenario_key else None)
+                    if map_key not in dnit_map_keys_added:
+                        map_segs = segs.copy()
+                        if scenario_key:
+                            map_segs["sentido"] = map_slice_label
+                            map_segs["offset_side"] = scenario_offset_values.get(scenario_key, 0.0) if use_scenario_offset else 0.0
+                        dnit_segments.append(map_segs)
+                        dnit_map_keys_added.add(map_key)
                     zona_colors = dn.get("zona_colors")
                     zona_order = dn.get("zona_order")
                     continue
@@ -5772,7 +8107,14 @@ def _build_network_overview_impl(
                 )
 
                 if sol.get("segments") is not None and not sol["segments"].empty:
-                    paragon_segments.append(sol["segments"])
+                    map_key = (road_code, str(scenario_key) if scenario_key else None)
+                    if map_key not in paragon_map_keys_added:
+                        map_segs = sol["segments"].copy()
+                        if scenario_key:
+                            map_segs["sentido"] = map_slice_label
+                            map_segs["offset_side"] = scenario_offset_values.get(scenario_key, 0.0) if use_scenario_offset else 0.0
+                        paragon_segments.append(map_segs)
+                        paragon_map_keys_added.add(map_key)
 
     if not rows:
         return {}
@@ -5859,14 +8201,21 @@ def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
     )
 
     rows = []
-    for i, row in enumerate(ordered.to_dict("records"), start=1):
+    def _slice_label(row: dict) -> str:
+        full = str(row.get("Rodovia") or "")
+        road = str(row.get("_road_label") or full)
+        label = full
+        prefix = f"{road} - "
+        if label.startswith(prefix):
+            label = label[len(prefix):]
+        return label if label and label != road else "Cenário selecionado"
+
+    def _bar_markup(row: dict, *, label: str | None, active_class: str = "") -> str:
         total = float(row["ext_km"])
         interv = min(max(float(row.get("interv_km", 0.0) or 0.0), 0.0), total)
         ext_pct = total / max_ext * 100
         interv_frac = (interv / total * 100) if total else 0.0
         pct = (interv / total * 100) if total else 0.0
-        active_class = " active" if selected_filter and str(row.get("_road_label") or row["Rodovia"]) in selected_filter else ""
-        visible_name = str(row.get("_road_label") or row["Rodovia"])
         slice_label = str(row["Rodovia"])
         tooltip = html.escape(
             f'{slice_label} · Extensão total {total:.1f} km · '
@@ -5878,16 +8227,51 @@ def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
             if interv_frac >= 26 and ext_pct >= 18
             else ""
         )
-        rows.append(
-            f'<div class="net-rank-row{active_class}" title="{tooltip}">'
-            f'<a class="net-rank-name" href="?page=overview&road={html.escape(str(row["_code"]))}" target="_self" title="{tooltip}">'
-            f'{i}. {html.escape(visible_name)}</a>'
+        name_html = (
+            f'<div class="net-rank-slice-name" title="{tooltip}">{html.escape(label)}</div>'
+            if label is not None else ""
+        )
+        row_class = "net-rank-slice" if label is not None else f"net-rank-row{active_class}"
+        return (
+            f'<div class="{row_class}" title="{tooltip}">'
+            f'{name_html}'
             f'<div class="net-rank-track" title="{tooltip}"><div class="net-rank-bar" style="width:{ext_pct:.1f}%">'
             f'<div class="net-rank-interv" style="width:{interv_frac:.1f}%">{inline_label}</div></div></div>'
             f'<div class="net-rank-val">{total:.0f} km</div>'
             f'<div class="net-rank-extra">{interv:.0f} km precisam de intervenção ({pct:.0f}%)</div>'
             '</div>'
         )
+
+    if has_filtered_slices:
+        grouped = list(ordered.groupby(["_road_label", "_code"], sort=False, dropna=False))
+        grouped = sorted(grouped, key=lambda item: float(item[1]["ext_km"].max()), reverse=True)
+        for i, ((road_label, code), group) in enumerate(grouped, start=1):
+            group_records = group.to_dict("records")
+            active_class = " active" if selected_filter and str(road_label) in selected_filter else ""
+            group_total = float(group["ext_km"].max()) if not group.empty else 0.0
+            group_html = "".join(
+                _bar_markup(row, label=_slice_label(row))
+                for row in group_records
+            )
+            rows.append(
+                f'<div class="net-rank-group{active_class}">'
+                f'<div class="net-rank-group-head">'
+                f'<a class="net-rank-group-title" href="?page=overview&road={html.escape(str(code))}" target="_self">'
+                f'{i}. {html.escape(str(road_label))}</a>'
+                f'<div class="net-rank-group-meta">{len(group_records)} recorte(s) · {group_total:.0f} km</div>'
+                f'</div>{group_html}</div>'
+            )
+    else:
+        for i, row in enumerate(ordered.to_dict("records"), start=1):
+            active_class = " active" if selected_filter and str(row.get("_road_label") or row["Rodovia"]) in selected_filter else ""
+            visible_name = str(row.get("_road_label") or row["Rodovia"])
+            row_html = _bar_markup(row, label=None, active_class=active_class)
+            row_html = row_html.replace(
+                '<div class="net-rank-track"',
+                f'<a class="net-rank-name" href="?page=overview&road={html.escape(str(row["_code"]))}" target="_self">{i}. {html.escape(visible_name)}</a><div class="net-rank-track"',
+                1,
+            )
+            rows.append(row_html)
 
     st.markdown(
         '<section class="solution-card"><div class="solution-card-head">'
@@ -5988,7 +8372,7 @@ def _render_network_overview(
     if is_dnit:
         render_dnit_map(data["dnit_map"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
     else:
-        render_overview_map(data["paragon_map"], data["total_km"])
+        render_overview_map(data["paragon_map"], data["total_km"], gap_px=18)
 
     st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
     _render_network_ranking(df, is_dnit)
@@ -6199,15 +8583,15 @@ def _iagon_situacao_text(road: str, cenario: int = 1) -> str:
     sd = table.groupby("Solução recomendada")["Extensão"].sum().sort_values(ascending=False)
     sol_txt = " · ".join(f"{str(n).replace(' + ', ' / ')} {km:.1f} km" for n, km in sd.items() if str(n).strip()) or "sem dados"
     seg = _segment_priority_table(_aplicar_indice_priorizacao(_economic_work_table(table)), bi)
-    crit = int((seg["Priorização"] <= 3).sum()) if not seg.empty else 0
-    alta = int(((seg["Priorização"] > 3) & (seg["Priorização"] <= 5)).sum()) if not seg.empty else 0
+    crit = int((seg["Classe prioridade"].astype(str) == "Prioridade Crítica").sum()) if not seg.empty else 0
+    alta = int((seg["Classe prioridade"].astype(str) == "Prioridade Alta").sum()) if not seg.empty else 0
     return (
         f"Situação — {road} · cenário {sc['n']}: {sc['label']}\n"
         f"- IAP médio: {iap_avg:.2f} (meta 2,5)\n"
         f"- % da extensão com IAP < 2,5: {pct_bad:.0f}%\n"
         f"- Extensão total: {ext:.1f} km\n"
         f"- NECESSIDADE TOTAL{anos_txt}: {_format_money(nec)}\n"
-        f"- Segmentos prioritários: {crit} Crítica (nível ≤ 3) · {alta} Alta (nível 4–5)\n"
+        f"- Segmentos prioritários: {crit} Crítica · {alta} Alta, conforme classe do IPI\n"
         f"- Soluções (km): {sol_txt}"
     )
 
@@ -6281,7 +8665,7 @@ def _render_screen_iagon(screen: str, titulo: str, filtro_md: str, context_fn,
 
 def _iagon_trechos_priorizados_text(road: str, cenario: int = 1, top: int = 25, horizonte: int = 1) -> str:
     """Top trechos prioritários POR SEGMENTO de um CENÁRIO — mesmos números do relatório
-    (extensão por segmento, IPT, nível de prioridade 1–10, solução, custo).
+    (extensão por segmento, IPI, solução, custo).
 
     O CUSTO por trecho depende do `horizonte` (anos): igual ao relatório, o custo é a soma
     da programação do orçamento DENTRO do horizonte. Default 1 = só a 1ª intervenção (visão
@@ -6306,14 +8690,14 @@ def _iagon_trechos_priorizados_text(road: str, cenario: int = 1, top: int = 25, 
     seg = seg.sort_values("Prioridade").head(int(top or 25))
     linhas = "\n".join(
         f"  {int(r['Prioridade'])}º · {r['SNV']} · km {_format_km(float(r['Km Inicial']))}–{_format_km(float(r['Km Final']))} · "
-        f"{float(r['Extensão']):.2f} km · nível {int(round(float(r['Priorização'])))} · IPT {float(r['IPT']):.2f} · "
+        f"{float(r['Extensão']):.2f} km · IPI {float(r.get('IPI', r.get('IPT', 0)) or 0):.2f} · "
         f"{str(r['Solução recomendada']).replace(' + ', ' / ')} · {_format_money(float(r['Custo econômico']))}"
         for _, r in seg.iterrows()
     )
     return (
         f"Trechos prioritários POR SEGMENTO — {road} · cenário {sc['n']}: {sc['label']} "
         f"(top {len(seg)} de {total} segmentos; CUSTO no horizonte de {h} ano(s) — "
-        f"mesmo critério do relatório; nível 1 = mais crítico):\n{linhas}"
+        f"mesmo critério do relatório; maior IPI = mais crítico):\n{linhas}"
     )
 
 
@@ -6352,7 +8736,7 @@ def _iagon_dnit_detail(road: str) -> dict | None:
     # Custo anual no horizonte 8 anos (mantém paridade com Paragon no contexto).
     cby_dnit: list[tuple[int, float]] = []
     if budget_items is not None and not budget_items.empty:
-        ano_base = int(data.get("ano_base") or 2027)
+        ano_base, _ = _budget_year_bounds(budget_items, fallback_start=data.get("ano_base"))
         sub = budget_items[
             (budget_items["Ano"] >= ano_base)
             & (budget_items["Ano"] <= ano_base + _ECONOMIC_DEFAULT_HORIZON - 1)
@@ -6397,7 +8781,7 @@ def _iagon_dnit_detail(road: str) -> dict | None:
         "solucoes": solucoes_dnit,
         "custo_por_ano": cby_dnit,
         "sres": sres,
-        "ano_base": int(data.get("ano_base") or 2027),
+        "ano_base": int(data.get("ano_base") or _budget_year_bounds(budget_items)[0]),
     }
 
 
@@ -6606,8 +8990,8 @@ Nomes Paragon (use EXATAMENTE estes): *Reconstrução, Fresagem e recomposição
 > ⚠️ Cada rodovia pode ter MAIS DE UM cenário Paragon. Quando o usuário pedir trechos prioritários, extensão ou custos POR TRECHO de uma rodovia com **mais de um cenário**, **PERGUNTE primeiro qual cenário** (apresente numerados: 1) …, 2) …) e ofereça uma análise técnica comparando os dois. Para a listagem EXATA (por segmento, do cenário escolhido), chame **`listar_trechos_priorizados(rodovia, cenario)`** — NÃO use a visão geral abaixo para extensões por trecho.
 
 ### Visão geral (cenário padrão, agregada por SNV — APROXIMADA)
-- Nível de prioridade **1–10** (escala invertida, MENOR = mais crítico): Crítica ≤ 3 · Alta ≤ 5 · Média ≤ 7 · Baixa > 7.
-- "Rank" = posição (1 = topo). Esta visão é **por SNV e do cenário padrão**; para extensão/priorização exatas POR SEGMENTO e por cenário, use a ferramenta acima.
+- IPI Paragon usa escala **0–100**. Quanto maior o IPI, maior a prioridade do trecho.
+- "Rank" = posição na fila (1 = topo). Esta visão é **por SNV e do cenário padrão**; para extensão/priorização exatas POR SEGMENTO e por cenário, use a ferramenta acima.
 - Sempre cite o **mix completo de soluções** (não só a dominante) — se o SNV tem Reconstrução, mencione mesmo que minoria em km.
 {chr(10).join(paragon_trecho_blocks)}
 
@@ -6630,8 +9014,8 @@ A matriz processada não tem faixa; cada rodovia foi rodada por sentido. Use qua
 ## 7) Regras de interpretação
 - **Diagnóstico padrão = Paragon**. Use DNIT só quando o usuário pedir explicitamente "matriz DNIT", "Revitaliza" ou citar nomes DNIT (CBUQ, FR5, Micro(0,8/1,5), Drenagem).
 - **Cenários**: cada rodovia pode ter >1 cenário Paragon (seção 4). Antes de listar trechos/extensões/custos por trecho de uma rodovia com mais de um cenário, **PERGUNTE qual cenário** e ofereça comparar; depois use `listar_trechos_priorizados(rodovia, cenario)` para os números exatos.
-- **Priorização 1–10**: menor valor = MAIS crítico. NUNCA inverta o sentido — priorização 2 é pior que priorização 8.
-- **"Rank" ≠ "Priorização"**: rank é ordinal (1, 2, 3…); priorização é o valor 1–10. Não troque os dois.
+- **IPI Paragon**: maior valor = MAIS crítico. A fila deve ser lida do maior IPI para o menor.
+- **"Rank" ≠ "IPI"**: rank é só a posição na fila (1, 2, 3…). IPI é o valor técnico calculado.
 - **Mix de soluções**: ao listar um SNV, cite TODAS as soluções presentes (com km), nunca apenas a dominante.
   Se houver Reconstrução, ela vai SEMPRE primeiro na lista (severidade mais alta).
 - Custos são necessidades cadastradas no banco; cobertura anual depende do orçamento.
@@ -6846,7 +9230,7 @@ def _iagon_render_chart(
             if not data.get("available"):
                 return None
             bi = data.get("budget_items")
-            ano_base = int(data.get("ano_base") or 2027)
+            ano_base, _ = _budget_year_bounds(bi, fallback_start=data.get("ano_base"))
             if bi is None or bi.empty:
                 return None
             bi = bi[(bi["Ano"] >= ano_base) & (bi["Ano"] <= ano_base + _ECONOMIC_DEFAULT_HORIZON - 1)]
@@ -7053,8 +9437,7 @@ def _iagon_generate_work_plan(
         table = data.get("table")
         if table is None or table.empty:
             return None
-        # _economic_work_table aplica fallback paramétrico quando o banco não tem
-        # custo cadastrado para o segmento — é o mesmo cálculo da tela Cenário.
+        # _economic_work_table usa somente custo real do banco.
         work = _economic_work_table(table)
         if snvs_set:
             work = work[work["SNV"].astype(str).str.upper().isin(snvs_set)]
@@ -7298,10 +9681,10 @@ def _iagon_simulate_to_pdf(sim: dict) -> tuple[str, bytes, str] | None:
 
 
 def _iagon_compare_methodologies(road: str, annual_budget_mi: int = 50, horizon: int = _ECONOMIC_DEFAULT_HORIZON) -> dict:
-    """Comparativo Paragon × DNIT para uma rodovia — devolve métricas + delta.
+    """Comparativo padrão Paragon x Matriz para comandos internos da IAGON.
 
-    Usa os mesmos pipelines do `_render_comparativo_page` para garantir aderência ao
-    que o usuário vê na UI.
+    A tela `Comparativo` usa filtros A/B flexíveis; este helper mantém o atalho
+    antigo para perguntas rápidas sobre Paragon x Matriz.
     """
     out: dict[str, Any] = {"road": road, "annual_budget_mi": annual_budget_mi, "horizon": horizon}
     # Espelha o comparativo da UI: atendidos/cobertura medidos no horizonte (anual × anos).
@@ -8208,7 +10591,7 @@ def main() -> None:
     """Ponto de entrada e ROTEADOR da aplicação.
 
     Lê `?page=` da URL e monta a tela correspondente (overview/visaogeral,
-    solucoes, cenario, projecao, risco=IAGON). Dentro de cada página, o "Tipo de
+    solucoes, comparativo, cenario, risco=IAGON). Dentro de cada página, o "Tipo de
     Matriz" escolhido na top bar decide se chama a versão Paragon (`_render_*`) ou
     DNIT (`_render_dnit_*`). Cada tela publica ao final o contexto do IAGON da tela.
     """
@@ -8218,21 +10601,45 @@ def main() -> None:
     inject_css()
     # Roteamento por query param. `page` fora da lista branca cai em "overview".
     page = st.query_params.get("page", "overview")
-    if page not in {"visaogeral", "overview", "solucoes", "projecao", "cenario", "risco"}:
+    if page == "projecao":
+        page = "cenario"
+        st.query_params["page"] = "cenario"
+    if page not in {"visaogeral", "overview", "solucoes", "comparativo", "cenario", "risco"}:
         page = "overview"
     render_sidebar(active_key=page)
 
-    default_road = get_available_roads()[0]
+    available_roads = list(dict.fromkeys([*(get_available_roads() or []), *(get_dnit_available_roads() or [])]))
+    if not available_roads:
+        st.error("Nenhuma rodovia disponível na base de dados.")
+        return
+    default_road = available_roads[0]
 
     # ─── Página SOLUÇÕES (o que fazer) ───
     if page == "solucoes":
-        diagnosis, selected_road, scenario_key, selected_year = render_solution_top_bar(default_road)
+        diagnosis, selected_road, scenario_keys, selected_year = render_solution_top_bar(default_road)
+        if not scenario_keys:
+            st.info("Selecione ao menos um cenário para exibir as soluções.")
+            return
         if diagnosis == "Diagnóstico DNIT":
-            _render_dnit_solutions_page(selected_road, scenario_key)
+            _render_dnit_solutions_page(selected_road, scenario_keys)
             return
         st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
-        _d = get_solutions_data(selected_road, scenario_key=scenario_key, year=selected_year)
-        _base_table, _base_segments = _d["table"], _d["segments"]
+        _scenario_keys = [str(key) for key in (scenario_keys or []) if key]
+        _sol_by = {
+            str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
+            for s in get_available_scenarios(selected_road, "Paragon")
+        }
+        if len(_scenario_keys) >= 2:
+            _base_table, _base_segments = _combined_solution_data(
+                selected_road,
+                _scenario_keys,
+                _sol_by,
+                year=selected_year,
+            )
+        else:
+            scenario_key = _scenario_keys[0] if _scenario_keys else None
+            _d = get_solutions_data(selected_road, scenario_key=scenario_key, year=selected_year)
+            _base_table, _base_segments = _d["table"], _d["segments"]
         intervention_table = (
             _base_table[_base_table["Solução recomendada"].astype(str) != "Sem intervenção"].copy()
             if _base_table is not None and not _base_table.empty
@@ -8269,8 +10676,10 @@ def main() -> None:
             _render_solutions_table(paginated_table)
 
         # IAGON desta tela (Soluções).
-        _sol_by = {s["key"]: s for s in get_available_scenarios(selected_road, "Paragon")}
-        _sol_lbls = _network_scenario_label(_sol_by.get(scenario_key)) if scenario_key else "—"
+        if _scenario_keys:
+            _sol_lbls = ", ".join(_sol_by.get(key, str(key)) for key in _scenario_keys)
+        else:
+            _sol_lbls = "—"
         if not no_intervention_master and filtered_table is not None and not filtered_table.empty and "Solução recomendada" in filtered_table.columns:
             _isd = filtered_table.groupby("Solução recomendada")["Extensão"].sum().sort_values(ascending=False)
             _sdados = (
@@ -8289,14 +10698,25 @@ def main() -> None:
                 f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
             ),
             lambda: _iagon_full_road_context(
-                selected_road, scenario_key, "Soluções (intervenções recomendadas)",
+                selected_road, (_scenario_keys[0] if _scenario_keys else None), "Soluções (intervenções recomendadas)",
                 {"Rodovia": selected_road, "Cenário": _sol_lbls, "Ano": selected_year or "—"},
                 extra="O que está EXIBIDO nesta tela agora (com os filtros aplicados):\n" + _sdados),
             sugestoes=["Análise das soluções", "Onde concentra obra pesada?", "O que priorizar?"],
         )
         return
 
-    # ─── Página CENÁRIO ECONÔMICO (quanto custa) ─── Paragon / DNIT / Comparativo
+    # ─── Página COMPARATIVO ENTRE CENÁRIOS ───
+    if page == "comparativo":
+        selected_road, comparison_view_mode = render_comparison_top_bar(default_road)
+        st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
+        side_a, side_b = _render_comparison_master_filters(selected_road)
+        if not side_a.get("scenario_keys") or not side_b.get("scenario_keys"):
+            st.info("O comparativo precisa de ao menos um cenário em cada lado.")
+            return
+        _render_comparativo_page(selected_road, side_a, side_b, comparison_view_mode)
+        return
+
+    # ─── Página CENÁRIO ECONÔMICO (quanto custa) ─── Paragon / DNIT
     if page == "cenario":
         diagnosis, selected_road, scenario_key = render_top_bar(
             default_road,
@@ -8307,24 +10727,19 @@ def main() -> None:
             diagnosis_options=[
                 "Diagnóstico Paragon",
                 "Diagnóstico DNIT",
-                "Comparativo Paragon × DNIT",
             ],
         )
-        if diagnosis == "Comparativo Paragon × DNIT":
-            _render_comparativo_page(selected_road, scenario_key)
-            return
         st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
-        _eco_keys, _eco_labels, selected_year = _render_economic_master_filters(
+        _eco_keys, _eco_labels = _render_economic_master_filters(
             selected_road,
             matrix_type="Matriz Cadastrada" if diagnosis == "Diagnóstico DNIT" else "Paragon",
             widget_prefix="dnit_eco" if diagnosis == "Diagnóstico DNIT" else "eco",
         )
         if diagnosis == "Diagnóstico DNIT":
-            _render_dnit_economic_page(selected_road, _eco_keys, selected_year)
+            _render_dnit_economic_page(selected_road, _eco_keys)
             return
         if len(_eco_keys) >= 2:
-            _ec = _combined_economic_data(selected_road, _eco_keys, _eco_labels, year=selected_year)
-            _render_economic_comparison(_ec["per_sentido"])
+            _ec = _combined_economic_data(selected_road, _eco_keys, _eco_labels)
             _render_economic_page(
                 _ec["table"],
                 _ec["budget_items"],
@@ -8335,7 +10750,7 @@ def main() -> None:
             )
         else:
             _ekey = _eco_keys[0] if _eco_keys else scenario_key
-            data = get_solutions_data(selected_road, scenario_key=_ekey, year=selected_year)
+            data = get_solutions_data(selected_road, scenario_key=_ekey)
             scenario_label = get_scenario_label(selected_road, _ekey) or "Paragon"
             _render_economic_page(
                 data["table"],
@@ -8345,20 +10760,6 @@ def main() -> None:
                 road=selected_road,
                 scenario_label=scenario_label,
             )
-        return
-
-    # ─── Página PROJEÇÃO (evolução) ───
-    if page == "projecao":
-        diagnosis, selected_road, scenario_key = render_top_bar(
-            default_road,
-            page_title="Projeção",
-            show_diagnosis=True,
-            keep_title=True,
-        )
-        if diagnosis == "Diagnóstico DNIT":
-            _render_dnit_projection_page(selected_road, scenario_key)
-            return
-        _render_projection_page(selected_road, scenario_key)
         return
 
     # ─── Página VISÃO GERAL (rede) — panorama de todas as rodovias ───
@@ -8443,13 +10844,35 @@ def main() -> None:
         return
 
     # ─── Página OVERVIEW (default) — DIAGNÓSTICO da rodovia selecionada ───
-    diagnosis, selected_road, scenario_key, selected_year = render_diagnosis_top_bar(default_road)
+    diagnosis, selected_road, scenario_keys, selected_year = render_diagnosis_top_bar(default_road)
+    scenario_key = scenario_keys[0] if scenario_keys else None
 
     if diagnosis == "Diagnóstico DNIT":
-        _render_dnit_overview(selected_road, scenario_key, year=selected_year)
+        _render_dnit_overview(selected_road, scenario_keys, year=selected_year)
         return
 
-    data = get_overview_data(selected_road, scenario_key=scenario_key, year=selected_year)
+    paragon_parts = _scenario_offset_parts(
+        selected_road,
+        scenario_keys,
+        matrix_type="Paragon",
+        year=selected_year,
+        data_loader=lambda road, key, year: get_overview_data(road, scenario_key=key, year=year),
+    )
+    data = paragon_parts[0] if paragon_parts else get_overview_data(selected_road, scenario_key=scenario_key, year=selected_year)
+    if not data.get("iap_extraction"):
+        st.info(data.get("message") or "Sem dados para este recorte.")
+        _render_screen_iagon(
+            "diagnostico", f"Diagnóstico · {selected_road}",
+            (
+                f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Matriz:</b> Paragon "
+                f"&nbsp;·&nbsp; <b>Cenário:</b> —"
+                f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
+            ),
+            lambda: "Sem dados para este recorte.",
+            sugestoes=["Trocar cenário", "Trocar ano", "Ver outro recorte"],
+        )
+        return
+
     metrics = data["metrics"]
     _scenario_options = get_available_scenarios(selected_road, "Paragon")
     _by_key = {s["key"]: s for s in _scenario_options}
@@ -8460,33 +10883,60 @@ def main() -> None:
     )
     render_metric_cards(data["cards"])
     st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
-    _km_range = _diagnosis_km_range_from_state(data["linear_diagram"], "paragon_linear_zoom")
-    _linear_km = _filter_by_km_range(data["linear_diagram"], _km_range)
+    _linear_part = _select_diagnosis_linear_part(
+        paragon_parts,
+        data,
+        key="paragon_linear_scenario_selector",
+        render_control=False,
+    )
+    _linear_diagram = _linear_part.get("linear_diagram") if _linear_part else data["linear_diagram"]
+    _km_range = _diagnosis_km_range_from_state(_linear_diagram, "paragon_linear_zoom")
+    _linear_parts = [
+        _filter_by_km_range(part.get("linear_diagram"), _km_range)
+        for part in paragon_parts
+        if part.get("linear_diagram") is not None and not part.get("linear_diagram").empty
+    ]
+    _linear_km = pd.concat(_linear_parts, ignore_index=True) if _linear_parts else _filter_by_km_range(data["linear_diagram"], _km_range)
     _distribution_km = _build_distribution_from_linear(_linear_km)
     _selected_iap_class = _render_diagnosis_iap_class_filter(
         _distribution_km if not _distribution_km.empty else data["distribution"],
         key="diagnosis_iap_distribution_class",
     )
     _distribution_filtered = _filter_by_iap_class(_distribution_km, _selected_iap_class, class_col="classe")
-    _map_segments = _filter_by_km_range(data["segments"], _km_range)
+    _map_source = _concat_segments(paragon_parts) if len(paragon_parts) > 1 else data["segments"]
+    _map_segments = _filter_by_km_range(_map_source, _km_range)
     _map_segments = _filter_by_iap_class(_map_segments, _selected_iap_class, class_col="classe_iap")
     _distribution_avg = _weighted_iap_from_linear(
         _filter_by_iap_class(_linear_km, _selected_iap_class, class_col="classe_iap"),
         metrics["iap_average"],
     )
-    render_overview_map(_map_segments, metrics["extension_km"])
-    render_iap_distribution(
-        _distribution_filtered if not _distribution_filtered.empty else _distribution_km,
-        _distribution_avg,
-        subtitle=(
-            "Faixa em km e faixa IAP aplicadas ao mapa e à distribuição"
-            if _selected_iap_class == "Todas" else
-            f"Mostrando no mapa e na distribuição apenas a faixa {_selected_iap_class}"
-        ),
-    )
+    render_overview_map(_map_segments, metrics["extension_km"], gap_px=18)
+    if len(paragon_parts) > 1:
+        _render_iap_distributions_for_scenarios(
+            paragon_parts,
+            km_range=_km_range,
+            selected_iap_class=_selected_iap_class,
+        )
+    else:
+        render_iap_distribution(
+            _distribution_filtered if not _distribution_filtered.empty else _distribution_km,
+            _distribution_avg,
+            subtitle=(
+                "Faixa em km e faixa IAP aplicadas ao mapa e à distribuição"
+                if _selected_iap_class == "Todas" else
+                f"Mostrando no mapa e na distribuição apenas a faixa {_selected_iap_class}"
+            ),
+        )
     st.markdown("<div style='height: 32px'></div>", unsafe_allow_html=True)
+    _linear_part = _select_diagnosis_linear_part(
+        paragon_parts,
+        data,
+        key="paragon_linear_scenario_selector",
+        render_control=True,
+    )
+    _linear_diagram = _linear_part.get("linear_diagram") if _linear_part else data["linear_diagram"]
     filtered_diagram, km_range = render_iap_linear_zoomable(
-        data["linear_diagram"], key="paragon_linear_zoom"
+        _linear_diagram, key="paragon_linear_zoom"
     )
     with st.expander("Mostrar detalhes técnicos (ICDS, ICDP, ICDE)"):
         render_condition_linear(filtered_diagram, km_range=km_range)
@@ -8496,7 +10946,7 @@ def main() -> None:
         "diagnostico", f"Diagnóstico · {selected_road}",
         (
             f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Matriz:</b> Paragon "
-            f"&nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_diag_lbl)}"
+            f"&nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_diag_lbl if len(scenario_keys) <= 1 else f'{len(scenario_keys)} cenários')}"
             f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
         ),
         lambda: _iagon_full_road_context(

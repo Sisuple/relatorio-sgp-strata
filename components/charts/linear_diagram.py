@@ -403,7 +403,7 @@ def render_iap_linear_multi(sentido_dfs, *, key: str):
             filtered = df[(df["km_final"] >= km_range[0]) & (df["km_inicial"] <= km_range[1])]
             if multi:  # só rotula cada barra quando há mais de um sentido
                 st.markdown(
-                    f'<div style="margin-top:12px;font-weight:850;color:#e5edf3;font-size:13px">{html.escape(str(label))}</div>',
+                    f'<div class="linear-scenario-label">{html.escape(str(label))}</div>',
                     unsafe_allow_html=True,
                 )
             if filtered is None or filtered.empty:

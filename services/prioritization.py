@@ -6,28 +6,17 @@ crítico (PIOR segmento define o SNV). Isso evita o efeito de "ilha crítica
 diluída" quando um SNV longo tem alguns segmentos catastróficos misturados
 com muitos trechos em condição regular.
 
-Etapas (para cada SEGMENTO):
+Etapas Paragon (para cada SEGMENTO):
 
-1) Normaliza VMDA, ICDS e ICDP usando o mínimo/máximo GLOBAIS dos segmentos:
-   - VMDA -> normalização LOGARÍTMICA
-   - ICDS -> normalização LINEAR
-   - ICDP -> normalização LINEAR
+1) Calcula DDS e DDP a partir de ICDS e ICDP.
+2) Calcula DQO pela regra multiplicativa e pelo gatilho assimétrico.
+3) Calcula VMDeq com VMDL + 4 * VMDP.
+4) Calcula FT pela curva saturante de tráfego.
+5) Calcula IPI em escala 0..100.
 
-2) IPT = NÍVEL DE PRIORIDADE (escala 0..10, MENOR = mais prioritário):
-       IPT = 10 * (0.50*(1 - VMDA_n) + 0.30*ICDS_n + 0.20*ICDP_n)
-   O VMDA é inversamente proporcional à prioridade (mais tráfego -> mais
-   prioritário), por isso entra como (1 - VMDA_n); ICDS/ICDP são diretos.
+Por SNV, herda o MAIOR IPI entre seus segmentos (= o mais crítico).
 
-3) IP econômico (auxiliar, escala 0..10) — NÃO entra no nível de prioridade:
-       Eficiência = (10 - IPT) / custo_km * 1000   (criticidade por custo)
-       IPE = (Eficiência - efic_min) / (efic_max - efic_min) * 10
-
-4) Por SNV, herda o MENOR IPT entre seus segmentos (= o mais crítico).
-
-5) Nível de prioridade = RE-NORMALIZA o IPT (do pior segmento) de cada SNV entre
-   os SNVs (min-max → [0,9] e soma 1) → menor IPT = 1, maior IPT = 10.
-
-Ordena os SNVs pela PRIORIZAÇÃO (menor primeiro) e atribui o ranking.
+Ordena os SNVs pelo IPI em ordem decrescente e atribui o ranking.
 
 Uso típico:
 
@@ -44,10 +33,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-# Pesos do IPT — Índice de Priorização Técnica (Paragon). Somam 1.0.
-# Metodologia do cliente: o IPT é o próprio nível de prioridade (0..10, menor =
-# mais prioritário). VMDA é INVERSAMENTE proporcional à prioridade (entra como
-# 1 - R_VMDA); ICDS/ICDP são diretamente proporcionais.
+import pandas as pd
+
+from services.ipi import calcular_ipi_lote, classificar_prioridade_ipi
+
+# Pesos mantidos apenas por compatibilidade com funções antigas/DNIT.
 PESO_VMDA = 0.50  # tráfego / importância operacional (log, invertido)
 PESO_ICDS = 0.30  # condição de superfície
 PESO_ICDP = 0.20  # condição de profundidade
@@ -72,6 +62,14 @@ def classificar_prioridade(valor: float) -> str:
         if valor <= limite:
             return rotulo
     return "Prioridade Baixa"
+
+
+def _classificar_prioridade_ipi_dashboard(ipi: float) -> str:
+    """Adapta a classe direta do IPI ao texto já usado nos cards/tabelas."""
+    classe = classificar_prioridade_ipi(ipi)
+    if classe == "Muito Baixa":
+        return "Prioridade Muito Baixa"
+    return f"Prioridade {classe}"
 
 
 def _valor_valido(valor: Any) -> float | None:
@@ -121,69 +119,66 @@ def _min_max(valores: list[float]) -> tuple[float, float]:
 
 
 def calcular_indice_priorizacao(segmentos: list[dict]) -> list[dict]:
-    """Calcula a priorização por SEGMENTO e agrega no SNV pelo PIOR segmento.
+    """Calcula a priorização Paragon pelo IPI e agrega no SNV pelo pior segmento.
 
-    Antes a priorização era calculada por SNV usando médias — o que diluía "ilhas
-    críticas" em SNVs longos com condição mista. Agora cada segmento tem seu próprio
-    IPT/IPE/Priorização, e o SNV herda o valor do segmento mais crítico
-    (menor priorização na escala invertida).
+    O IPI substitui o IPT antigo. A escala técnica é direta (maior IPI = mais
+    crítico). A fila é ordenada do maior IPI para o menor IPI.
 
     Entrada — lista de dicionários, um por SEGMENTO, com as chaves:
 
-        rodovia, snv, extensao_km, vmda, icds, icdp, custo
+        rodovia, snv, extensao_km, vmdl, vmdp, icds, icdp, custo
 
     Saída — uma entrada por SNV, ordenada da maior para a menor criticidade,
-    refletindo o **pior segmento** do SNV (menor IPT).
+    refletindo o **pior segmento** do SNV (maior IPI).
     """
     if not segmentos:
         return []
 
-    # --- mínimo/máximo GLOBAIS sobre os valores por segmento ---
-    vmda_seg = [v for s in segmentos if (v := _valor_valido(s.get("vmda"))) is not None]
-    icds_seg = [v for s in segmentos if (v := _valor_valido(s.get("icds"))) is not None]
-    icdp_seg = [v for s in segmentos if (v := _valor_valido(s.get("icdp"))) is not None]
-    vmda_min, vmda_max = _min_max(vmda_seg)
-    icds_min, icds_max = _min_max(icds_seg)
-    icdp_min, icdp_max = _min_max(icdp_seg)
+    base = pd.DataFrame(segmentos)
+    if base.empty:
+        return []
+    for col in ("icds", "icdp", "vmdl", "vmdp"):
+        base[col] = pd.to_numeric(base[col], errors="coerce") if col in base.columns else pd.NA
+    valid = base.dropna(subset=["icds", "icdp", "vmdl", "vmdp"]).copy()
+    valid = valid[
+        valid["icds"].between(0, 5)
+        & valid["icdp"].between(0, 5)
+        & (valid["vmdl"] >= 0)
+        & (valid["vmdp"] >= 0)
+    ].copy()
+    if valid.empty:
+        return []
+    ipi_df = calcular_ipi_lote(valid[["icds", "icdp", "vmdl", "vmdp"]])
+    valid = valid.reset_index(drop=True)
+    ipi_df = ipi_df.reset_index(drop=True)
 
-    # --- 1ª passada: IPT (nível de prioridade) e eficiência por SEGMENTO ---
     seg_records: list[dict] = []
-    for s in segmentos:
-        snv = str(s.get("snv"))
-        vmda = _valor_valido(s.get("vmda"))
-        icds = _valor_valido(s.get("icds"))
-        icdp = _valor_valido(s.get("icdp"))
-
-        # R ∈ [0,1] (min-max global). VMDA log; ICDS/ICDP lineares.
-        vmda_n = _normalizar_log(vmda, vmda_min, vmda_max)
-        icds_n = _normalizar_linear(icds, icds_min, icds_max)
-        icdp_n = _normalizar_linear(icdp, icdp_min, icdp_max)
-        # IPT = nível de prioridade (0..10, MENOR = mais prioritário). VMDA é
-        # inversamente proporcional -> (1 - R_VMDA); ICDS/ICDP são diretos.
-        ip_tecnico = 10.0 * (
-            PESO_VMDA * (1.0 - vmda_n) + PESO_ICDS * icds_n + PESO_ICDP * icdp_n
-        )
-
+    for idx, s in valid.iterrows():
+        calc = ipi_df.loc[idx]
         ext = _valor_valido(s.get("extensao_km")) or 0.0
         custo = _valor_valido(s.get("custo")) or 0.0
         custo_km = custo / ext if ext > 0 else 0.0
-        # Eficiência econômica (auxiliar): criticidade (10 - IPT) por custo/km.
-        # Mais crítico e mais barato -> mais eficiente de atacar.
-        eficiencia = ((10.0 - ip_tecnico) / custo_km * 1000) if custo_km > 0 else 0.0
-
+        ipi = float(calc["ipi"])
+        eficiencia = (ipi / custo_km * 1000) if custo_km > 0 else 0.0
         seg_records.append(
             {
                 "rodovia": s.get("rodovia"),
-                "snv": snv,
+                "snv": str(s.get("snv")),
                 "extensao_km": ext,
                 "custo": custo,
-                "vmda": vmda or 0.0,
-                "icds": icds or 0.0,
-                "icdp": icdp or 0.0,
-                "vmda_n": vmda_n,
-                "icds_n": icds_n,
-                "icdp_n": icdp_n,
-                "ip_tecnico": ip_tecnico,
+                "vmda": float(s.get("vmda") or (float(s.get("vmdl") or 0.0) + float(s.get("vmdp") or 0.0))),
+                "vmdl": float(s.get("vmdl") or 0.0),
+                "vmdp": float(s.get("vmdp") or 0.0),
+                "vmdeq": float(calc["vmdeq"]),
+                "icds": float(s.get("icds") or 0.0),
+                "icdp": float(s.get("icdp") or 0.0),
+                "dds": float(calc["dds"]),
+                "ddp": float(calc["ddp"]),
+                "dqo_base": float(calc["dqo_base"]),
+                "gatilho": float(calc["gatilho"]),
+                "dqo": float(calc["dqo"]),
+                "ft": float(calc["ft"]),
+                "ip_tecnico": ipi,
                 "custo_km": custo_km,
                 "eficiencia": eficiencia,
             }
@@ -198,7 +193,7 @@ def calcular_indice_priorizacao(segmentos: list[dict]) -> list[dict]:
             if efic_max > efic_min else 0.0
         )
 
-    # --- agrega no SNV pelo PIOR segmento (MENOR IPT = mais crítico) ---
+    # --- agrega no SNV pelo PIOR segmento (MAIOR IPI = mais crítico) ---
     snvs: dict[str, dict] = {}
     ordem: list[str] = []
     for r in seg_records:
@@ -214,17 +209,8 @@ def calcular_indice_priorizacao(segmentos: list[dict]) -> list[dict]:
             ordem.append(snv)
         snvs[snv]["extensao_km"] += r["extensao_km"]
         snvs[snv]["custo"] += r["custo"]
-        if r["ip_tecnico"] < snvs[snv]["pior"]["ip_tecnico"]:
+        if r["ip_tecnico"] > snvs[snv]["pior"]["ip_tecnico"]:
             snvs[snv]["pior"] = r
-
-    # --- nível de prioridade 1..10: RE-NORMALIZA o IPT do pior segmento de cada SNV
-    # (min-max ENTRE os SNVs) p/ [0,9] e soma 1 → menor IPT = 1, maior IPT = 10. ---
-    pior_ipts = [snvs[s]["pior"]["ip_tecnico"] for s in ordem]
-    ipt_min, ipt_max = _min_max(pior_ipts)
-
-    def _nivel(ipt: float) -> int:
-        n = (ipt - ipt_min) / (ipt_max - ipt_min) * 9.0 + 1.0 if ipt_max > ipt_min else 1.0
-        return max(1, min(10, int(round(n))))
 
     # --- monta saída (uma linha por SNV, valores do pior segmento) ---
     resultado: list[dict] = []
@@ -232,38 +218,38 @@ def calcular_indice_priorizacao(segmentos: list[dict]) -> list[dict]:
         data = snvs[snv]
         pior = data["pior"]
         custo_km_total = data["custo"] / data["extensao_km"] if data["extensao_km"] > 0 else 0.0
-        nivel = _nivel(pior["ip_tecnico"])
+        ipi = round(pior["ip_tecnico"], 4)
         resultado.append(
             {
                 "rodovia": data["rodovia"],
                 "snv": snv,
                 "extensao_km": round(data["extensao_km"], 2),
                 "vmda": round(pior["vmda"], 2),
+                "vmdl": round(pior["vmdl"], 2),
+                "vmdp": round(pior["vmdp"], 2),
+                "vmdeq": round(pior["vmdeq"], 2),
                 "icds": round(pior["icds"], 4),
                 "icdp": round(pior["icdp"], 4),
-                "vmda_normalizado": round(pior["vmda_n"], 4),
-                "icds_normalizado": round(pior["icds_n"], 4),
-                "icdp_normalizado": round(pior["icdp_n"], 4),
-                # mín/máx GLOBAIS (p/ a memória de cálculo na UI).
-                "vmda_min": round(vmda_min, 2), "vmda_max": round(vmda_max, 2),
-                "icds_min": round(icds_min, 4), "icds_max": round(icds_max, 4),
-                "icdp_min": round(icdp_min, 4), "icdp_max": round(icdp_max, 4),
-                "ip_tecnico": round(pior["ip_tecnico"], 4),
-                # mín/máx do IPT entre SNVs (p/ a re-normalização 1..10 na memória).
-                "ipt_min": round(ipt_min, 4), "ipt_max": round(ipt_max, 4),
+                "dds": round(pior["dds"], 4),
+                "ddp": round(pior["ddp"], 4),
+                "dqo_base": round(pior["dqo_base"], 4),
+                "gatilho": round(pior["gatilho"], 4),
+                "dqo": round(pior["dqo"], 4),
+                "ft": round(pior["ft"], 4),
+                "ipi": ipi,
+                "ip_tecnico": ipi,
                 "custo_km": round(custo_km_total, 2),
                 "eficiencia": round(pior["eficiencia"], 6),
                 "ip_economico": round(pior["ip_economico"], 4),
-                "priorizacao": nivel,
-                "classificacao": classificar_prioridade(nivel),
+                # Mantido como alias interno para telas antigas, sem reescala 1..10.
+                "priorizacao": ipi,
+                "classificacao": _classificar_prioridade_ipi_dashboard(pior["ip_tecnico"]),
                 "ranking": 0,
             }
         )
 
-    # --- ordena por priorização ASC e IPT ASC (menor = mais crítico primeiro) ---
-    resultado.sort(
-        key=lambda r: (r["priorizacao"], r["ip_tecnico"], -r["eficiencia"]),
-    )
+    # --- ordena por IPI DESC (maior = mais crítico primeiro) ---
+    resultado.sort(key=lambda r: (-r["ip_tecnico"], -r["eficiencia"]))
     for posicao, item in enumerate(resultado, start=1):
         item["ranking"] = posicao
 
@@ -275,46 +261,58 @@ calcularIndicePriorizacao = calcular_indice_priorizacao
 
 
 def calcular_indice_priorizacao_segmento(segmentos: list[dict]) -> list[dict]:
-    """Priorização POR SEGMENTO (NÃO agrega no SNV). Cada segmento tem seu próprio
-    IPT e nível de prioridade 1..10 (re-normalização min-max do IPT ENTRE os segmentos).
+    """Priorização POR SEGMENTO (NÃO agrega no SNV), usando o IPI.
 
-    Mesma fórmula da versão por SNV: IPT = 10·(0,5·(1−R_VMDA) + 0,3·R_ICDS + 0,2·R_ICDP),
-    R_VMDA log e ICDS/ICDP lineares (min-max global). Nível = round((IPT−mín)/(máx−mín)·9+1).
-
-    Entrada — lista de dicts por SEGMENTO com: id, vmda, icds, icdp, extensao_km, custo.
+    Entrada — lista de dicts por SEGMENTO com: id, vmdl, vmdp, icds, icdp, extensao_km, custo.
     Saída — uma entrada por segmento (chave `id`), ordenada do mais crítico ao menos.
     """
     if not segmentos:
         return []
 
-    vmda_seg = [v for s in segmentos if (v := _valor_valido(s.get("vmda"))) is not None]
-    icds_seg = [v for s in segmentos if (v := _valor_valido(s.get("icds"))) is not None]
-    icdp_seg = [v for s in segmentos if (v := _valor_valido(s.get("icdp"))) is not None]
-    vmda_min, vmda_max = _min_max(vmda_seg)
-    icds_min, icds_max = _min_max(icds_seg)
-    icdp_min, icdp_max = _min_max(icdp_seg)
+    base = pd.DataFrame(segmentos)
+    if base.empty:
+        return []
+    for col in ("icds", "icdp", "vmdl", "vmdp"):
+        base[col] = pd.to_numeric(base[col], errors="coerce") if col in base.columns else pd.NA
+    valid = base.dropna(subset=["icds", "icdp", "vmdl", "vmdp"]).copy()
+    valid = valid[
+        valid["icds"].between(0, 5)
+        & valid["icdp"].between(0, 5)
+        & (valid["vmdl"] >= 0)
+        & (valid["vmdp"] >= 0)
+    ].copy()
+    if valid.empty:
+        return []
+    ipi_df = calcular_ipi_lote(valid[["icds", "icdp", "vmdl", "vmdp"]])
+    valid = valid.reset_index(drop=True)
+    ipi_df = ipi_df.reset_index(drop=True)
 
     recs: list[dict] = []
-    for s in segmentos:
-        vmda = _valor_valido(s.get("vmda"))
-        icds = _valor_valido(s.get("icds"))
-        icdp = _valor_valido(s.get("icdp"))
-        vmda_n = _normalizar_log(vmda, vmda_min, vmda_max)
-        icds_n = _normalizar_linear(icds, icds_min, icds_max)
-        icdp_n = _normalizar_linear(icdp, icdp_min, icdp_max)
-        ip_tecnico = 10.0 * (
-            PESO_VMDA * (1.0 - vmda_n) + PESO_ICDS * icds_n + PESO_ICDP * icdp_n
-        )
+    for idx, s in valid.iterrows():
+        calc = ipi_df.loc[idx]
+        ip_tecnico = float(calc["ipi"])
         ext = _valor_valido(s.get("extensao_km")) or 0.0
         custo = _valor_valido(s.get("custo")) or 0.0
         custo_km = custo / ext if ext > 0 else 0.0
-        eficiencia = ((10.0 - ip_tecnico) / custo_km * 1000) if custo_km > 0 else 0.0
+        eficiencia = (ip_tecnico / custo_km * 1000) if custo_km > 0 else 0.0
         recs.append(
             {
                 "id": s.get("id"),
-                "vmda": vmda or 0.0, "icds": icds or 0.0, "icdp": icdp or 0.0,
-                "vmda_n": vmda_n, "icds_n": icds_n, "icdp_n": icdp_n,
-                "ip_tecnico": ip_tecnico, "custo_km": custo_km, "eficiencia": eficiencia,
+                "vmda": float(s.get("vmda") or (float(s.get("vmdl") or 0.0) + float(s.get("vmdp") or 0.0))),
+                "vmdl": float(s.get("vmdl") or 0.0),
+                "vmdp": float(s.get("vmdp") or 0.0),
+                "vmdeq": float(calc["vmdeq"]),
+                "icds": float(s.get("icds") or 0.0),
+                "icdp": float(s.get("icdp") or 0.0),
+                "dds": float(calc["dds"]),
+                "ddp": float(calc["ddp"]),
+                "dqo_base": float(calc["dqo_base"]),
+                "gatilho": float(calc["gatilho"]),
+                "dqo": float(calc["dqo"]),
+                "ft": float(calc["ft"]),
+                "ip_tecnico": ip_tecnico,
+                "custo_km": custo_km,
+                "eficiencia": eficiencia,
             }
         )
 
@@ -326,38 +324,37 @@ def calcular_indice_priorizacao_segmento(segmentos: list[dict]) -> list[dict]:
             if efic_max > efic_min else 0.0
         )
 
-    ipts = [r["ip_tecnico"] for r in recs]
-    ipt_min, ipt_max = _min_max(ipts)
-
-    def _nivel(ipt: float) -> int:
-        n = (ipt - ipt_min) / (ipt_max - ipt_min) * 9.0 + 1.0 if ipt_max > ipt_min else 1.0
-        return max(1, min(10, int(round(n))))
-
     resultado: list[dict] = []
     for r in recs:
-        nivel = _nivel(r["ip_tecnico"])
+        ipi = round(r["ip_tecnico"], 4)
         resultado.append(
             {
                 "id": r["id"],
-                "vmda": round(r["vmda"], 2), "icds": round(r["icds"], 4), "icdp": round(r["icdp"], 4),
-                "vmda_normalizado": round(r["vmda_n"], 4),
-                "icds_normalizado": round(r["icds_n"], 4),
-                "icdp_normalizado": round(r["icdp_n"], 4),
-                "vmda_min": round(vmda_min, 2), "vmda_max": round(vmda_max, 2),
-                "icds_min": round(icds_min, 4), "icds_max": round(icds_max, 4),
-                "icdp_min": round(icdp_min, 4), "icdp_max": round(icdp_max, 4),
-                "ip_tecnico": round(r["ip_tecnico"], 4),
-                "ipt_min": round(ipt_min, 4), "ipt_max": round(ipt_max, 4),
+                "vmda": round(r["vmda"], 2),
+                "vmdl": round(r["vmdl"], 2),
+                "vmdp": round(r["vmdp"], 2),
+                "vmdeq": round(r["vmdeq"], 2),
+                "icds": round(r["icds"], 4),
+                "icdp": round(r["icdp"], 4),
+                "dds": round(r["dds"], 4),
+                "ddp": round(r["ddp"], 4),
+                "dqo_base": round(r["dqo_base"], 4),
+                "gatilho": round(r["gatilho"], 4),
+                "dqo": round(r["dqo"], 4),
+                "ft": round(r["ft"], 4),
+                "ipi": ipi,
+                "ip_tecnico": ipi,
                 "custo_km": round(r["custo_km"], 2),
                 "eficiencia": round(r["eficiencia"], 6),
                 "ip_economico": round(r["ip_economico"], 4),
-                "priorizacao": nivel,
-                "classificacao": classificar_prioridade(nivel),
+                # Mantido como alias interno para telas antigas, sem reescala 1..10.
+                "priorizacao": ipi,
+                "classificacao": _classificar_prioridade_ipi_dashboard(r["ip_tecnico"]),
                 "ranking": 0,
             }
         )
 
-    resultado.sort(key=lambda r: (r["priorizacao"], r["ip_tecnico"], -r["eficiencia"]))
+    resultado.sort(key=lambda r: (-r["ip_tecnico"], -r["eficiencia"]))
     for posicao, item in enumerate(resultado, start=1):
         item["ranking"] = posicao
     return resultado
