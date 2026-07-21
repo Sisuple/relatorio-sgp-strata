@@ -1,0 +1,70 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install "pytest>=8,<10"
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+      - name: Build Docker image (smoke test)
+        run: docker build -t relatorio-sgp-strata:ci .
+
+  deploy:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, production]
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (preserva .env e data/ locais do servidor)
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Build da imagem
+        run: docker compose build
+
+      - name: Sobe os containers
+        run: docker compose up -d
+
+      - name: Aguarda healthcheck
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health; then
+              echo "Aplicação saudável."
+              exit 0
+            fi
+            echo "Tentativa $i falhou, aguardando..."
+            sleep 3
+          done
+          echo "Healthcheck falhou após 10 tentativas."
+          exit 1
+
+      - name: Limpa imagens antigas
+        run: docker image prune -f
