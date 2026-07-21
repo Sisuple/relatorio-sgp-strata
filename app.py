@@ -67,6 +67,9 @@ from services.overview_service import (
     _normalize_road_code,
 )
 from services.prioritization import (
+    DNIT_MODO_COMBINADO,
+    DNIT_MODO_ECONOMICO,
+    DNIT_MODO_TECNICO,
     calcular_indice_priorizacao,
     calcular_indice_priorizacao_dnit,
     calcular_indice_priorizacao_segmento,
@@ -438,6 +441,9 @@ def inject_css() -> None:
             .solution-distribution-meta { display: flex; align-items: center; gap: 16px; color: #8f9eaa; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
             .solution-distribution-meta strong { color: var(--text); letter-spacing: 0; }
             .solution-distribution-meta .accent { color: var(--cyan); }
+            .dnit-priority-mode-inline { position: relative; z-index: 5; margin: 0 28px -78px 0; }
+            .dnit-priority-mode-inline div[data-testid="stSelectbox"] { min-width: 280px; }
+            .dnit-priority-mode-inline + div { position: relative; z-index: 4; }
             .solution-bars { height: 270px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
             .solution-y-axis { position: relative; height: 188px; margin-top: 18px; border-right: 1px solid rgba(148,163,184,.14); }
             .solution-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; }
@@ -3081,7 +3087,7 @@ def _prioridade_por_snv(df: pd.DataFrame) -> dict[str, dict]:
     segmentos = [
         {
             "rodovia": row.get("Rodovia", ""),
-            # Chave por (SNV, Sentido) quando há sentido → IPI/IPE independentes
+            # Chave por (SNV, Sentido) quando há sentido → IPI independente por sentido
             # independentes por sentido (senão CR e DE ficariam idênticos).
             "snv": (f"{row.get('SNV')}␟{row.get('Sentido')}" if has_sent else str(row.get("SNV"))),
             "extensao_km": row.get("Extensão"),
@@ -3124,7 +3130,7 @@ def _prioridade_por_segmento(df: pd.DataFrame) -> dict:
 
 
 def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
-    """Anexa IPI/IPE calculados POR SEGMENTO aos segmentos e ordena por maior IPI."""
+    """Anexa IPI calculado POR SEGMENTO aos segmentos e ordena por maior IPI."""
     if df is None or df.empty or "_segment_id" not in df.columns:
         return df
 
@@ -3270,10 +3276,9 @@ def _budget_items_for_year(budget_items: pd.DataFrame | None, year: int | None) 
 
 
 def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_key: str) -> tuple[int, int, float, int, int, str]:
-    """Sliders do cenário econômico: orçamento anual, horizonte e corte mínimo de IPI.
-    Devolve `(orçamento_mi, horizonte_anos, ipi_mínimo)`. O default do orçamento é
-    a necessidade total (cobre 100%) e o horizonte default é o total programado no banco."""
-    budget_col, horizon_col, scope_col, prio_col = st.columns([1, 1, 1.05, 1], gap="medium")
+    """Sliders do cenário econômico: orçamento anual, horizonte e modo de cálculo.
+    O default do orçamento cobre 100% da necessidade e o horizonte default é o total programado no banco."""
+    budget_col, horizon_col, scope_col, _spacer = st.columns([1, 1, 1.05, 1], gap="medium")
 
     # Horizonte TOTAL da análise (ano-base até o último ano programado) — é o default
     # e o máximo do slider (não fixo em 8/20). O gestor pode reduzir a partir do total.
@@ -3317,19 +3322,7 @@ def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_k
         )
         st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
 
-    # Filtro de prioridade Paragon: agora usa o IPI real (0..100), sem escala 1..10.
-    with prio_col:
-        _filter_caption("IPI mínimo")
-        ipi_min = st.slider(
-            "IPI mínimo", 0, 100, 0, 1,
-            key=f"prio_{scenario_key}",
-            label_visibility="collapsed",
-            help="0 mostra todos os trechos. Valores maiores deixam só os trechos com IPI mais alto.",
-        )
-        rotulo = "Todos" if ipi_min <= 0 else f"IPI ≥ {ipi_min}"
-        st.markdown(f'<div class="economic-control-value">{rotulo}</div>', unsafe_allow_html=True)
-
-    return annual_budget, horizon, float(ipi_min), start_year, selected_end_year, scope_mode
+    return annual_budget, horizon, 0.0, start_year, selected_end_year, scope_mode
 
 
 def _render_cost_by_solution(table_df: pd.DataFrame) -> None:
@@ -4143,6 +4136,11 @@ def _economic_segment_keys(df: pd.DataFrame | None, id_col: str = "_segment_id",
     return set(ids)
 
 
+def _economic_segment_key_set(df: pd.DataFrame | None, id_col: str = "_segment_id", sentido_col: str = "Sentido") -> set[str]:
+    """Alias compatível para pontos do mapa que esperam o nome antigo do helper."""
+    return _economic_segment_keys(df, id_col, sentido_col)
+
+
 def _economic_segment_key_series(df: pd.DataFrame, id_col: str, sentido_col: str) -> pd.Series:
     ids = df[id_col].astype(int).astype(str)
     if sentido_col in df.columns:
@@ -4150,6 +4148,160 @@ def _economic_segment_key_series(df: pd.DataFrame, id_col: str, sentido_col: str
         if sentidos.nunique(dropna=False) > 1:
             return ids + "|" + sentidos
     return ids
+
+
+def _segment_exclusion_key_series(df: pd.DataFrame, id_col: str, sentido_col: str | None = None) -> pd.Series:
+    """Chave estável para remover um segmento só da análise visual."""
+    if df is None or df.empty or id_col not in df.columns:
+        return pd.Series(dtype=str)
+    ids = pd.to_numeric(df[id_col], errors="coerce")
+    keys = ids.astype("Int64").astype(str)
+    if sentido_col and sentido_col in df.columns:
+        sentidos = df[sentido_col].fillna("").astype(str).str.strip()
+        if sentidos.nunique(dropna=False) > 1:
+            keys = keys + "|" + sentidos
+    return keys
+
+
+def _segment_exclusion_label(row: pd.Series) -> str:
+    """Texto curto para o usuário escolher qual trecho quer tirar da análise."""
+    snv = str(row.get("SNV") or row.get("sre") or "Trecho").strip()
+    sentido = str(row.get("Sentido") or row.get("sentido") or "").strip()
+    km_ini = pd.to_numeric(row.get("Km Inicial", row.get("km_ini")), errors="coerce")
+    km_fim = pd.to_numeric(row.get("Km Final", row.get("km_fim")), errors="coerce")
+    km_txt = ""
+    if pd.notna(km_ini) and pd.notna(km_fim):
+        km_txt = f" · km {_format_km(float(km_ini))}-{_format_km(float(km_fim))}"
+    sentido_txt = f" · {sentido}" if sentido else ""
+    return f"{snv}{sentido_txt}{km_txt}"
+
+
+def _parse_km_interval(value: str) -> tuple[float, float] | None:
+    """Interpreta textos simples como '0 a 59', '0-59' ou '0,5 até 12,3'."""
+    if not value or not str(value).strip():
+        return None
+    numbers = re.findall(r"\d+(?:[.,]\d+)?", str(value))
+    if len(numbers) < 2:
+        return None
+    start = float(numbers[0].replace(",", "."))
+    end = float(numbers[1].replace(",", "."))
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+def _segment_keys_in_km_interval(options_df: pd.DataFrame, interval: tuple[float, float] | None) -> set[str]:
+    """Retorna os trechos que cruzam o intervalo de km digitado."""
+    if interval is None or options_df.empty:
+        return set()
+    if "Km Inicial" not in options_df.columns or "Km Final" not in options_df.columns:
+        return set()
+
+    start, end = interval
+    km_ini = pd.to_numeric(options_df["Km Inicial"], errors="coerce")
+    km_fim = pd.to_numeric(options_df["Km Final"], errors="coerce")
+    mask = km_ini.notna() & km_fim.notna() & (km_fim >= start) & (km_ini <= end)
+    return set(options_df.loc[mask, "_exclude_key"].astype(str))
+
+
+def _render_segment_exclusion_filter(table_df: pd.DataFrame | None, scope_key: str) -> set[str]:
+    """Filtro visual para retirar trechos da análise sem mexer nos dados originais."""
+    if table_df is None or table_df.empty or "_segment_id" not in table_df.columns:
+        return set()
+
+    options_df = table_df.copy()
+    sentido_col = "Sentido" if "Sentido" in options_df.columns else None
+    options_df["_exclude_key"] = _segment_exclusion_key_series(options_df, "_segment_id", sentido_col)
+    options_df["_exclude_label"] = options_df.apply(_segment_exclusion_label, axis=1)
+    options_df = options_df[
+        options_df["_exclude_key"].notna()
+        & ~options_df["_exclude_key"].astype(str).isin({"", "<NA>", "nan", "None"})
+    ].drop_duplicates("_exclude_key")
+    sort_cols = [col for col in ["SNV", "Sentido", "Km Inicial", "Km Final"] if col in options_df.columns]
+    if sort_cols:
+        options_df = options_df.sort_values(sort_cols, kind="stable")
+    if options_df.empty:
+        return set()
+
+    label_by_key = dict(zip(options_df["_exclude_key"].astype(str), options_df["_exclude_label"].astype(str)))
+    key_by_label = {label: key for key, label in label_by_key.items()}
+    widget_key = f"economic_excluded_segments_{scope_key}"
+    current = [label for label in st.session_state.get(widget_key, []) if label in key_by_label]
+    if widget_key in st.session_state:
+        st.session_state[widget_key] = current
+
+    with st.expander("Remover trechos da análise", expanded=False):
+        st.caption("Use quando um trecho já teve obra executada ou não deve entrar nesta simulação. Isso não apaga nada do banco, só remove deste visual.")
+        interval_key = f"{widget_key}_km_interval"
+        km_interval_text = st.text_input(
+            "Selecionar por intervalo de km",
+            key=interval_key,
+            placeholder="Ex.: 0 a 59",
+            help="Seleciona automaticamente os trechos que cruzam o intervalo digitado.",
+        )
+        interval = _parse_km_interval(km_interval_text)
+        interval_keys = _segment_keys_in_km_interval(options_df, interval)
+        if interval_keys:
+            interval_labels = [label_by_key[key] for key in interval_keys if key in label_by_key]
+            current = list(dict.fromkeys(current + interval_labels))
+            st.caption(f"{len(interval_labels)} trecho(s) encontrados no intervalo digitado.")
+            st.session_state[widget_key] = current
+        elif km_interval_text.strip():
+            st.caption("Não encontrei trechos nesse intervalo. Confira se digitou algo como 0 a 59.")
+
+        multiselect_args = {
+            "label": "Trechos removidos temporariamente",
+            "options": list(key_by_label.keys()),
+            "key": widget_key,
+            "placeholder": "Selecione um ou mais trechos",
+        }
+        if widget_key not in st.session_state:
+            multiselect_args["default"] = current
+        selected_labels = st.multiselect(**multiselect_args)
+    return {key_by_label[label] for label in selected_labels if label in key_by_label}
+
+
+def _apply_segment_exclusions(
+    table_df: pd.DataFrame | None,
+    budget_items: pd.DataFrame | None,
+    segments_df: pd.DataFrame | None,
+    excluded_keys: set[str],
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, int]:
+    """Aplica a remoção visual em tabela, orçamento e geometrias da tela econômica."""
+    if not excluded_keys:
+        return table_df, budget_items, segments_df, 0
+
+    removed = 0
+    if table_df is not None and not table_df.empty and "_segment_id" in table_df.columns:
+        table_df = table_df.copy()
+        table_df["_exclude_key"] = _segment_exclusion_key_series(
+            table_df,
+            "_segment_id",
+            "Sentido" if "Sentido" in table_df.columns else None,
+        )
+        before = len(table_df)
+        table_df = table_df[~table_df["_exclude_key"].astype(str).isin(excluded_keys)].drop(columns=["_exclude_key"]).copy()
+        removed = before - len(table_df)
+
+    if budget_items is not None and not budget_items.empty and "_segment_id" in budget_items.columns:
+        budget_items = budget_items.copy()
+        budget_items["_exclude_key"] = _segment_exclusion_key_series(
+            budget_items,
+            "_segment_id",
+            "Sentido" if "Sentido" in budget_items.columns else None,
+        )
+        budget_items = budget_items[~budget_items["_exclude_key"].astype(str).isin(excluded_keys)].drop(columns=["_exclude_key"]).copy()
+
+    if segments_df is not None and not segments_df.empty and "segment_id" in segments_df.columns:
+        segments_df = segments_df.copy()
+        segments_df["_exclude_key"] = _segment_exclusion_key_series(
+            segments_df,
+            "segment_id",
+            "sentido" if "sentido" in segments_df.columns else None,
+        )
+        segments_df = segments_df[~segments_df["_exclude_key"].astype(str).isin(excluded_keys)].drop(columns=["_exclude_key"]).copy()
+
+    return table_df, budget_items, segments_df, removed
 
 
 def _solution_text_color(color: str) -> str:
@@ -4411,6 +4563,8 @@ def _segment_detail_markup(row: dict, budget_items) -> str:
         and "_segment_id" in budget_items.columns
     ):
         src = budget_items[budget_items["_segment_id"] == int(sid)]
+        if "Sentido" in row and "Sentido" in src.columns:
+            src = src[src["Sentido"].astype(str) == str(row.get("Sentido"))]
         if not src.empty:
             # Por ANO + solução, em ordem cronológica (deixa claro o que é manutenção futura).
             has_ano = "Ano" in src.columns
@@ -4525,7 +4679,7 @@ def _render_solution_segments_map(segments_df, budget_items: pd.DataFrame, selec
     components.html(map_html, height=372, scrolling=False)
 
 
-# Cor da CLASSE de prioridade (README §13.2: faixas Crítica/Alta/Média/Baixa do IPT).
+# Cor da classe de prioridade. No Paragon vem da classe do IPI; no DNIT vem da escala própria.
 # Mesma paleta semáforo (vermelho→amarelo→cinza) usada nas telas.
 _PRIORITY_CLASS_COLORS = {
     "Prioridade Crítica": "#d71920",
@@ -4658,7 +4812,7 @@ def _render_economic_priority_table(
     view = view.head(400).reset_index(drop=True)
     has_sentido = "Sentido" in view.columns
     rows_markup = []
-    cspan = 11 if has_sentido else 10
+    cspan = 10 if has_sentido else 9
     _mem = prio_memory or {}
     for index, row in enumerate(view.to_dict("records"), start=1):
         snv = str(row["SNV"])
@@ -4684,7 +4838,6 @@ def _render_economic_priority_table(
             f"<td><label for='{prio_id}' style='cursor:pointer;display:inline-flex' title='Ver memória de cálculo do IPI'>"
             f"<span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{ipi_value:.2f}</span>"
             "</label></td>"
-            f"<td>{float(row.get('IPE', 0) or 0):.2f}</td>"
             f"<td>{_format_money(float(row['Custo econômico']))}</td>"
             "<td class='detail-toggle-cell'>"
             f"<label class='detail-toggle' for='{toggle_id}'><span class='caret'>▸</span>Ver soluções</label>"
@@ -4722,7 +4875,6 @@ def _render_economic_priority_table(
                   <th>Extensão</th>
                   <th>IAP</th>
                   <th>IPI</th>
-                  <th>IPE</th>
                   <th>Custo</th>
                   <th>Soluções</th>
                 </tr>
@@ -4821,11 +4973,24 @@ def _render_economic_page(
     if table_df is not None and not table_df.empty:
         total_snv = int(table_df["SNV"].dropna().astype(str).nunique()) if "SNV" in table_df else int(len(table_df))
 
+    excluded_keys = _render_segment_exclusion_filter(table_df, f"paragon_{road}_{scenario_key}")
+    table_df, budget_items, segments_df, removed_segments = _apply_segment_exclusions(
+        table_df,
+        budget_items,
+        segments_df,
+        excluded_keys,
+    )
+    if removed_segments:
+        st.info(f"{removed_segments} trecho(s) removido(s) temporariamente desta análise.")
+    if table_df is None or table_df.empty:
+        st.info("Sem dados para este recorte depois da remoção dos trechos.")
+        return
+
     if _has_missing_intervention_cost(table_df, budget_items):
         st.info("Sem dados de custo para este recorte.")
         return
 
-    annual_budget, horizon, ipi_min, horizon_start_year, horizon_end_year, scope_mode = _render_economic_controls(
+    annual_budget, horizon, _ipi_min, horizon_start_year, horizon_end_year, scope_mode = _render_economic_controls(
         table_df,
         budget_items,
         total_snv,
@@ -4855,10 +5020,6 @@ def _render_economic_page(
 
     # Tabela POR SEGMENTO (uma linha por segmento), ordenada por prioridade, custo real.
     seg_table = _segment_priority_table(prioritized_table, budget_items)
-    # Filtro de prioridade — agora por IPI real (0..100), maior = mais prioritário.
-    if ipi_min > 0 and "IPI" in seg_table.columns:
-        seg_table = seg_table[pd.to_numeric(seg_table["IPI"], errors="coerce").fillna(0) >= ipi_min].reset_index(drop=True)
-        seg_table["Prioridade"] = range(1, len(seg_table) + 1)
     top_segments = {int(x) for x in seg_table["_segment_id"]} if not seg_table.empty else set()
     use_scenario_segment_key = "Sentido" in seg_table.columns and seg_table["Sentido"].astype(str).nunique() > 1
     if use_scenario_segment_key:
@@ -5009,7 +5170,7 @@ def _render_economic_page(
         scenario_label=scenario_label,
         annual_budget=annual_budget,
         horizon=calc_horizon,
-        top_label="Todos" if ipi_min <= 0 else f"IPI ≥ {ipi_min:.0f}",
+        top_label="Todos",
         metrics=metrics,
         annual_coverage=annual_coverage,
         attended_snv_table=attended_snv_table,
@@ -5022,13 +5183,11 @@ def _render_economic_page(
     )
 
     # IAGON desta tela (Cenário econômico — orçamento × cobertura).
-    _nivel = "Todos" if ipi_min <= 0 else f"IPI ≥ {ipi_min:.0f}"
     _eco_dados = (
         f"Escopo selecionado: {scope_label}\n"
         f"Necessidade total no escopo: {_format_money(metrics.get('total_need', 0))}\n"
         f"Orçamento anual selecionado: {_format_money(annual_budget * 1_000_000)} · "
         f"Orçamento disponível no escopo: {_format_money(available_budget)} · "
-        f"Filtro de IPI: {_nivel}\n"
         f"Cobertura no escopo: {annual_coverage:.1f}% · "
         f"Trechos atendidos: {attended_km:.1f} de {scope_km:.1f} km ({scope_snv} segmentos no escopo)\n"
         f"Orçamento faltante p/ cobrir 100%: {_format_money(max(metrics.get('total_need', 0) - available_budget, 0))}\n"
@@ -5125,33 +5284,48 @@ def _render_economic_need_breakdown(table_df: pd.DataFrame | None, budget_items:
 # ----------------------------------------------------------------------------
 # Cenário Econômico DNIT
 # ----------------------------------------------------------------------------
-def _aplicar_indice_priorizacao_dnit(df: pd.DataFrame) -> pd.DataFrame:
-    """Versão DNIT do priorização — IRI 60% + IGG 40% (sem IAP/VMDA/DEF)."""
+def _aplicar_indice_priorizacao_dnit(
+    df: pd.DataFrame,
+    modo: str = DNIT_MODO_COMBINADO,
+) -> pd.DataFrame:
+    """Versão DNIT da priorização — IPT, IPE ou combinado, calculada por segmento."""
     if df is None or df.empty:
         return df
+    df = df.copy()
     has_sent = "Sentido" in df.columns
+
+    def _segment_priority_key(row: pd.Series) -> str:
+        segment_id = row.get("_segment_id")
+        if pd.notna(segment_id):
+            base = str(int(segment_id))
+        else:
+            base = f"{row.get('SNV')}|{row.get('Km Inicial')}|{row.get('Km Final')}"
+        if has_sent:
+            base = f"{base}␟{row.get('Sentido')}"
+        return base
+
+    segment_keys = df.apply(_segment_priority_key, axis=1)
     segmentos = [
         {
             "rodovia": row.get("Rodovia", ""),
-            "snv": (f"{row.get('SNV')}␟{row.get('Sentido')}" if has_sent else str(row.get("SNV"))),
+            "snv": segment_keys.loc[idx],
             "extensao_km": row.get("Extensão"),
             "iri": row.get("IRI"),
             "igg": row.get("IGG"),
+            "vmda": row.get("VMDA"),
+            "deflexao": row.get("DEF"),
             "custo": row.get("Custo econômico"),
         }
-        for _, row in df.iterrows()
+        for idx, row in df.iterrows()
     ]
-    prio = {item["snv"]: item for item in calcular_indice_priorizacao_dnit(segmentos)}
-    snv = (
-        df["SNV"].astype(str) + "␟" + df["Sentido"].astype(str)
-        if has_sent else df["SNV"].astype(str)
-    )
-    df = df.copy()
-    df["IPT"] = snv.map(lambda s: prio.get(s, {}).get("ip_tecnico", 0.0))
-    df["IPE"] = snv.map(lambda s: prio.get(s, {}).get("ip_economico", 0.0))
-    df["Priorização"] = snv.map(lambda s: prio.get(s, {}).get("priorizacao", 10.0))
-    df["Classe prioridade"] = snv.map(lambda s: prio.get(s, {}).get("classificacao", "Prioridade Baixa"))
-    df["_rank"] = snv.map(lambda s: prio.get(s, {}).get("ranking", len(prio) + 1))
+    prio = {item["snv"]: item for item in calcular_indice_priorizacao_dnit(segmentos, modo=modo)}
+    df["_dnit_priority_key"] = segment_keys
+    df["IPT"] = df["_dnit_priority_key"].map(lambda s: prio.get(s, {}).get("ip_tecnico", 0.0))
+    df["IPE"] = df["_dnit_priority_key"].map(lambda s: prio.get(s, {}).get("ip_economico", 0.0))
+    df["IP Combinado"] = df["_dnit_priority_key"].map(lambda s: prio.get(s, {}).get("ip_combinado", 0.0))
+    df["Priorização"] = df["_dnit_priority_key"].map(lambda s: prio.get(s, {}).get("priorizacao", 10.0))
+    df["Classe prioridade"] = df["_dnit_priority_key"].map(lambda s: prio.get(s, {}).get("classificacao", "Prioridade Baixa"))
+    df["_rank"] = df["_dnit_priority_key"].map(lambda s: prio.get(s, {}).get("ranking", len(prio) + 1))
     df = df.sort_values(["_rank", "Km Inicial"]).reset_index(drop=True)
     df["Prioridade"] = df["_rank"]
     return df
@@ -5162,9 +5336,9 @@ def _render_dnit_economic_controls(
     scenario_key: str,
     budget_items: pd.DataFrame | None = None,
     ano_base: int | None = None,
-) -> tuple[int, int, int, int, int, str]:
+) -> tuple[int, int, float, int, int, str]:
     """Mesmo layout do controle Paragon, mas com defaults compatíveis com DNIT."""
-    budget_col, horizon_col, scope_col, prio_col = st.columns([1, 1, 1.05, 1], gap="medium")
+    budget_col, horizon_col, scope_col, _spacer = st.columns([1, 1, 1.05, 1], gap="medium")
     start_year, end_year = _budget_year_bounds(
         budget_items,
         fallback_start=ano_base,
@@ -5208,18 +5382,59 @@ def _render_dnit_economic_controls(
         )
         st.markdown(f'<div class="economic-control-value">{_format_money(annual_budget * 1_000_000)}</div>', unsafe_allow_html=True)
 
-    with prio_col:
-        _filter_caption("Nível de prioridade")
-        prio_max = st.slider(
-            "Nível de prioridade", 1, 10, 10, 1,
-            key=f"dnit_prio_{scenario_key}",
-            label_visibility="collapsed",
-            help="1 = atender só o mais crítico; 10 = atender todos.",
-        )
-        rotulo = "Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}"
-        st.markdown(f'<div class="economic-control-value">{rotulo}</div>', unsafe_allow_html=True)
+    return annual_budget, horizon, 0.0, start_year, selected_end_year, scope_mode
 
-    return annual_budget, horizon, prio_max, start_year, selected_end_year, scope_mode
+
+def _dnit_priority_mode_options() -> dict[str, str]:
+    return {
+        "Combinada": DNIT_MODO_COMBINADO,
+        "Técnica": DNIT_MODO_TECNICO,
+        "Econômica": DNIT_MODO_ECONOMICO,
+    }
+
+
+def _dnit_priority_mode_from_state(key: str) -> str:
+    return _dnit_priority_mode_options().get(
+        str(st.session_state.get(key, "Combinada")),
+        DNIT_MODO_COMBINADO,
+    )
+
+
+def _render_dnit_priority_controls(view_key: str, sort_key: str, mode_key: str) -> tuple[str, str, str]:
+    options = _dnit_priority_mode_options()
+    current_label = str(st.session_state.get(mode_key, "Combinada"))
+    if current_label not in options:
+        current_label = "Combinada"
+
+    view_col, sort_col, mode_col, summary_col = st.columns([0.95, 0.75, 0.85, 1.1], gap="medium")
+    with view_col:
+        _filter_caption("Visualização")
+        view_mode = st.selectbox(
+            "Visualização da tabela DNIT",
+            ["Segmentos atendidos pelo orçamento", "Todos os segmentos"],
+            key=view_key,
+            label_visibility="collapsed",
+        )
+    with sort_col:
+        _filter_caption("Ordenar por")
+        sort_by = st.selectbox(
+            "Ordenar por",
+            ["Prioridade", "Km inicial"],
+            key=sort_key,
+            label_visibility="collapsed",
+        )
+    with mode_col:
+        _filter_caption("Índice de priorização")
+        selected_label = st.selectbox(
+            "Índice de priorização",
+            list(options.keys()),
+            index=list(options.keys()).index(current_label),
+            key=mode_key,
+            label_visibility="collapsed",
+        )
+    with summary_col:
+        st.empty()
+    return view_mode, sort_by, options[selected_label]
 
 
 def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
@@ -5267,7 +5482,7 @@ def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
 
 def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
     """Cenário econômico DNIT — usa orçamentos gravados em analise_gerencial_orcamentos
-    e priorização IRI+IGG. Espelha estrutura visual do Paragon."""
+    e priorização por IPT/IPE/combinado. Espelha estrutura visual do Paragon."""
     _dnit_keys = [str(key) for key in scenario_keys if key]
     if not _dnit_keys:
         st.info("Selecione ao menos um cenário para continuar.")
@@ -5298,10 +5513,25 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
     table = data["table"].copy()
     segments_df = data["segments"]
     budget_items = data["budget_items"]
+    excluded_keys = _render_segment_exclusion_filter(table, f"dnit_{scenario_scope_key}")
+    table, budget_items, segments_df, removed_segments = _apply_segment_exclusions(
+        table,
+        budget_items,
+        segments_df,
+        excluded_keys,
+    )
+    if removed_segments:
+        st.info(f"{removed_segments} trecho(s) removido(s) temporariamente desta análise.")
+    if table is None or table.empty:
+        st.info("Sem dados para este recorte depois da remoção dos trechos.")
+        return
     total_need = float(table["Custo estimado"].sum())
 
     ano_base = int(data.get("ano_base") or _budget_year_bounds(budget_items)[0])
-    annual_budget, horizon, prio_max, horizon_start_year, horizon_end_year, scope_mode = _render_dnit_economic_controls(
+    priority_mode_key = f"dnit_priority_mode_{scenario_scope_key}"
+    priority_view_key = f"dnit_priority_view_{scenario_scope_key}"
+    priority_mode = _dnit_priority_mode_from_state(priority_mode_key)
+    annual_budget, horizon, _prio_min, horizon_start_year, horizon_end_year, scope_mode = _render_dnit_economic_controls(
         total_need,
         scenario_scope_key,
         budget_items=budget_items,
@@ -5321,50 +5551,43 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
 
     # Recalcula total_need considerando o horizonte recortado.
     if budget_items is not None and not budget_items.empty:
-        custo_seg = budget_items.groupby("_segment_id")["Custo"].sum().to_dict()
-        table["Custo estimado"] = table["_segment_id"].astype(int).map(custo_seg).fillna(0.0)
+        table["_cost_segment_key"] = _economic_segment_key_series(table, "_segment_id", "Sentido")
+        budget_items = budget_items.copy()
+        budget_items["_cost_segment_key"] = _economic_segment_key_series(budget_items, "_segment_id", "Sentido")
+        custo_seg = budget_items.groupby("_cost_segment_key")["Custo"].sum().to_dict()
+        table["Custo estimado"] = table["_cost_segment_key"].map(custo_seg).fillna(0.0)
         total_need = float(budget_items["Custo"].sum())
 
-    # Priorização DNIT por segmento (SNV herda o pior).
+    # Priorização DNIT por segmento.
     work = table.copy()
     work["Custo econômico"] = work["Custo estimado"].astype(float)
-    work = _aplicar_indice_priorizacao_dnit(work)
+    work = _aplicar_indice_priorizacao_dnit(work, modo=priority_mode)
 
-    # Agrega por SNV (× Sentido quando há) pra construir snv_budget_table.
-    _dnit_gkeys = ["SNV", "Sentido"] if "Sentido" in work.columns else ["SNV"]
-    snv_budget_table = (
-        work.groupby(_dnit_gkeys, as_index=False)
-        .agg({
-            "Prioridade": "min",
-            "Priorização": "max",
-            "Classe prioridade": "first",
-            "Km Inicial": "min",
-            "Km Final": "max",
-            "Extensão": "sum",
-            "IRI": "mean",
-            "IGG": "mean",
-            "IPT": "max",
-            "IPE": "max",
-            "Custo econômico": "sum",
-            "Solução recomendada": lambda v: " + ".join(dict.fromkeys(str(x) for x in v if str(x).strip())),
-        })
-        .sort_values("Prioridade")
-        .reset_index(drop=True)
-    )
+    # Na Matriz, a carteira econômica deve abrir por segmento, sem consolidar por SRE.
+    snv_budget_table = work[work["Custo econômico"] > 0].copy()
+    if "_segment_id" in snv_budget_table.columns:
+        snv_budget_table["_attendance_key"] = _economic_segment_key_series(snv_budget_table, "_segment_id", "Sentido")
+    snv_budget_table = snv_budget_table.sort_values(["Prioridade", "Km Inicial", "Km Final"]).reset_index(drop=True)
     snv_budget_table["Prioridade"] = range(1, len(snv_budget_table) + 1)
 
-    # Filtro por nível de prioridade.
-    if prio_max < 10:
-        snv_budget_table = snv_budget_table[snv_budget_table["Priorização"] <= prio_max].reset_index(drop=True)
-
-    top_snvs = set(snv_budget_table["SNV"].astype(str))
+    top_segment_ids = (
+        set(snv_budget_table["_segment_id"].dropna().astype(int).astype(str))
+        if "_segment_id" in snv_budget_table.columns else set()
+    )
+    top_segment_keys = (
+        set(snv_budget_table["_attendance_key"].astype(str))
+        if "_attendance_key" in snv_budget_table.columns else top_segment_ids
+    )
     if budget_items is not None and not budget_items.empty:
-        budget_items = budget_items[budget_items["SNV"].astype(str).isin(top_snvs)].copy()
+        budget_items = budget_items.copy()
+        if "_segment_id" in budget_items.columns:
+            budget_items["_attendance_key"] = _economic_segment_key_series(budget_items, "_segment_id", "Sentido")
+            budget_items = budget_items[budget_items["_attendance_key"].astype(str).isin(top_segment_keys)].copy()
+        else:
+            budget_items = budget_items[budget_items["SNV"].astype(str).isin(set(snv_budget_table["SNV"].astype(str)))].copy()
 
     scope_km = float(snv_budget_table["Extensão"].sum()) if not snv_budget_table.empty else 0.0
-    attended_snv_table, attended_km, attended_ids = _segment_attendance(
-        snv_budget_table, budget_items, available_budget_mi, work
-    )
+    attended_snv_table, attended_km, attended_ids = _segment_attendance_seg(snv_budget_table, available_budget_mi)
     annual_coverage = min(available_budget / total_need * 100, 100) if total_need else 0
     faltante = max(total_need - available_budget, 0.0)
 
@@ -5382,10 +5605,12 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
     ])
     _render_economic_need_breakdown(snv_budget_table, budget_items)
 
-    # Mapa do cenário: restringe os segmentos aos SNVs que passaram pelo filtro de
-    # nível de prioridade. Sem isso, o mapa ignora o slider.
+    # Mapa do cenário: restringe os segmentos aos trechos que passaram pelo filtro de prioridade.
     if segments_df is not None and not segments_df.empty:
-        scoped_segments = segments_df[segments_df["sre"].astype(str).isin(top_snvs)].copy()
+        if top_segment_ids and "segment_id" in segments_df.columns:
+            scoped_segments = segments_df[segments_df["segment_id"].astype(int).astype(str).isin(top_segment_ids)].copy()
+        else:
+            scoped_segments = segments_df[segments_df["sre"].astype(str).isin(set(snv_budget_table["SNV"].astype(str)))].copy()
         st.markdown(
             '<section class="solution-distribution" style="padding-bottom:16px">'
             '<div class="solution-distribution-head" style="margin-bottom:0">'
@@ -5433,13 +5658,25 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
             color_fn=lambda label: solucao_iri_color.get(str(label), "#9fb9d9"),
         )
 
-    # Tabela de SNVs com priorização DNIT.
-    _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, annual_budget)
+    # Tabela de segmentos com priorização DNIT.
+    dnit_view_mode, dnit_sort_by, _ = _render_dnit_priority_controls(
+        priority_view_key,
+        f"dnit_priority_sort_{scenario_scope_key}",
+        priority_mode_key,
+    )
+    _render_dnit_economic_priority_table(
+        snv_budget_table,
+        attended_snv_table,
+        annual_budget,
+        budget_items,
+        dnit_sort_by,
+        dnit_view_mode,
+    )
 
     # Botão de exportação do PDF (mesma infra do Paragon, com adaptações DNIT).
     metrics = {"total_need": total_need, "total_budget": available_budget}
     scope_snv = int(len(snv_budget_table))
-    top_label = "Todos" if prio_max >= 10 else f"Nível ≤ {prio_max}"
+    top_label = "Todos"
 
     # PDF espera coluna "classe_iap" nos segmentos; para DNIT, usa a faixa IRI.
     pdf_segments_df = segments_df
@@ -5468,21 +5705,71 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
     )
 
 
-def _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, annual_budget: int) -> None:
-    """Tabela enxuta para a página DNIT — Prior. + SRE + Km + IRI/IGG + Priorização + Solução + Custo."""
+def _render_dnit_economic_priority_table(
+    snv_budget_table,
+    attended_snv_table,
+    annual_budget: int,
+    budget_items: pd.DataFrame | None = None,
+    sort_by: str = "Prioridade",
+    view_mode: str = "Segmentos atendidos pelo orçamento",
+) -> None:
+    """Tabela enxuta para a página DNIT — cada linha representa um segmento priorizado."""
     if snv_budget_table is None or snv_budget_table.empty:
-        st.info("Sem SNVs no filtro atual.")
+        st.info("Sem segmentos no filtro atual.")
         return
 
-    attended_sres = set(attended_snv_table["SNV"].astype(str)) if attended_snv_table is not None and not attended_snv_table.empty else set()
-    has_sentido = "Sentido" in snv_budget_table.columns
+    attended_segments: set[str] = set()
+    if attended_snv_table is not None and not attended_snv_table.empty:
+        if "_attendance_key" in attended_snv_table.columns:
+            attended_segments = set(attended_snv_table["_attendance_key"].astype(str))
+        elif "_segment_id" in attended_snv_table.columns:
+            attended_segments = set(attended_snv_table["_segment_id"].dropna().astype(int).astype(str))
+
+    if view_mode == "Segmentos atendidos pelo orçamento":
+        view = attended_snv_table.copy() if attended_snv_table is not None else pd.DataFrame()
+        title = "Segmentos atendidos pelo orçamento anual"
+        subtitle = f"Carteira inicial considerando {_format_money((annual_budget or 0) * 1_000_000)} disponíveis no ano"
+    else:
+        view = snv_budget_table.copy()
+        title = "Fila executiva de aplicação do orçamento"
+        subtitle = "Segmentos priorizados conforme o cenário selecionado"
+
+    if view.empty:
+        if view_mode == "Segmentos atendidos pelo orçamento":
+            st.markdown('<div class="pagination-summary">Nenhum segmento cabe no orçamento anual selecionado.</div>', unsafe_allow_html=True)
+        else:
+            st.info("Sem segmentos no filtro atual.")
+        return
+
+    total_seg = int(len(view))
+    extra = "" if total_seg <= 400 else " · exibindo os primeiros 400"
+    st.markdown(
+        f'<div class="pagination-summary">Exibindo {total_seg} segmentos · {_format_km(float(view["Extensão"].sum()))} km · {_format_money(float(view["Custo econômico"].sum()))}{extra}</div>',
+        unsafe_allow_html=True,
+    )
+
+    has_sentido = "Sentido" in view.columns
+    if sort_by == "Km inicial":
+        sort_cols = (["Sentido"] if has_sentido else []) + ["Km Inicial", "Km Final"]
+        view = view.sort_values([c for c in sort_cols if c in view.columns], kind="stable")
+    elif "Prioridade" in view.columns:
+        view = view.sort_values("Prioridade", kind="stable")
+    view = view.head(400).reset_index(drop=True)
+
     rows_html = []
-    for _, row in snv_budget_table.iterrows():
+    cspan = 14 if has_sentido else 13
+    for _, row in view.iterrows():
+        row_pos = len(rows_html) + 1
         sre = str(row.get("SNV"))
-        atendido = sre in attended_sres
+        segment_key = str(row.get("_attendance_key")) if "_attendance_key" in row.index else ""
+        if not segment_key and pd.notna(row.get("_segment_id")):
+            segment_key = str(int(row.get("_segment_id")))
+        atendido = segment_key in attended_segments
         sentido_td = f"<td>{html.escape(str(row.get('Sentido', '')))}</td>" if has_sentido else ""
+        toggle_id = f"dnit-segment-detail-{row_pos}"
+        detail_markup = _segment_detail_markup(row.to_dict(), budget_items)
         rows_html.append(
-            "<tr>"
+            "<tr class='snv-row'>"
             f"<td>{int(row['Prioridade'])}</td>"
             f"<td>{html.escape(sre)}</td>"
             + sentido_td +
@@ -5490,13 +5777,21 @@ def _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, a
             f"<td>{_format_km(float(row['Km Final']))}</td>"
             f"<td>{_format_km(float(row['Extensão']))} km</td>"
             f"<td>{float(row.get('IRI', 0) or 0):.2f}</td>"
-            f"<td>{float(row.get('IGG', 0) or 0):.0f}</td>"
             f"<td>{float(row.get('IPT', 0) or 0):.2f}</td>"
             f"<td>{float(row.get('IPE', 0) or 0):.2f}</td>"
-            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{int(round(float(row.get('Priorização', 0) or 0)))}</span></td>"
-            f"<td>{html.escape(str(row.get('Solução recomendada', '')))}</td>"
+            f"<td>{float(row.get('IP Combinado', 0) or 0):.2f}</td>"
+            f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{_priority_class_color(row.get('Classe prioridade'))}'></span>{float(row.get('Priorização', 0) or 0):.2f}</span></td>"
+            "<td class='detail-toggle-cell'>"
+            f"<label class='detail-toggle' for='{toggle_id}'><span class='caret'>▸</span>Ver soluções</label>"
+            "</td>"
             f"<td>{_format_money(float(row['Custo econômico']))}</td>"
             f"<td>{'✓ Atendido' if atendido else '— Fora'}</td>"
+            "</tr>"
+            "<tr class='detail-row'>"
+            f"<td class='detail-cell' colspan='{cspan}'>"
+            f"<input type='checkbox' id='{toggle_id}' class='detail-checkbox'>"
+            f"<div class='detail-content'>{detail_markup}</div>"
+            "</td>"
             "</tr>"
         )
     st.markdown(
@@ -5505,13 +5800,13 @@ def _render_dnit_economic_priority_table(snv_budget_table, attended_snv_table, a
           <div class="solution-distribution-head" style="margin-bottom:8px">
             <div class="solution-distribution-title">
               <div class="solution-distribution-icon">◎</div>
-              <div><h3>SNVs atendidos pelo orçamento anual</h3><p>Carteira priorizada · custo do banco (Matriz Revitaliza DNIT/RO)</p></div>
+              <div><h3>{html.escape(title)}</h3><p>{html.escape(subtitle)}</p></div>
             </div>
           </div>
           <table class="solution-table">
             <thead><tr>
               <th>PRIOR.</th><th>SRE</th>{'<th>SENTIDO</th>' if has_sentido else ''}<th>KM INICIAL</th><th>KM FINAL</th><th>EXTENSÃO</th>
-              <th>IRI</th><th>IGG</th><th>IPT</th><th>IPE</th><th>PRIORIZAÇÃO</th>
+              <th>IRI</th><th>IPT</th><th>IPE</th><th>COMBINADO</th><th>ÍNDICE USADO</th>
               <th>SOLUÇÃO RECOMENDADA</th><th>CUSTO</th><th>STATUS</th>
             </tr></thead>
             <tbody>{''.join(rows_html)}</tbody>
@@ -8041,6 +8336,8 @@ def _build_network_overview_impl(
                                     "extensao_km": row.get("Extensão"),
                                     "iri": row.get("IRI"),
                                     "igg": row.get("IGG"),
+                                    "vmda": row.get("VMDA"),
+                                    "deflexao": row.get("DEF"),
                                     "custo": row.get("Custo econômico"),
                                 }
                                 for _, row in work.iterrows()
@@ -8515,7 +8812,7 @@ def _iagon_road_detail(road: str) -> tuple[list[tuple[int, float]], list[tuple[s
             trechos.append(
                 {
                     "snv": str(snv),
-                    "priorizacao": int(round(float(p.get("priorizacao", 0) or 0))),
+                    "ipi": round(float(p.get("ipi", p.get("ip_tecnico", p.get("priorizacao", 0))) or 0), 2),
                     "classe": str(p.get("classificacao", "-")).replace("Prioridade ", ""),
                     "rank": int(p.get("ranking", 999)),
                     "ext": round(float(ext_by.get(snv, 0) or 0), 1),
@@ -8765,17 +9062,12 @@ def _iagon_dnit_detail(road: str) -> dict | None:
         (str(name), round(float(km), 1)) for name, km in sdist_nuc.items()
     ]
 
-    # Custo anual no horizonte 8 anos (mantém paridade com Paragon no contexto).
+    # Custo anual conforme todos os anos cadastrados no orçamento.
     cby_dnit: list[tuple[int, float]] = []
     if budget_items is not None and not budget_items.empty:
-        ano_base, _ = _budget_year_bounds(budget_items, fallback_start=data.get("ano_base"))
-        sub = budget_items[
-            (budget_items["Ano"] >= ano_base)
-            & (budget_items["Ano"] <= ano_base + _ECONOMIC_DEFAULT_HORIZON - 1)
-        ]
         cby_dnit = [
             (int(r["Ano"]), float(r["Custo"]))
-            for _, r in sub.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano").iterrows()
+            for _, r in budget_items.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano").iterrows()
         ]
 
     # SREs com priorização DNIT — agrega extensão por SRE (soma dos segmentos).
@@ -8922,8 +9214,8 @@ def _build_iagon_context() -> tuple[str, dict]:
         paragon_sol_lines.append(f"- {road}: {sol_txt}")
         if trechos:
             tl = "\n".join(
-                f"  {t['rank']}º · {t['snv']} · {t['classe']} · priorização **{t['priorizacao']}** "
-                f"(escala 1–10, menor=pior) · {t['ext']:.0f} km · IAP {t['iap']:.2f} · "
+                f"  {t['rank']}º · {t['snv']} · {t['classe']} · IPI **{t['ipi']:.2f}** "
+                f"(maior = mais prioritário) · {t['ext']:.0f} km · IAP {t['iap']:.2f} · "
                 f"mix de soluções: {t['mix_solucoes']}"
                 for t in trechos
             )
@@ -8936,7 +9228,8 @@ def _build_iagon_context() -> tuple[str, dict]:
                 or "sem programação"
             )
             sres_txt = "\n".join(
-                f"  {s['rank']}º · {s['sre']} · {s['classe']} · priorização **{s['priorizacao']}** · "
+                f"  {s['rank']}º · {s['sre']} · {s['classe']} · priorização **{s['priorizacao']}** "
+                f"(escala 0–100, maior = mais prioritário) · "
                 f"{s['ext']:.0f} km · IRI {s['iri']:.2f} · IGG {s['igg']:.0f}"
                 for s in dnit["sres"]
             )
@@ -8944,7 +9237,7 @@ def _build_iagon_context() -> tuple[str, dict]:
                 f"### {road} (DNIT / Matriz Revitaliza DNIT/RO)\n"
                 f"- Necessidade: {_format_money(dnit['necessidade'])} · {dnit['ext_km']} km\n"
                 f"- Soluções DNIT (nomes técnicos): {sols_txt}\n"
-                f"- Custo por ano (horizonte {_ECONOMIC_DEFAULT_HORIZON}a a partir de {dnit['ano_base']}): {anos_dnit}\n"
+                f"- Custo por ano (anos cadastrados no orçamento): {anos_dnit}\n"
                 f"- SREs ordenados por prioridade:\n{sres_txt}"
             )
 
@@ -9029,7 +9322,7 @@ Nomes Paragon (use EXATAMENTE estes): *Reconstrução, Fresagem e recomposição
 
 ## 5) Soluções e SREs DNIT (Matriz Revitaliza DNIT/RO)
 DNIT usa nomes técnicos: *Micro(0,8), Micro(1,5), FR5 + CBUQ(3) + CBUQ(4), Drenagem, Reconstrução*.
-Não confunda com Paragon. Cada metodologia tem o próprio cálculo de priorização (DNIT usa IRI+IGG, sem VMDA/DEF).
+Não confunda com Paragon. Cada metodologia tem o próprio cálculo de priorização, mas ambas usam escala **0–100**. DNIT/Matriz usa IPT, IPE ou combinado a partir de VMDA, IRI, DEF e custo.
 {chr(10).join(dnit_blocks) or "_Sem rodovias DNIT no momento_"}
 
 ## 6) Projeção (evolução ano a ano)
@@ -9262,16 +9555,14 @@ def _iagon_render_chart(
             if not data.get("available"):
                 return None
             bi = data.get("budget_items")
-            ano_base, _ = _budget_year_bounds(bi, fallback_start=data.get("ano_base"))
             if bi is None or bi.empty:
                 return None
-            bi = bi[(bi["Ano"] >= ano_base) & (bi["Ano"] <= ano_base + _ECONOMIC_DEFAULT_HORIZON - 1)]
             grp = bi.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano")
             title_extra = "DNIT · Matriz Revitaliza"
             color = "#f2a51a"
         else:
             data = get_solutions_data(rodovia)
-            bi = _limit_budget_to_horizon(data.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON)
+            bi = data.get("budget_items")
             if bi is None or bi.empty:
                 return None
             grp = bi.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano")
@@ -9309,7 +9600,7 @@ def _iagon_render_chart(
             ext = float(t["Extensão"].sum())
             iap_med = float((t["IAP"] * t["Extensão"]).sum() / ext) if ext > 0 else 0.0
             km_below = float(t[t["IAP"] < IAP_META]["Extensão"].sum())
-            bi = _limit_budget_to_horizon(d.get("budget_items"), _ECONOMIC_DEFAULT_HORIZON)
+            bi = d.get("budget_items")
             custo = float(bi["Custo"].sum()) if bi is not None and not bi.empty else 0.0
             rows.append({"Rodovia": r, "IAP": iap_med, "km_below": km_below, "ext": ext, "custo": custo})
         if not rows:
@@ -9337,7 +9628,7 @@ def _iagon_render_chart(
         # Necessidade R$ mi + sobreposição km abaixo da meta
         bars2 = ax2.bar(labels, custo_mi, color="#f2a51a", edgecolor="#06222b", linewidth=0.6, width=0.55)
         ax2.set_ylabel("Necessidade (R$ milhões)")
-        ax2.set_title("Necessidade no horizonte 8 anos")
+        ax2.set_title("Necessidade nos anos cadastrados")
         ax2.grid(True, axis="y", linestyle=":", alpha=0.5)
         for b, v, kb in zip(bars2, custo_mi, km_below):
             ax2.text(b.get_x() + b.get_width() / 2, v + max(custo_mi) * 0.02,
@@ -10083,7 +10374,7 @@ def _iagon_export(report_data: dict, escopo: str, formato: str, titulo: str | No
         )
         primary = sheets["Malha"]
         title = titulo or "Relatório executivo da malha — Paragon/DNIT"
-        subtitle = f"Necessidade no horizonte de {_ECONOMIC_DEFAULT_HORIZON} anos · valores do orçamento cadastrado"
+        subtitle = "Necessidade conforme anos cadastrados no orçamento"
         base = "iagon_relatorio_malha"
     else:
         cby = info.get("cost_by_year", [])
@@ -10093,19 +10384,24 @@ def _iagon_export(report_data: dict, escopo: str, formato: str, titulo: str | No
 
         trechos = info.get("trechos", [])
         if trechos:
-            tr_headers = ["#", "SNV", "Prioridade", "Priorização", "Extensão (km)", "IAP", "Solução"]
+            tr_headers = ["#", "SNV", "Prioridade", "IPI", "Extensão (km)", "IAP", "Solução"]
             tr_rows = [
-                [str(t["rank"]), t["snv"], t["classe"], str(int(round(t["priorizacao"]))), f"{t['ext']:.0f}", f"{t['iap']:.2f}", t["solucao"]]
+                [str(t["rank"]), t["snv"], t["classe"], f"{float(t.get('ipi', t.get('priorizacao', 0)) or 0):.2f}", f"{t['ext']:.0f}", f"{t['iap']:.2f}", t["solucao"]]
                 for t in trechos
             ]
             sections.append(("Trechos prioritários (SNV)", tr_headers, tr_rows))
             sheets["Trechos"] = pd.DataFrame(
-                [[t["rank"], t["snv"], t["classe"], t["priorizacao"], t["ext"], t["iap"], t["solucao"]] for t in trechos],
-                columns=["Ranking", "SNV", "Prioridade", "Priorização", "Extensão (km)", "IAP", "Solução"],
+                [[t["rank"], t["snv"], t["classe"], float(t.get("ipi", t.get("priorizacao", 0)) or 0), t["ext"], t["iap"], t["solucao"]] for t in trechos],
+                columns=["Ranking", "SNV", "Prioridade", "IPI", "Extensão (km)", "IAP", "Solução"],
             )
         primary = sheets.get("Trechos", sheets["Custo por ano"])
         title = titulo or f"Relatório {label}"
-        subtitle = f"Necessidade no horizonte de {_ECONOMIC_DEFAULT_HORIZON} anos · dados do banco"
+        if cby:
+            years = [int(year) for year, _ in cby]
+            period = f"{min(years)}-{max(years)}" if min(years) != max(years) else str(min(years))
+            subtitle = f"Necessidade conforme orçamento cadastrado · período {period}"
+        else:
+            subtitle = "Necessidade conforme dados do banco"
         base = f"iagon_relatorio_{info['code']}"
 
     if fmt == "csv":

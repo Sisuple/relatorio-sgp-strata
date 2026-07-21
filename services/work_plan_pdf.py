@@ -215,22 +215,21 @@ def _hbar_chart(
 
 
 def _snv_table(attended: pd.DataFrame) -> Table:
-    """Tabela dos SNV atendidos: ranking, SRE, extensão, IPT, IPE, priorização e custo."""
-    header = ["#", "SRE", "Extensão", "IPT", "IPE", "Prioriz.", "Custo"]
+    """Tabela dos SNV atendidos: ranking, SRE, extensão, IPI e custo."""
+    header = ["#", "SRE", "Extensão", "IPI", "Custo"]
     rows: list[list[Any]] = [header]
     for i, r in enumerate(attended.to_dict("records"), start=1):
+        ipi = r.get("IPI", r.get("IPT", 0))
         rows.append(
             [
                 str(i),
                 _truncate(str(r.get("SNV", "")), 16),
                 _km(r.get("Extensão", 0)),
-                f"{float(r.get('IPT', 0) or 0):.2f}",
-                f"{float(r.get('IPE', 0) or 0):.2f}",
-                f"{float(r.get('Priorização', 0) or 0):.2f}",
+                f"{float(ipi or 0):.2f}",
                 _money(r.get("Custo econômico", 0)),
             ]
         )
-    col_w = [22, 120, 70, 50, 50, 60, None]
+    col_w = [22, 120, 70, 55, None]
     used = sum(w for w in col_w if w)
     col_w[-1] = _CONTENT_W - used
     table = Table(rows, colWidths=col_w, repeatRows=1)

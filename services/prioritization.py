@@ -37,11 +37,6 @@ import pandas as pd
 
 from services.ipi import calcular_ipi_lote, classificar_prioridade_ipi
 
-# Pesos mantidos apenas por compatibilidade com funções antigas/DNIT.
-PESO_VMDA = 0.50  # tráfego / importância operacional (log, invertido)
-PESO_ICDS = 0.30  # condição de superfície
-PESO_ICDP = 0.20  # condição de profundidade
-
 # Pesos da priorização final (técnico x econômico) — usados SÓ na versão DNIT.
 PESO_TECNICO = 0.60
 PESO_ECONOMICO = 0.40
@@ -85,11 +80,6 @@ def _valor_valido(valor: Any) -> float | None:
     return numero
 
 
-def _media(valores: list[float]) -> float | None:
-    """Média aritmética simples; retorna None se a lista estiver vazia."""
-    return sum(valores) / len(valores) if valores else None
-
-
 def _normalizar_linear(valor: float | None, minimo: float, maximo: float) -> float:
     """Normalização linear (v - min)/(max - min), fixada em [0, 1].
 
@@ -98,20 +88,6 @@ def _normalizar_linear(valor: float | None, minimo: float, maximo: float) -> flo
     if valor is None or maximo == minimo:
         return 0.0
     return min(1.0, max(0.0, (valor - minimo) / (maximo - minimo)))
-
-
-def _normalizar_log(valor: float | None, minimo: float, maximo: float) -> float:
-    """Normalização logarítmica, fixada em [0, 1].
-
-        (LOG(v) - LOG(min)) / (LOG(max) - LOG(min))
-
-    Retorna 0 (neutro) para valor/min/max não positivos ou quando max == min.
-    """
-    if valor is None or valor <= 0 or minimo <= 0 or maximo <= 0 or maximo == minimo:
-        return 0.0
-    n = (math.log(valor) - math.log(minimo)) / (math.log(maximo) - math.log(minimo))
-    return min(1.0, max(0.0, n))
-
 
 def _min_max(valores: list[float]) -> tuple[float, float]:
     """Devolve (mínimo, máximo) da lista; (0.0, 0.0) quando vazia."""
@@ -361,36 +337,80 @@ def calcular_indice_priorizacao_segmento(segmentos: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# DNIT — sem IAP, VMDA ou DEF. Usa IRI (60%) + IGG (40%) por segmento.
+# DNIT — adaptação da priorização antiga da Matriz Cadastrada.
 # ---------------------------------------------------------------------------
-PESO_IRI_DNIT = 0.60
-PESO_IGG_DNIT = 0.40
+PESO_VMDA_DNIT = 0.40
+PESO_IRI_DNIT = 0.35
+PESO_DEF_DNIT = 0.25
+DNIT_MODO_TECNICO = "tecnica"
+DNIT_MODO_ECONOMICO = "economica"
+DNIT_MODO_COMBINADO = "combinada"
 
 
-def calcular_indice_priorizacao_dnit(segmentos: list[dict]) -> list[dict]:
-    """Versão DNIT: usa IRI e IGG no IPT (sem VMDA/DEF), mesma escala invertida.
+def _normalizar_log(valor: float | None, minimo: float, maximo: float) -> float:
+    """Normalização logarítmica usada na priorização antiga da Matriz.
 
-    Cada SEGMENTO gera um IPT/IPE/Priorização; o SNV herda o pior segmento.
-    Mantém a mesma shape de saída de `calcular_indice_priorizacao`.
+    Só calcula quando valor, mínimo e máximo são positivos. Se não houver faixa
+    válida, retorna 0 para não inventar prioridade.
+    """
+    if valor is None or valor <= 0 or minimo <= 0 or maximo <= 0 or minimo == maximo:
+        return 0.0
+    den = math.log(maximo) - math.log(minimo)
+    if den == 0:
+        return 0.0
+    return min(1.0, max(0.0, (math.log(valor) - math.log(minimo)) / den))
+
+
+def _classificar_prioridade_direta(valor: float) -> str:
+    """Classe para índice direto 0..100, onde maior valor = maior prioridade."""
+    if valor >= 70:
+        return "Prioridade Crítica"
+    if valor >= 50:
+        return "Prioridade Alta"
+    if valor >= 30:
+        return "Prioridade Média"
+    return "Prioridade Baixa"
+
+
+def calcular_indice_priorizacao_dnit(
+    segmentos: list[dict],
+    modo: str = DNIT_MODO_COMBINADO,
+) -> list[dict]:
+    """Prioriza a Matriz Cadastrada por IPT, IPE ou índice combinado.
+
+    Adaptação da lógica antiga:
+    - IPT = 100 * (0,40*VMDA_n + 0,35*IRI_n + 0,25*DEF_n)
+    - Eficiência = IPT / custo_por_km * 1000
+    - IPE = 100 * eficiência normalizada por log
+    - Combinada = 0,60*IPT + 0,40*IPE
+
+    A escala é direta: maior valor = maior prioridade.
     """
     if not segmentos:
         return []
 
     iri_seg = [v for s in segmentos if (v := _valor_valido(s.get("iri"))) is not None]
-    igg_seg = [v for s in segmentos if (v := _valor_valido(s.get("igg"))) is not None]
+    vmda_seg = [v for s in segmentos if (v := _valor_valido(s.get("vmda"))) is not None and v > 0]
+    def_seg = [v for s in segmentos if (v := _valor_valido(s.get("deflexao", s.get("def")))) is not None and v > 0]
     iri_min, iri_max = _min_max(iri_seg)
-    igg_min, igg_max = _min_max(igg_seg)
+    vmda_min, vmda_max = _min_max(vmda_seg)
+    def_min, def_max = _min_max(def_seg)
 
     seg_records: list[dict] = []
     for s in segmentos:
         snv = str(s.get("snv"))
         iri = _valor_valido(s.get("iri"))
         igg = _valor_valido(s.get("igg"))
-        iri_n = _normalizar_linear(iri, iri_min, iri_max)
-        igg_n = _normalizar_linear(igg, igg_min, igg_max)
-        # IPT DNIT (0..10): IRI e IGG são ambos LINEARES e DIRETOS (pior condição
-        # -> maior IPT). Diferente do Paragon, aqui não há termo invertido.
-        ip_tecnico = 10.0 * (PESO_IRI_DNIT * iri_n + PESO_IGG_DNIT * igg_n)
+        vmda = _valor_valido(s.get("vmda"))
+        deflexao = _valor_valido(s.get("deflexao", s.get("def")))
+        iri_n = _normalizar_log(iri, iri_min, iri_max)
+        vmda_n = _normalizar_log(vmda, vmda_min, vmda_max)
+        def_n = _normalizar_log(deflexao, def_min, def_max)
+        ip_tecnico = 100.0 * (
+            PESO_VMDA_DNIT * vmda_n
+            + PESO_IRI_DNIT * iri_n
+            + PESO_DEF_DNIT * def_n
+        )
 
         ext = _valor_valido(s.get("extensao_km")) or 0.0
         custo = _valor_valido(s.get("custo")) or 0.0
@@ -405,24 +425,34 @@ def calcular_indice_priorizacao_dnit(segmentos: list[dict]) -> list[dict]:
                 "custo": custo,
                 "iri": iri or 0.0,
                 "igg": igg or 0.0,
+                "vmda": vmda or 0.0,
+                "deflexao": deflexao or 0.0,
                 "iri_n": iri_n,
-                "igg_n": igg_n,
+                "vmda_n": vmda_n,
+                "def_n": def_n,
                 "ip_tecnico": ip_tecnico,
                 "custo_km": custo_km,
                 "eficiencia": eficiencia,
             }
         )
 
-    eficiencias = [r["eficiencia"] for r in seg_records]
+    eficiencias = [r["eficiencia"] for r in seg_records if r["eficiencia"] > 0]
     efic_min, efic_max = _min_max(eficiencias)
+    modo_normalizado = str(modo or DNIT_MODO_COMBINADO).strip().lower()
+    if modo_normalizado not in {DNIT_MODO_TECNICO, DNIT_MODO_ECONOMICO, DNIT_MODO_COMBINADO}:
+        modo_normalizado = DNIT_MODO_COMBINADO
     for r in seg_records:
-        ipe = (r["eficiencia"] - efic_min) / (efic_max - efic_min) * 10.0 if efic_max > efic_min else 0.0
+        ipe = 100.0 * _normalizar_log(r["eficiencia"], efic_min, efic_max)
         r["ip_economico"] = ipe
-        # Nota bruta = técnico (IPT, 60%) + econômico (IPE, 40%); a priorização
-        # do segmento INVERTE essa nota (10 - bruta) para a escala 0..10 onde
-        # MENOR = mais crítico (mesma leitura de classificar_prioridade).
-        bruta = PESO_TECNICO * r["ip_tecnico"] + PESO_ECONOMICO * ipe
-        r["priorizacao_segmento"] = int(round(10.0 - bruta))
+        combinado = PESO_TECNICO * r["ip_tecnico"] + PESO_ECONOMICO * ipe
+        if modo_normalizado == DNIT_MODO_TECNICO:
+            score = r["ip_tecnico"]
+        elif modo_normalizado == DNIT_MODO_ECONOMICO:
+            score = ipe
+        else:
+            score = combinado
+        r["ip_combinado"] = combinado
+        r["priorizacao_segmento"] = score
 
     snvs: dict[str, dict] = {}
     ordem: list[str] = []
@@ -439,9 +469,8 @@ def calcular_indice_priorizacao_dnit(segmentos: list[dict]) -> list[dict]:
             ordem.append(snv)
         snvs[snv]["extensao_km"] += r["extensao_km"]
         snvs[snv]["custo"] += r["custo"]
-        # Pior segmento = menor priorização; em empate, o de maior IPT (pior
-        # condição técnica) — o SNV herda esse segmento.
-        if r["priorizacao_segmento"] < snvs[snv]["pior"]["priorizacao_segmento"]:
+        # Pior/mais prioritário = maior índice na escala direta.
+        if r["priorizacao_segmento"] > snvs[snv]["pior"]["priorizacao_segmento"]:
             snvs[snv]["pior"] = r
         elif (
             r["priorizacao_segmento"] == snvs[snv]["pior"]["priorizacao_segmento"]
@@ -461,20 +490,24 @@ def calcular_indice_priorizacao_dnit(segmentos: list[dict]) -> list[dict]:
                 "extensao_km": round(data["extensao_km"], 2),
                 "iri": round(pior["iri"], 4),
                 "igg": round(pior["igg"], 4),
+                "vmda": round(pior["vmda"], 2),
+                "deflexao": round(pior["deflexao"], 4),
                 "iri_normalizado": round(pior["iri_n"], 4),
-                "igg_normalizado": round(pior["igg_n"], 4),
+                "vmda_normalizado": round(pior["vmda_n"], 4),
+                "def_normalizado": round(pior["def_n"], 4),
                 "ip_tecnico": round(pior["ip_tecnico"], 4),
                 "custo_km": round(custo_km_total, 2),
                 "eficiencia": round(pior["eficiencia"], 6),
                 "ip_economico": round(pior["ip_economico"], 4),
-                "priorizacao": pior["priorizacao_segmento"],
-                "classificacao": classificar_prioridade(pior["priorizacao_segmento"]),
+                "ip_combinado": round(pior["ip_combinado"], 4),
+                "priorizacao": round(pior["priorizacao_segmento"], 4),
+                "classificacao": _classificar_prioridade_direta(pior["priorizacao_segmento"]),
                 "ranking": 0,
             }
         )
 
     resultado.sort(
-        key=lambda r: (r["priorizacao"], -r["ip_tecnico"], -r["eficiencia"]),
+        key=lambda r: (-r["priorizacao"], -r["ip_tecnico"], -r["eficiencia"]),
     )
     for posicao, item in enumerate(resultado, start=1):
         item["ranking"] = posicao

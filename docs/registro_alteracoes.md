@@ -733,5 +733,174 @@ Observação sobre os nomes:
 
 - a tabela Paragon agora mostra `IPI`, não a prioridade antiga de 1 a 10;
 - a ordem da fila usa o maior IPI primeiro;
-- o filtro antigo de `Nível de prioridade` foi trocado por `IPI mínimo`;
+- o filtro antigo de `Nível de prioridade` foi removido; depois também removi o `IPI mínimo`;
 - ainda existe um apelido interno chamado `IPT` em algumas funções antigas, mas ele recebe o mesmo valor do `IPI` para não quebrar o restante do painel.
+
+---
+
+## Limpeza feita depois da revisão geral
+
+Depois da revisão geral do painel, ajustei alguns pontos que ainda podiam confundir a leitura.
+
+O que foi limpo:
+
+- textos do IAGON que ainda falavam em prioridade Paragon de 1 a 10;
+- exportações e PDF que ainda mostravam `IPT` ou `Priorização` para Paragon;
+- atalhos internos do IAGON que cortavam custo em 8 anos;
+- rodovias de exemplo que apareciam como fallback quando o banco não trazia rodovia;
+- fallback que tentava tratar código IAP desconhecido como valor real.
+
+Com isso, fica mais claro:
+
+- Paragon usa `IPI`, e maior IPI vem primeiro;
+- Matriz Cadastrada continua com uma lógica própria, separada do Paragon;
+- se faltar dado real, o painel deve avisar falta de dado, não inventar valor.
+
+---
+
+## Remoção do IPE da tabela Paragon
+
+Removi o `IPE` da tabela Paragon no cenário econômico.
+
+Ele continuou existindo como cálculo auxiliar interno, mas não aparece mais para o usuário nessa tabela.
+
+O motivo é simples: a fila Paragon é ordenada pelo `IPI`. Mostrar `IPE` junto podia confundir e fazer parecer que ele também participava da prioridade final.
+
+A tabela agora fica focada no que interessa para leitura:
+
+- posição na fila;
+- trecho/SRE;
+- intervalo de km;
+- extensão;
+- IAP;
+- IPI;
+- custo;
+- soluções.
+
+---
+
+## Matriz Cadastrada no cenário econômico por segmento
+
+Na tela `Cenário econômico`, a Matriz Cadastrada estava mostrando a carteira por `SRE`.
+
+Isso deixava a leitura meio enganosa, porque uma SRE pode ter mais de um segmento. Quando o painel juntava tudo, ele misturava trechos diferentes em uma única linha.
+
+Corrigi para abrir a carteira por segmento.
+
+O que muda na prática:
+
+- a tabela deixa de ser uma lista resumida por SRE;
+- cada linha passa a ser um segmento, com seu km inicial, km final, extensão, custo e solução;
+- a prioridade da Matriz também passa a ser calculada na chave do segmento;
+- o orçamento vai atendendo segmento por segmento;
+- quando o filtro de prioridade muda, o mapa acompanha os segmentos filtrados.
+
+Com isso, a Matriz fica mais parecida com a leitura do Paragon, mas sem misturar as metodologias. Paragon continua usando `IPI`; Matriz usa a regra escolhida no seletor de priorização.
+
+---
+
+## Nova priorização da Matriz Cadastrada
+
+Depois revisei a lógica de prioridade da Matriz Cadastrada.
+
+A regra que estava no painel era simplificada demais. Ela usava basicamente `IRI` e `IGG`, mas o dashboard antigo tinha uma lógica mais completa.
+
+Atualizei para uma adaptação dessa lógica antiga.
+
+Agora existem três formas de ordenar a carteira:
+
+- `Técnica`: usa só o `IPT`;
+- `Econômica`: usa só o `IPE`;
+- `Combinada`: usa `60% IPT + 40% IPE`.
+
+O `IPT` considera:
+
+- `VMDA`;
+- `IRI`;
+- `DEF`.
+
+O `IPE` considera a eficiência econômica:
+
+- eficiência = `IPT / custo por km * 1000`;
+- depois essa eficiência é normalizada para virar um índice.
+
+Depois mudei a escala da Matriz para `0 a 100`, igual ao Paragon.
+
+Antes `IPT`, `IPE` e `Combinada` iam de `0 a 10`. Isso funcionava, mas ficava estranho comparar com o Paragon, que usa `IPI` de `0 a 100`.
+
+Agora os três índices da Matriz também aparecem de `0 a 100`.
+
+A lógica de ordem não mudou. Um trecho que era mais prioritário antes continua sendo mais prioritário agora. A mudança foi só de escala.
+
+A normalização segue a ideia do dashboard antigo, usando logaritmo. Isso evita que valores muito altos distorçam demais a comparação.
+
+Também ajustei a leitura do filtro:
+
+Antes existia um filtro de prioridade com escala invertida. Depois ele virou `Índice mínimo`, mas esse filtro também foi removido para deixar a tela mais simples.
+
+Hoje a prioridade da Matriz é lida pela ordem da tabela e pelo tipo de índice escolhido.
+
+Com isso, fica mais claro para escolher o critério de análise: olhar só a condição técnica, olhar só a eficiência econômica ou usar uma combinação dos dois.
+
+Também removi `IGG` da tabela de priorização da Matriz. Ele continua sendo usado nas telas de diagnóstico, mas saiu dessa tabela para não dar a impressão de que entra no cálculo novo.
+
+O seletor entre `Combinada`, `Técnica` e `Econômica` também foi movido para perto da tabela. A decisão afeta a leitura daquela carteira de segmentos, então ficou mais natural deixar o controle junto do visual.
+
+Depois ajustei a coluna de soluções da Matriz para seguir o mesmo padrão do Paragon. A linha principal ficou mais limpa, com um botão `Ver soluções`. O detalhe abre a programação daquele segmento, separando solução, ano e custo.
+
+Também adicionei o `Ordenar por` nessa tabela da Matriz. Assim a leitura pode ser feita pela fila de prioridade ou pela sequência de km da rodovia, como já acontecia no Paragon.
+
+Depois alinhei os filtros da tabela da Matriz com o padrão do Paragon.
+
+Agora os filtros aparecem no lado esquerdo e seguem esta ordem:
+
+- `Visualização`;
+- `Ordenar por`;
+- `Índice de priorização`.
+
+O filtro `Visualização` permite alternar entre os segmentos atendidos pelo orçamento e todos os segmentos priorizados.
+
+Depois removi os filtros mínimos do cenário econômico:
+
+- `IPI mínimo`, no Paragon;
+- `Índice mínimo`, na Matriz Cadastrada.
+
+Com isso, a tela fica menos carregada e não esconde trechos por um corte extra. A análise passa a depender do orçamento, horizonte, visualização, ordenação e tipo de índice.
+
+---
+
+## Filtro visual para remover trechos no cenário econômico
+
+Adicionei na tela `Cenário econômico` uma caixa expansível para remover trechos da análise.
+
+Ela aparece abaixo do filtro de cenário.
+
+Esse filtro não mexe no banco. Ele só tira o trecho do recorte que está sendo analisado naquele momento.
+
+Usei essa lógica pensando em casos como:
+
+- trecho que já recebeu obra;
+- trecho que ainda está na base, mas não deve entrar na simulação atual;
+- análise rápida para ver quanto muda a necessidade tirando alguns segmentos.
+
+Quando um trecho é removido, a tela recalcula os números sem ele:
+
+- necessidade total;
+- cobertura;
+- orçamento faltante;
+- trechos atendidos;
+- mapa;
+- gráficos;
+- cronograma;
+- tabela final.
+
+Também apliquei isso nas duas metodologias da tela:
+
+- Paragon;
+- Matriz Cadastrada.
+
+O trecho só fica fora enquanto estiver selecionado nessa caixa. Se limpar o filtro, ele volta para a análise normalmente.
+
+Também adicionei um atalho por intervalo de km.
+
+Agora dá para digitar algo como `0 a 59`, e o painel seleciona automaticamente os trechos que passam por esse intervalo. A lista manual continua disponível, então o usuário pode conferir e ajustar a seleção depois.

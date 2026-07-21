@@ -371,18 +371,15 @@ def _iap_code_info(value: Any) -> dict[str, Any] | None:
 
 
 def _iap_numeric_value(value: Any) -> float | None:
-    """Valor real do IAP. O campo `iapa` é código; só usa número direto como fallback."""
+    """Valor real do IAP a partir do código `iapa` tabelado.
+
+    Se o código não existir na tabela de conversão, retorna None. Isso evita
+    tratar código desconhecido como se fosse valor real de IAP.
+    """
     info = _iap_code_info(value)
     if info is not None:
         return info["value"]
-    try:
-        numeric = _to_float(value)
-    except (TypeError, ValueError):
-        return None
-    if numeric <= 0:
-        return None
-    # Fallback para bases antigas/externas que já tragam IAP numérico real.
-    return numeric if numeric <= 10 else None
+    return None
 
 
 def _iap_solution_from_code(value: Any, fallback: str | None = None) -> str | None:
@@ -2494,6 +2491,7 @@ def _get_dnit_geometry_from_database(analise_id: int) -> pd.DataFrame:
             {
                 "segment_id": segment_id,
                 "sre": srow.get("codigo") or f"Segmento {segment_id}",
+                "rodovia": srow.get("rodovia"),
                 "km_inicial": km_i,
                 "km_final": km_f,
                 "paths": paths,
@@ -2529,6 +2527,10 @@ def _get_dnit_solutions_from_database(
         "SELECT segmento_pista_id AS seg, igga, situacao_igga FROM analise_gerencial_igg WHERE gerencial_ciclo_id = %s AND ano = %s",
         (ciclo_id, year),
     ) or []
+    def_rows = db.execute_query(
+        "SELECT fk_segmento_id AS seg, MAX(d0) AS d0 FROM analise_gerencial_parametros_iniciais WHERE fk_ciclo_id = %s GROUP BY fk_segmento_id",
+        (ciclo_id,),
+    ) or []
     if all_years:
         # Econômico: inclui os segmentos tratados em QUALQUER ano do horizonte
         # (scope = via toda, coerente com o custo do horizonte). Pega a solução do
@@ -2554,6 +2556,8 @@ def _get_dnit_solutions_from_database(
 
     iri_by = {int(r["seg"]): _to_float(r["iria"]) for r in iri_rows}
     igg_by = {int(r["seg"]): (_to_float(r["igga"]), r.get("situacao_igga")) for r in igg_rows}
+    def_by = {int(r["seg"]): _to_float(r["d0"]) for r in def_rows if r.get("d0") is not None}
+    traffic_by_road = _get_vmda_traffic_by_road({row.get("rodovia") for row in geo.to_dict("records")})
 
     seg_records = []
     table_records = []
@@ -2574,6 +2578,12 @@ def _get_dnit_solutions_from_database(
         km_i = _to_float(row.get("km_inicial"))
         km_f = _to_float(row.get("km_final"))
         ext = max(km_f - km_i, 0.0)
+        traffic = _match_vmda_traffic(
+            traffic_by_road.get(_normalize_road_code(row.get("rodovia")) or "", []),
+            km_i,
+            km_f,
+        )
+        vmda = (traffic.get("vmdl", 0.0) + traffic.get("vmdp", 0.0)) if traffic else None
 
         seg_records.append(
             {
@@ -2584,6 +2594,8 @@ def _get_dnit_solutions_from_database(
                 "paths": row["paths"],
                 "iri": round(iri, 2),
                 "igg": round(igg_val, 1),
+                "vmda": vmda,
+                "def": def_by.get(seg),
                 "matriz_categoria": zona,
                 "matriz_color": zona_color,
                 "solucao_grupo": solucao_grupo,
@@ -2597,6 +2609,8 @@ def _get_dnit_solutions_from_database(
                 "Extensão": ext,
                 "IRI": round(iri, 2),
                 "IGG": round(igg_val, 1),
+                "VMDA": vmda,
+                "DEF": def_by.get(seg),
                 "Faixa": zona,
                 "Solução recomendada": solucao_txt,
                 "Solução núcleo": nucleo,
