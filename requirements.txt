@@ -5,7 +5,7 @@ python-dotenv==1.0.1
 # Database - MySQL
 pymysql==1.1.0
 sqlalchemy==2.0.28
-
+cryptography==49.0.0  
 # Data manipulation
 pandas==2.2.1
 numpy==1.26.4
@@ -20,3 +20,6 @@ contextily==1.7.0
 
 # Cache distribuído
 redis>=5.0,<6
+
+# IA — assistente IAGON
+openai>=1.0,<2.0
