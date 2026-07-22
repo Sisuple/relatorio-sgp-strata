@@ -36,7 +36,7 @@ jobs:
   deploy:
     needs: test
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, production]
+    runs-on: [self-hosted, production, relatorio-sgp-strata]
     timeout-minutes: 10
     concurrency:
       group: deploy-production
