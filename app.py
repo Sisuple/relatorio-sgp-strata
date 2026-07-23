@@ -120,13 +120,6 @@ def inject_css() -> None:
             }
 
             #MainMenu, footer, header[data-testid="stHeader"] { display: none; }
-            /* Mantém o menu lateral sempre disponível para navegação entre telas. */
-            [data-testid="collapsedControl"],
-            [data-testid="stSidebarCollapseButton"] {
-                display: none !important;
-                visibility: hidden !important;
-                pointer-events: none !important;
-            }
             [data-testid="stAppViewContainer"] { background: var(--bg); color: var(--text); }
             [data-testid="stMain"] { background: var(--bg); }
 
@@ -173,6 +166,23 @@ def inject_css() -> None:
                 font-size: 11px;
                 font-weight: 850;
                 box-shadow: 0 12px 26px rgba(0,0,0,.18);
+            }
+
+            [data-testid="collapsedControl"] {
+                border: 1px solid #244257;
+                border-radius: 10px;
+                background: #0b1a23;
+                box-shadow: 0 10px 22px rgba(0,0,0,.22);
+                color: #f4f7fb;
+                transition: border-color .15s ease, color .15s ease, left 300ms;
+            }
+            [data-testid="collapsedControl"]:hover {
+                border-color: #00c2e8;
+                color: #00c2e8;
+            }
+            [data-testid="collapsedControl"] button {
+                background: transparent !important;
+                color: inherit !important;
             }
 
             .top-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin: 4px 0 12px; }
@@ -838,6 +848,16 @@ def inject_css() -> None:
                     background: #ffffff !important;
                     color: #13232e !important;
                     box-shadow: 0 10px 24px rgba(18,43,58,.08) !important;
+                }
+                [data-testid="collapsedControl"] {
+                    border-color: #bfd2dc !important;
+                    background: #ffffff !important;
+                    color: #13232e !important;
+                    box-shadow: 0 10px 24px rgba(18,43,58,.08) !important;
+                }
+                [data-testid="collapsedControl"]:hover {
+                    border-color: #00c2e8 !important;
+                    color: #008fad !important;
                 }
 
                 .segment-table,
