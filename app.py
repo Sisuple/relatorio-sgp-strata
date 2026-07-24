@@ -5035,18 +5035,18 @@ def _render_economic_page(
             f"- Ano {int(r['Ano'])}: {float(r.get('Km executado', 0) or 0):.1f} km · "
             f"{_format_money(float(r.get('Custo acumulado', 0) or 0))} acumulado · IAP {float(r.get('IAP médio', 0) or 0):.2f}"
             for _, r in annual_df.head(12).iterrows())
-    _render_screen_iagon(
-        "cenario", f"Cenário econômico · {road}",
-        f"<b>Rodovia:</b> {road} &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(str(scenario_label))} &nbsp;·&nbsp; "
-        f"<b>Orçamento:</b> {_format_money(annual_budget * 1_000_000)}/ano &nbsp;·&nbsp; "
-        f"<b>Escopo:</b> {html.escape(scope_label)} &nbsp;·&nbsp; <b>Prioridade:</b> {_nivel}",
-        _screen_ctx("Cenário econômico (orçamento × cobertura)",
-                    {"Rodovia": road, "Cenário": scenario_label,
-                     "Orçamento anual": _format_money(annual_budget * 1_000_000),
-                     "Escopo": scope_label, "Filtro de IPI": _nivel},
-                    _eco_dados),
-        sugestoes=["Análise para o gestor", "O que faço no 1º ano?", "Quanto falta p/ 100%?"],
-    )
+    # _render_screen_iagon(
+    #     "cenario", f"Cenário econômico · {road}",
+    #     f"<b>Rodovia:</b> {road} &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(str(scenario_label))} &nbsp;·&nbsp; "
+    #     f"<b>Orçamento:</b> {_format_money(annual_budget * 1_000_000)}/ano &nbsp;·&nbsp; "
+    #     f"<b>Escopo:</b> {html.escape(scope_label)} &nbsp;·&nbsp; <b>Prioridade:</b> {_nivel}",
+    #     _screen_ctx("Cenário econômico (orçamento × cobertura)",
+    #                 {"Rodovia": road, "Cenário": scenario_label,
+    #                  "Orçamento anual": _format_money(annual_budget * 1_000_000),
+    #                  "Escopo": scope_label, "Filtro de IPI": _nivel},
+    #                 _eco_dados),
+    #     sugestoes=["Análise para o gestor", "O que faço no 1º ano?", "Quanto falta p/ 100%?"],
+    #)
 
 
 def _combined_economic_data(road, keys, labels, year: int | None = None):
@@ -8642,45 +8642,45 @@ def _screen_ctx(titulo: str, filtros: dict, dados_md: str) -> str:
 
 
 # Assistente IAGON (fora do escopo desta documentação).
-def _render_screen_iagon(screen: str, titulo: str, filtro_md: str, context_fn,
-                         sugestoes: list[str] | None = None) -> None:
-    """Painel da IAGON escopado a UMA tela: detalha o filtro e faz análise técnica dos dados
-    DAQUELA tela. `context_fn` é um callable (ou string) montado SÓ quando há pergunta — assim
-    o contexto pesado (priorização) não roda a cada render."""
-    sugestoes = sugestoes or ["Análise completa", "Pontos críticos", "O que priorizar?"]
-    with st.container(border=True):
-        st.markdown('<span class="iagon-fab-mark"></span>', unsafe_allow_html=True)
-        with st.popover("✦ IAGON", use_container_width=False):
-            st.markdown(
-                f"<div class='iagon-cv-head'>✦ <b>IAGON</b> · {html.escape(titulo)}</div>"
-                "<div class='iagon-cv-sub'>Análise técnica desta tela com os filtros aplicados.</div>"
-                f"<div class='iagon-cv-filtro'>{filtro_md}</div>",
-                unsafe_allow_html=True,
-            )
-            if not iagon.is_configured():
-                st.caption("IAGON indisponível (sem chave de API).")
-                return
-            cols = st.columns(len(sugestoes))
-            clicked = None
-            for i, s in enumerate(sugestoes):
-                if cols[i].button(s, key=f"iagon_sug_{screen}_{i}", use_container_width=True):
-                    clicked = s
-            q = st.text_input("Pergunte sobre esta tela…", key=f"iagon_in_{screen}",
-                              label_visibility="collapsed", placeholder="Pergunte sobre esta tela…")
-            pergunta = (clicked or (q or "").strip())
-            if pergunta and pergunta != st.session_state.get(f"iagon_lastq_{screen}"):
-                st.session_state[f"iagon_lastq_{screen}"] = pergunta
-                with st.spinner("Analisando esta tela…"):
-                    try:
-                        ctx = context_fn() if callable(context_fn) else context_fn
-                        ans = iagon.analisar(ctx, _SCREEN_IAGON_INSTR + pergunta)
-                    except Exception as e:
-                        ans = f"Não consegui responder agora ({type(e).__name__})."
-                st.session_state[f"iagon_ans_{screen}"] = {"q": pergunta, "a": ans}
-            last = st.session_state.get(f"iagon_ans_{screen}")
-            if last:
-                st.markdown(f"<div class='iagon-cv-q'>🧑 {html.escape(last['q'])}</div>", unsafe_allow_html=True)
-                st.markdown(last["a"])
+# def _render_screen_iagon(screen: str, titulo: str, filtro_md: str, context_fn,
+#                          sugestoes: list[str] | None = None) -> None:
+#     """Painel da IAGON escopado a UMA tela: detalha o filtro e faz análise técnica dos dados
+#     DAQUELA tela. `context_fn` é um callable (ou string) montado SÓ quando há pergunta — assim
+#     o contexto pesado (priorização) não roda a cada render."""
+#     sugestoes = sugestoes or ["Análise completa", "Pontos críticos", "O que priorizar?"]
+#     with st.container(border=True):
+#         st.markdown('<span class="iagon-fab-mark"></span>', unsafe_allow_html=True)
+#         with st.popover("✦ IAGON", use_container_width=False):
+#             st.markdown(
+#                 f"<div class='iagon-cv-head'>✦ <b>IAGON</b> · {html.escape(titulo)}</div>"
+#                 "<div class='iagon-cv-sub'>Análise técnica desta tela com os filtros aplicados.</div>"
+#                 f"<div class='iagon-cv-filtro'>{filtro_md}</div>",
+#                 unsafe_allow_html=True,
+#             )
+#             if not iagon.is_configured():
+#                 st.caption("IAGON indisponível (sem chave de API).")
+#                 return
+#             cols = st.columns(len(sugestoes))
+#             clicked = None
+#             for i, s in enumerate(sugestoes):
+#                 if cols[i].button(s, key=f"iagon_sug_{screen}_{i}", use_container_width=True):
+#                     clicked = s
+#             q = st.text_input("Pergunte sobre esta tela…", key=f"iagon_in_{screen}",
+#                               label_visibility="collapsed", placeholder="Pergunte sobre esta tela…")
+#             pergunta = (clicked or (q or "").strip())
+#             if pergunta and pergunta != st.session_state.get(f"iagon_lastq_{screen}"):
+#                 st.session_state[f"iagon_lastq_{screen}"] = pergunta
+#                 with st.spinner("Analisando esta tela…"):
+#                     try:
+#                         ctx = context_fn() if callable(context_fn) else context_fn
+#                         ans = iagon.analisar(ctx, _SCREEN_IAGON_INSTR + pergunta)
+#                     except Exception as e:
+#                         ans = f"Não consegui responder agora ({type(e).__name__})."
+#                 st.session_state[f"iagon_ans_{screen}"] = {"q": pergunta, "a": ans}
+#             last = st.session_state.get(f"iagon_ans_{screen}")
+#             if last:
+#                 st.markdown(f"<div class='iagon-cv-q'>🧑 {html.escape(last['q'])}</div>", unsafe_allow_html=True)
+#                 st.markdown(last["a"])
 
 
 def _iagon_trechos_priorizados_text(road: str, cenario: int = 1, top: int = 25, horizonte: int = 1) -> str:
@@ -10711,18 +10711,18 @@ def main() -> None:
             _sdados = "Sem intervenção prevista para o recorte atual desta tela."
         else:
             _sdados = "Nenhuma intervenção no filtro atual desta tela."
-        _render_screen_iagon(
-            "solucoes", f"Soluções · {selected_road}",
-            (
-                f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_sol_lbls)}"
-                f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
-            ),
-            lambda: _iagon_full_road_context(
-                selected_road, (_scenario_keys[0] if _scenario_keys else None), "Soluções (intervenções recomendadas)",
-                {"Rodovia": selected_road, "Cenário": _sol_lbls, "Ano": selected_year or "—"},
-                extra="O que está EXIBIDO nesta tela agora (com os filtros aplicados):\n" + _sdados),
-            sugestoes=["Análise das soluções", "Onde concentra obra pesada?", "O que priorizar?"],
-        )
+        # _render_screen_iagon(
+        #     "solucoes", f"Soluções · {selected_road}",
+        #     (
+        #         f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_sol_lbls)}"
+        #         f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
+        #     ),
+        #     lambda: _iagon_full_road_context(
+        #         selected_road, (_scenario_keys[0] if _scenario_keys else None), "Soluções (intervenções recomendadas)",
+        #         {"Rodovia": selected_road, "Cenário": _sol_lbls, "Ano": selected_year or "—"},
+        #         extra="O que está EXIBIDO nesta tela agora (com os filtros aplicados):\n" + _sdados),
+        #     sugestoes=["Análise das soluções", "Onde concentra obra pesada?", "O que priorizar?"],
+        # )
         return
 
     # ─── Página COMPARATIVO ENTRE CENÁRIOS ───
@@ -10830,25 +10830,25 @@ def main() -> None:
                 )
         else:
             _ndados = "Sem dados de rede."
-        _render_screen_iagon(
-            "visaogeral", "Visão geral da rede",
-            (
-                f"<b>Escopo:</b> {html.escape(', '.join(selected_roads) if selected_roads else 'rede inteira')} "
-                f"&nbsp;·&nbsp; <b>Matriz:</b> {'DNIT' if _is_dnit else 'Paragon'}"
-            ),
-            _screen_ctx("Visão geral (panorama executivo da rede)",
-                        {
-                            "Matriz": "DNIT" if _is_dnit else "Paragon",
-                            "Rodovia": ", ".join(selected_roads) if selected_roads else "Todas as rodovias",
-                            "Cenário": (
-                                ", ".join(_scenario_labels.get(token, token) for token in selected_scenarios)
-                                if selected_scenarios else
-                                "Todos os cenários padrão"
-                            ),
-                            "Ano": ", ".join(str(year) for year in selected_years) if selected_years else "Todos os anos disponíveis",
-                        }, _ndados),
-            sugestoes=["Análise da rede", "Qual a pior rodovia?", "Onde investir primeiro?"],
-        )
+        # _render_screen_iagon(
+        #     "visaogeral", "Visão geral da rede",
+        #     (
+        #         f"<b>Escopo:</b> {html.escape(', '.join(selected_roads) if selected_roads else 'rede inteira')} "
+        #         f"&nbsp;·&nbsp; <b>Matriz:</b> {'DNIT' if _is_dnit else 'Paragon'}"
+        #     ),
+        #     _screen_ctx("Visão geral (panorama executivo da rede)",
+        #                 {
+        #                     "Matriz": "DNIT" if _is_dnit else "Paragon",
+        #                     "Rodovia": ", ".join(selected_roads) if selected_roads else "Todas as rodovias",
+        #                     "Cenário": (
+        #                         ", ".join(_scenario_labels.get(token, token) for token in selected_scenarios)
+        #                         if selected_scenarios else
+        #                         "Todos os cenários padrão"
+        #                     ),
+        #                     "Ano": ", ".join(str(year) for year in selected_years) if selected_years else "Todos os anos disponíveis",
+        #                 }, _ndados),
+        #     sugestoes=["Análise da rede", "Qual a pior rodovia?", "Onde investir primeiro?"],
+        # )
         return
 
     # ─── Página IAGON (chave interna "risco") — assistente de IA ───
@@ -10881,16 +10881,16 @@ def main() -> None:
     data = paragon_parts[0] if paragon_parts else get_overview_data(selected_road, scenario_key=scenario_key, year=selected_year)
     if not data.get("iap_extraction"):
         st.info(data.get("message") or "Sem dados para este recorte.")
-        _render_screen_iagon(
-            "diagnostico", f"Diagnóstico · {selected_road}",
-            (
-                f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Matriz:</b> Paragon "
-                f"&nbsp;·&nbsp; <b>Cenário:</b> —"
-                f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
-            ),
-            lambda: "Sem dados para este recorte.",
-            sugestoes=["Trocar cenário", "Trocar ano", "Ver outro recorte"],
-        )
+        # _render_screen_iagon(
+        #     "diagnostico", f"Diagnóstico · {selected_road}",
+        #     (
+        #         f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Matriz:</b> Paragon "
+        #         f"&nbsp;·&nbsp; <b>Cenário:</b> —"
+        #         f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
+        #     ),
+        #     lambda: "Sem dados para este recorte.",
+        #     sugestoes=["Trocar cenário", "Trocar ano", "Ver outro recorte"],
+        # )
         return
 
     metrics = data["metrics"]
@@ -10962,23 +10962,23 @@ def main() -> None:
         render_condition_linear(filtered_diagram, km_range=km_range)
 
     # IAGON desta tela (Diagnóstico da rodovia selecionada).
-    _render_screen_iagon(
-        "diagnostico", f"Diagnóstico · {selected_road}",
-        (
-            f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Matriz:</b> Paragon "
-            f"&nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_diag_lbl if len(scenario_keys) <= 1 else f'{len(scenario_keys)} cenários')}"
-            f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
-        ),
-        lambda: _iagon_full_road_context(
-            selected_road, scenario_key, "Diagnóstico (condição da rodovia)",
-            {
-                "Rodovia": selected_road,
-                "Matriz": "Paragon",
-                "Cenário": _diag_lbl,
-                "Ano": selected_year or "—",
-            }),
-        sugestoes=["Análise completa", "Onde está pior?", "O que priorizar?"],
-    )
+    # _render_screen_iagon(
+    #     "diagnostico", f"Diagnóstico · {selected_road}",
+    #     (
+    #         f"<b>Rodovia:</b> {selected_road} &nbsp;·&nbsp; <b>Matriz:</b> Paragon "
+    #         f"&nbsp;·&nbsp; <b>Cenário:</b> {html.escape(_diag_lbl if len(scenario_keys) <= 1 else f'{len(scenario_keys)} cenários')}"
+    #         f" &nbsp;·&nbsp; <b>Ano:</b> {selected_year if selected_year is not None else '—'}"
+    #     ),
+    #     lambda: _iagon_full_road_context(
+    #         selected_road, scenario_key, "Diagnóstico (condição da rodovia)",
+    #         {
+    #             "Rodovia": selected_road,
+    #             "Matriz": "Paragon",
+    #             "Cenário": _diag_lbl,
+    #             "Ano": selected_year or "—",
+    #         }),
+    #     sugestoes=["Análise completa", "Onde está pior?", "O que priorizar?"],
+    # )
 
 
 if __name__ == "__main__":
