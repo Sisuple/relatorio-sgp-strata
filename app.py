@@ -87,11 +87,13 @@ st.set_page_config(
 
 def _dashboard_theme() -> str:
     """Tema visual do painel. As cores técnicas dos dados não entram nessa troca."""
-    query_theme = str(st.query_params.get("theme", "")).lower()
-    if query_theme in {"dark", "light"}:
-        st.session_state["dashboard_theme"] = query_theme
-    elif "dashboard_theme" not in st.session_state:
-        st.session_state["dashboard_theme"] = "dark"
+    # Tema fixado em "light" — toggle de tema desativado (ver sidebar.py).
+    # query_theme = str(st.query_params.get("theme", "")).lower()
+    # if query_theme in {"dark", "light"}:
+    #     st.session_state["dashboard_theme"] = query_theme
+    # elif "dashboard_theme" not in st.session_state:
+    #     st.session_state["dashboard_theme"] = "dark"
+    st.session_state["dashboard_theme"] = "light"
     return str(st.session_state["dashboard_theme"])
 
 
@@ -597,6 +599,16 @@ def inject_css() -> None:
                 iframe {
                     background: var(--bg) !important;
                     color-scheme: light;
+                }
+
+                [data-testid="stAlert"] p,
+                [data-testid="stAlert"] span,
+                [data-testid="stAlert"] li,
+                [data-testid="stAlert"] strong,
+                [data-testid="stAlert"] a,
+                [data-testid="stAlert"] code,
+                [data-testid="stAlert"] [data-testid="stMarkdownContainer"] {
+                    color: #ffffff !important;
                 }
 
                 .page-title,
