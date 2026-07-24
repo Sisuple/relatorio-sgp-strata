@@ -82,9 +82,10 @@ def render_sidebar(active_key: str = "overview") -> None:
 
     st.sidebar.markdown(sidebar_html, unsafe_allow_html=True)
 
-    next_theme = "light" if current_theme == "dark" else "dark"
-    label = "Tema claro" if current_theme == "dark" else "Tema escuro"
-    if st.sidebar.button(label, key="sidebar_theme_toggle", use_container_width=True):
-        st.session_state["dashboard_theme"] = next_theme
-        st.query_params["theme"] = next_theme
-        st.rerun()
+    # Botão de troca de tema desativado — painel fixado em tema claro (ver app.py:_dashboard_theme).
+    # next_theme = "light" if current_theme == "dark" else "dark"
+    # label = "Tema claro" if current_theme == "dark" else "Tema escuro"
+    # if st.sidebar.button(label, key="sidebar_theme_toggle", use_container_width=True):
+    #     st.session_state["dashboard_theme"] = next_theme
+    #     st.query_params["theme"] = next_theme
+    #     st.rerun()
