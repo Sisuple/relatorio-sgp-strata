@@ -22,6 +22,7 @@ Fora do escopo desta documentação: o assistente IAGON (funções `_iagon_*` e
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import math
 import re
@@ -36,6 +37,7 @@ import streamlit.components.v1 as components
 from components.cards.metric_card import render_metric_card
 from components.charts.iap_distribution import render_iap_distribution
 from components.charts.linear_diagram import (
+    apply_km_zoom,
     render_condition_linear,
     render_iap_linear_multi,
     render_iap_linear_zoomable,
@@ -43,6 +45,7 @@ from components.charts.linear_diagram import (
 from components.layout.sidebar import render_sidebar
 from components.maps.overview_map import render_overview_map, _CLASS_COLORS as _MAP_CLASS_COLORS
 from components.maps.dnit_map import render_dnit_map
+from components.maps.traffic_map import render_traffic_vmda_map, _vmda_color_scale
 from services.overview_service import (
     get_available_roads,
     get_available_scenarios,
@@ -57,6 +60,7 @@ from services.overview_service import (
     get_dnit_available_roads,
     get_overview_data,
     get_projection_data,
+    get_road_segment_paths,
     get_solutions_data,
     ensure_fresh_data,
     IAP_META,
@@ -78,6 +82,27 @@ from services.prioritization import (
 from services.cache import cached
 from services.work_plan_pdf import build_work_plan_pdf
 from services import iagon
+from services.traffic_service import (
+    VEHICLE_COLUMNS,
+    VEHICLE_ORDER,
+    get_taxa_long,
+    get_vmda_long,
+    get_vmda_wide,
+)
+from services.geotecnia_service import (
+    LAYER_ORDER,
+    get_pavement_structure,
+    get_pavement_structure_roads,
+)
+from services.pavimentacao_service import (
+    get_atr_composition,
+    get_atr_series,
+    get_d0_series,
+    get_igg_composition,
+    get_iri_composition,
+    get_iri_series,
+    get_pavimentacao_roads,
+)
 
 
 st.set_page_config(
@@ -122,9 +147,16 @@ def inject_css() -> None:
                 --red: #ff314a;
                 --orange: #ff8a00;
                 --yellow: #facc15;
+                --radius-sm: 10px;
+                --radius-md: 14px;
+                --shadow-card: 0 1px 2px rgba(0,0,0,.18);
             }
 
             #MainMenu, footer, header[data-testid="stHeader"] { display: none; }
+            /* Some temas/larguras posicionam o drawer da sidebar abaixo de
+               onde o header (já escondido acima) ficaria — sobra um vão
+               vazio no topo. Força o drawer a começar do topo de verdade. */
+            [data-testid="stSidebar"] { top: 0 !important; height: 100vh !important; }
             [data-testid="stAppViewContainer"] { background: var(--bg); color: var(--text); }
             [data-testid="stMain"] { background: var(--bg); }
 
@@ -140,37 +172,79 @@ def inject_css() -> None:
             [data-testid="stSidebar"] { background: var(--sidebar); border-right: 1px solid var(--border); width: 252px !important; }
             [data-testid="stSidebar"] > div:first-child { padding: 0; }
             [data-testid="stSidebarContent"] { padding: 0 !important; }
+            /* Cabeçalho do drawer mobile (o "X" de fechar) reserva uma faixa
+               vazia acima do conteúdo por padrão — zera esse espaço, mantendo
+               só o botão de fechar clicável. */
+            [data-testid="stSidebarHeader"] { padding: 0 !important; min-height: 0 !important; height: auto !important; }
             .block-container { max-width: 1220px; padding: 1.1rem 1.55rem 3rem; }
 
             .sidebar-shell { min-height: 100vh; background: var(--sidebar); }
-            .brand-row { height: 86px; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-bottom: 1px solid rgba(148,163,184,.12); }
-            .brand-mark { width: 38px; height: 38px; border-radius: 13px; display: grid; place-items: center; color: #001018; background: linear-gradient(135deg, #00c2e8, #0ea5b7); box-shadow: 0 14px 28px rgba(0,194,232,.2); font-size: 15px; font-weight: 900; }
-            .brand-title { font-size: 13px; font-weight: 800; color: var(--text); letter-spacing: .01em; }
-            .brand-subtitle { font-size: 11px; color: var(--muted); margin-top: 2px; }
+            .brand-row { height: 54px; display: flex; align-items: center; justify-content: center; padding: 0 12px; border-bottom: 1px solid rgba(148,163,184,.12); }
+            /* Cyan fixo (não var(--text)) nos dois temas — é o nome do sistema
+               (SIGMA), não texto comum; usa a mesma cor cyan de marca do
+               resto do painel (itens ativos do menu etc.). Arial Black (mais
+               "quadrada"/geométrica) no lugar da fonte padrão arredondada do
+               painel, pra aproximar do logo de referência. */
+            .brand-title {
+                font-family: "Arial Black", "Segoe UI", sans-serif;
+                font-size: 20px; font-weight: 900; color: var(--cyan); letter-spacing: .01em;
+                display: inline-flex; align-items: center; gap: 4px; line-height: 1;
+            }
+            /* Tracinhos flanqueando o nome, igual ao logo de referência: 2
+               traços sequenciais (lado a lado, mesma altura) embaixo à
+               esquerda do nome, e 2 traços sequenciais em cima à direita. */
+            .brand-title-tick { align-self: stretch; display: flex; gap: 3px; }
+            .brand-title-tick-l { align-items: flex-end; }
+            .brand-title-tick-r { align-items: flex-start; }
+            .brand-title-tick i {
+                display: block; width: 8px; height: 5px; background: var(--cyan);
+                transform: skewX(-18deg); border-radius: 1px;
+            }
             .side-menu { padding: 14px 8px 0; }
-            .side-item { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; min-height: 48px; padding: 7px 10px; margin-bottom: 8px; border-radius: 8px; color: #95a4af; text-decoration: none; }
-            .side-item.active { background: #063f4c; color: #00c2e8; }
+            .side-group-label { margin: 14px 10px 6px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,.12); color: #6b7f8d; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+            .side-group-label:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+            /* !important nas cores dos itens: o markup do menu é uma lista de
+               <a>, e o CSS base do Streamlit estiliza links dentro da sidebar
+               com uma regra mais específica que a nossa classe simples,
+               deixando o texto azul-padrão de link em vez da cor definida
+               aqui. !important garante que a nossa cor sempre vença. */
+            .side-item { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; min-height: 48px; padding: 7px 10px; margin-bottom: 8px; border-radius: 8px; color: #e7edf2 !important; text-decoration: none; }
+            .side-item.active { background: #063f4c; color: #00c2e8 !important; }
             .side-icon { display: grid; place-items: center; }
             .menu-svg { width: 16px; height: 16px; }
-            .side-label { font-size: 13px; line-height: 1.1; color: inherit; font-weight: 800; }
-            .side-description { font-size: 10px; line-height: 1.2; color: #83929e; margin-top: 3px; }
-            .side-item.active .side-description { color: #75b8c5; }
-            [data-testid="stSidebar"] div[data-testid="stButton"] {
-                position: fixed;
-                left: 14px;
-                bottom: 16px;
-                width: 224px;
-                z-index: 30;
+            .side-label { font-size: 13px; line-height: 1.1; color: inherit !important; font-weight: 800; }
+            .side-description { font-size: 10px; line-height: 1.2; color: #83929e !important; margin-top: 3px; }
+            .side-item.active .side-description { color: #75b8c5 !important; }
+
+            /* Rodapé da sidebar: card de destaque do IAGON (fora da lista de
+               navegação Gerencial/Técnica) + toggle de tema. Fica logo abaixo
+               do último item do menu (fluxo normal) em vez de fixado no fim
+               da tela — assim não força scroll para ver os dois. */
+            .side-footer {
+                margin-top: 14px; padding: 14px 8px 18px;
+                border-top: 1px solid rgba(148,163,184,.12);
+                display: flex; flex-direction: column; gap: 10px;
             }
-            [data-testid="stSidebar"] div[data-testid="stButton"] button {
-                min-height: 36px;
-                border: 1px solid #244257;
-                border-radius: 999px;
+            .side-cta {
+                display: grid; grid-template-columns: 26px 1fr; gap: 10px; align-items: center;
+                min-height: 56px; padding: 10px 12px; border-radius: 12px;
+                background: var(--cyan); color: #001018 !important; text-decoration: none;
+                box-shadow: 0 8px 20px rgba(0,194,232,.28);
+            }
+            .side-cta-icon { display: grid; place-items: center; color: #001018 !important; }
+            .side-cta-label { font-size: 13px; line-height: 1.1; color: #001018 !important; font-weight: 900; }
+            .side-cta-description { font-size: 10px; line-height: 1.2; color: #0a2b33 !important; margin-top: 3px; }
+
+            .side-theme-toggle {
+                display: block; text-align: center; min-height: 30px; line-height: 30px;
+                border: 1px solid transparent; border-radius: 999px;
+                background: transparent; color: #5f7280 !important;
+                font-size: 10px; font-weight: 600; text-decoration: none;
+            }
+            .side-theme-toggle:hover {
+                color: #f4f7fb !important;
+                border-color: #244257;
                 background: #0b1a23;
-                color: #f4f7fb;
-                font-size: 11px;
-                font-weight: 850;
-                box-shadow: 0 12px 26px rgba(0,0,0,.18);
             }
 
             [data-testid="collapsedControl"] {
@@ -191,12 +265,12 @@ def inject_css() -> None:
             }
 
             .top-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin: 4px 0 12px; }
-            .eyebrow { margin: 0 0 2px; color: #8c9ba7; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
-            .page-title { margin: 0; color: var(--text); font-size: 17px; font-weight: 850; letter-spacing: 0; }
+            .eyebrow { margin: 0 0 2px; color: #8c9ba7; font-size: 10px; font-weight: 800; letter-spacing: .06em; }
+            .page-title { margin: 0; color: var(--text); font-size: 17px; font-weight: 850; letter-spacing: 0; text-transform: uppercase; }
             .top-actions { display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
-            .filter-label { min-height: 14px; margin: 0 0 5px; color: #8c9ba7; font-size: 10px; font-weight: 850; letter-spacing: .13em; text-transform: uppercase; }
+            .filter-label { min-height: 14px; margin: 0 0 5px; color: #8c9ba7; font-size: 10px; font-weight: 850; letter-spacing: .05em; text-transform: uppercase; }
             .status-pill { display: inline-flex; align-items: center; gap: 9px; min-height: 30px; padding: 0 13px; border-radius: 14px; border: 1px solid #244257; background: #0b1a23; color: #a4b2bd; font-size: 12px; white-space: nowrap; }
-            .status-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--green); box-shadow: 0 0 12px rgba(34,197,94,.72); }
+            .status-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--green); }
             .status-pill strong { color: var(--text); font-weight: 700; }
             .filter-placeholder { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 32px; padding: 0 13px; border-radius: 14px; border: 1px solid #244257; background: #0b1a23; color: #8fa0ac; font-size: 12px; font-weight: 700; line-height: 1; box-sizing: border-box; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; box-shadow: none; }
             .filter-placeholder-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -205,37 +279,105 @@ def inject_css() -> None:
             div[data-testid="stSelectbox"] { min-width: 315px; }
             div[data-testid="stSelectbox"] label { display: none; }
             div[data-baseweb="select"] > div { min-height: 32px; background: #0b1a23; border-color: #244257; border-radius: 14px; color: var(--text); box-shadow: none; }
-            div[data-baseweb="select"] span { color: var(--text); font-size: 12px; font-weight: 700; }
+            div[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+            div[data-testid="stSelectbox"] [data-baseweb="select"] span,
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div,
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] span {
+                color: var(--text) !important;
+                font-family: inherit !important;
+                font-size: 12px !important;
+                font-weight: 500 !important;
+            }
             div[data-baseweb="popover"] { background: #0b1d28; }
             div[data-testid="column"] div[data-testid="stSelectbox"] { min-width: 0; }
+            /* st.caption e st.text_input não têm estilo nosso: usam a cor/fundo claro
+               padrão do Streamlit (sem tema custom em config.toml), quase ilegíveis
+               no fundo escuro do painel — ex.: caixa "Remover trechos da análise". */
+            div[data-testid="stCaptionContainer"],
+            div[data-testid="stCaptionContainer"] p {
+                color: #8f9eaa !important;
+            }
+            div[data-testid="stTextInput"] label { display: none; }
+            div[data-testid="stTextInput"] input {
+                background: #0b1a23 !important;
+                border: 1px solid #244257 !important;
+                border-radius: 10px !important;
+                color: var(--text) !important;
+            }
+            div[data-testid="stTextInput"] input::placeholder {
+                color: #6b7f8f !important;
+                opacity: 1 !important;
+            }
 
-            .metric-card { height: 170px; border-radius: 14px; background: linear-gradient(180deg, rgba(13,38,51,.95), rgba(8,20,29,.98)); border: 1px solid rgba(148,163,184,.22); padding: 19px 20px; box-shadow: 0 18px 40px rgba(0,0,0,.22); position: relative; overflow: hidden; }
-            .metric-card:before { content: ""; position: absolute; inset: 0; opacity: .18; background: radial-gradient(circle at 72% 8%, currentColor, transparent 38%); }
+            .metric-card { min-height: 132px; border-radius: var(--radius-md); background: var(--surface); border: 1px solid rgba(148,163,184,.20); padding: 16px 18px 15px; box-shadow: var(--shadow-card); position: relative; overflow: hidden; }
+            .metric-card:before { content: ""; position: absolute; inset: 0; opacity: .07; background: radial-gradient(circle at 100% 0%, currentColor, transparent 42%); pointer-events: none; }
             .metric-card * { position: relative; }
-            .metric-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-            .metric-title { color: #a7b4bf; font-size: 12px; letter-spacing: .14em; font-weight: 800; text-transform: uppercase; line-height: 1.35; }
-            .metric-icon { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; background: rgba(0,0,0,.24); color: currentColor; font-size: 19px; font-weight: 800; }
-            .metric-value { color: var(--text); font-size: 31px; line-height: 1.08; font-weight: 850; margin-top: 8px; letter-spacing: 0; }
-            .metric-subtitle { color: #9aa8b3; font-size: 12px; line-height: 1.35; margin-top: 8px; max-width: 142px; }
+            .metric-card-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+            .metric-title { color: #a7b4bf; font-size: 12px; letter-spacing: .06em; font-weight: 800; text-transform: uppercase; line-height: 1.35; }
+            .metric-icon { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; background: color-mix(in srgb, currentColor 18%, transparent); color: currentColor; font-size: 17px; font-weight: 900; box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 28%, transparent), 0 4px 10px color-mix(in srgb, currentColor 20%, transparent); }
+            .metric-value { color: var(--text); font-size: 30px; line-height: 1.05; font-weight: 850; margin-top: 9px; letter-spacing: 0; }
+            .metric-subtitle { color: #9aa8b3; font-size: 12px; line-height: 1.35; margin-top: 6px; max-width: 220px; }
+            .metric-details { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+            .metric-detail-pill { display: inline-flex; align-items: center; gap: 6px; min-height: 22px; padding: 4px 8px; border-radius: 999px; border: 1px solid rgba(148,163,184,.18); background: rgba(10,24,34,.62); color: #aebbc5; font-size: 10px; font-weight: 850; line-height: 1; }
+            .metric-detail-pill strong { color: #eef6fb; font-size: 11px; font-weight: 900; }
+            .metric-detail-high { border-color: rgba(237,150,23,.34); background: rgba(237,150,23,.11); color: #e8b46f; }
+            .metric-detail-critical { border-color: rgba(255,49,74,.34); background: rgba(255,49,74,.10); color: #ff8c9b; }
             .tone-green { color: var(--green); border-color: rgba(34,197,94,.55); }
             .tone-red { color: var(--red); border-color: rgba(255,49,74,.58); }
             .tone-cyan { color: var(--cyan); border-color: rgba(0,194,232,.28); }
             .tone-orange { color: var(--orange); border-color: rgba(255,138,0,.58); }
             .tone-yellow { color: var(--yellow); border-color: rgba(250,204,21,.22); }
+            .metric-card-overview { height: 148px; min-height: 148px; box-sizing: border-box; padding: 14px 18px; }
+            .metric-card-overview .metric-value { margin-top: 7px; }
+            .metric-card-overview .metric-subtitle { margin-top: 4px; max-width: none; }
+            .metric-card-overview .metric-details { margin-top: 6px; }
 
             .element-container:has(.metric-card) { height: 100%; }
             .need-breakdown { margin: 10px 0 2px; display: flex; flex-wrap: wrap; gap: 8px; }
             .need-breakdown-pill { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 6px 10px; border-radius: 999px; border: 1px solid rgba(34,211,238,.20); background: rgba(8,26,36,.62); color: #9fb0bd; font-size: 11px; font-weight: 800; }
             .need-breakdown-pill strong { color: #e8f1f8; font-size: 12px; font-weight: 900; }
             .need-breakdown-pill span { color: #00c2e8; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 900; }
+            .overview-map-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 10px 0 -4px; }
+            .overview-map-head h3 { margin: 0; color: var(--text); font-size: 14px; font-weight: 850; }
+            .overview-map-head p { margin: 2px 0 0; color: #8f9eaa; font-size: 12px; line-height: 1.35; }
+            .overview-map-meta { color: #9fb0bd; font-size: 11px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+            .overview-map-meta strong { color: #e8f6fb; font-weight: 900; }
             iframe { border-radius: 14px; }
 
-            .chart-card { margin-top: 14px; min-height: 436px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; box-shadow: 0 18px 44px rgba(0,0,0,.24); padding: 20px 20px 18px; }
-            /* Card do IAP com o slider de km embutido: estiliza SOMENTE o container do slider como
-               .chart-card. Usa combinador de filho direto (> ... > :first-child) para NÃO casar com
-               o border-wrapper da página inteira (que conteria o marcador como descendente profundo). */
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[data-testid="stVerticalBlock"] > div:first-child .iap-zoom-marker) { margin-top: 14px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; box-shadow: 0 18px 44px rgba(0,0,0,.24); padding: 18px 20px 16px; }
+            .chart-card { margin-top: 14px; min-height: 436px; border-radius: var(--radius-md); border: 0; background: #0b1d28; box-shadow: var(--shadow-card); padding: 20px 20px 18px; }
+            /* O marcador pode ganhar wrappers extras conforme a versão do Streamlit. Selecionamos
+               o container mais próximo para manter o mesmo quadro em todos os diagramas com zoom. */
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iap-zoom-marker)) { margin-top: 14px; border-radius: var(--radius-md); border: 0; background: #0b1d28; box-shadow: var(--shadow-card); padding: 18px 20px 16px; }
             .iap-zoom-marker { display: none; }
+            /* Layout do componente de rosca, só nos 3 cards de composição da
+               Pavimentação: donut no tamanho padrão (190px — os rótulos de %
+               ao redor do anel são posicionados em px fixos assumindo esse
+               tamanho, ver _donut_percent_labels; mudar o tamanho do donut
+               sem mudar essa conta desalinha os rótulos), legenda embaixo
+               numa única linha (em vez das 2 colunas laterais padrão, que
+               sobram/estouram numa coluna de ~1/3 da largura da tela). */
+            div[data-testid="stVerticalBlock"]:has(> div .pavimentacao-donut-marker) .iap-body {
+                display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start;
+                height: auto; padding-top: 6px; gap: 8px 20px;
+            }
+            /* Donut sozinho na 1ª linha (flex-basis 100%). */
+            div[data-testid="stVerticalBlock"]:has(> div .pavimentacao-donut-marker) .iap-donut-wrap {
+                flex: 1 0 100%; display: flex; justify-content: center;
+            }
+            /* .iap-legend-left/.iap-legend-right viram invisíveis como caixa
+               (display:contents): os itens de legenda passam a ser filhos
+               diretos do .iap-body (flex-wrap) acima, então TODOS quebram
+               juntos numa única leva centralizada, em vez de duas leiras
+               separadas (a divisão esquerda/direita é só um detalhe interno
+               do componente — não devia virar 2 grupos visuais distintos). */
+            div[data-testid="stVerticalBlock"]:has(> div .pavimentacao-donut-marker) .iap-legend-left,
+            div[data-testid="stVerticalBlock"]:has(> div .pavimentacao-donut-marker) .iap-legend-right {
+                display: contents;
+            }
+            div[data-testid="stVerticalBlock"]:has(> div .pavimentacao-donut-marker) .iap-legend-item {
+                font-size: 12px; gap: 6px;
+            }
+            .pavimentacao-donut-marker { display: none; }
             /* Compacta o espaçamento do slider e alinha sua largura à faixa de barras: recua o
                conteúdo interno em 60px (rótulo "IAP" 48px + gap 12px, igual ao .linear-axis) via
                padding-left + box-sizing, mantendo a borda direita dentro do card (sem estourar). */
@@ -246,17 +388,101 @@ def inject_css() -> None:
             }
             /* Painel IAGON por tela — botão estilizado, alinhado à direita (sem position:fixed,
                que quebrava o layout/scroll do Streamlit). */
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark) {
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iagon-fab-mark)) {
                 border: none !important; background: transparent !important; box-shadow: none !important; padding: 0 !important;
             }
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark) > div[data-testid="stVerticalBlock"] {
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iagon-fab-mark)) > div[data-testid="stVerticalBlock"] {
                 align-items: flex-end;
             }
             .iagon-fab-mark { display: none; }
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark) [data-testid="stPopover"] button {
+            div[data-testid="stPopover"] button {
+                width: 100% !important;
+                height: 40px !important;
+                min-height: 40px !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                border-radius: 10px !important;
+                border: 1px solid #244257 !important;
+                background: #0b1d28 !important;
+                color: #eef8ff !important;
+                font-family: inherit !important;
+                font-weight: 500 !important;
+                padding: 0 12px !important;
+                box-shadow: none !important;
+            }
+            div[data-testid="stPopover"] button [data-testid="stMarkdownContainer"] {
+                flex: 1 1 auto !important;
+                min-width: 0 !important;
+                max-width: calc(100% - 28px) !important;
+                overflow: hidden !important;
+                text-align: left !important;
+            }
+            div[data-testid="stPopover"] button:hover {
+                border-color: #31566d !important;
+                background: #0d2230 !important;
+                box-shadow: none !important;
+            }
+            div[data-testid="stPopover"] button p {
+                width: 100%;
+                max-width: 100%;
+                box-sizing: border-box;
+                margin: 0 !important;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                border: 0 !important;
+                border-radius: 5px;
+                background: transparent !important;
+                color: #eef8ff !important;
+                padding: 0 !important;
+                font-family: inherit !important;
+                font-size: 12px !important;
+                font-weight: 500 !important;
+                line-height: 1.2 !important;
+                text-align: left !important;
+            }
+            div[data-testid="stPopover"] button span,
+            div[data-testid="stPopover"] button p span {
+                color: #eef8ff !important;
+                font-family: inherit !important;
+                font-size: 12px !important;
+                font-weight: 500 !important;
+                line-height: 1.2 !important;
+            }
+            div[data-testid="stPopover"] button svg {
+                color: #8495a2 !important;
+                fill: #8495a2 !important;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iagon-fab-mark)) [data-testid="stPopover"] button {
                 border-radius: 999px !important; border: none !important;
-                background: linear-gradient(135deg,#00c2e8,#0a6ee0) !important; color: #04121a !important;
-                font-weight: 850 !important; padding: 11px 20px !important; box-shadow: 0 12px 30px rgba(0,194,232,.45) !important;
+                background: var(--cyan) !important; color: #04121a !important;
+                width: auto !important; height: auto !important; min-height: 44px !important;
+                display: inline-flex !important; align-items: center !important; justify-content: center !important;
+                gap: 8px !important; font-weight: 850 !important; padding: 11px 20px !important;
+                box-shadow: var(--shadow-card) !important;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iagon-fab-mark)) [data-testid="stPopover"] button [data-testid="stMarkdownContainer"] {
+                flex: 0 0 auto !important;
+                min-width: auto !important;
+                max-width: none !important;
+                overflow: visible !important;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iagon-fab-mark)) [data-testid="stPopover"] button p {
+                width: auto;
+                max-width: none;
+                overflow: visible;
+                text-overflow: clip;
+                border: 0 !important;
+                background: transparent !important;
+                color: #04121a !important;
+                padding: 0;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iagon-fab-mark)) [data-testid="stPopover"] button span,
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.iagon-fab-mark):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iagon-fab-mark)) [data-testid="stPopover"] button p span {
+                color: #04121a !important;
+                font-size: inherit !important;
+                font-weight: inherit !important;
             }
             .iagon-cv-head { font-size: 15px; color: #f4f7fb; }
             .iagon-cv-sub { font-size: 12px; color: #92a1ad; margin: 2px 0 10px; }
@@ -267,7 +493,7 @@ def inject_css() -> None:
             .chart-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
             .iap-body { height: 345px; display: grid; grid-template-columns: 1fr 260px 1fr; gap: 28px; align-items: end; padding-top: 10px; }
             .iap-donut-wrap { grid-column: 2; align-self: center; display: grid; place-items: center; overflow: visible; }
-            .iap-donut { width: 190px; height: 190px; border-radius: 50%; position: relative; overflow: visible; box-shadow: 0 0 34px rgba(255,49,74,.18); }
+            .iap-donut { width: 190px; height: 190px; border-radius: 50%; position: relative; overflow: visible; box-shadow: var(--shadow-card); }
             .iap-donut:after { content: ""; position: absolute; inset: 36px; background: #0b1d28; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05); }
             .iap-slice-label { position: absolute; z-index: 4; transform: translate(-50%, -50%); color: #e5edf3; font-size: 11px; line-height: 1; font-weight: 850; text-align: center; white-space: nowrap; pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,.65); }
             .iap-donut-center { position: absolute; inset: 48px; z-index: 2; display: grid; place-items: center; align-content: center; color: var(--text); }
@@ -306,7 +532,7 @@ def inject_css() -> None:
             .lcl-rowlabel { color: #9aa8b3; font-size: 11px; font-weight: 850; text-align: right; padding-right: 4px; }
             .lcl-cell { display: inline-flex; align-items: center; gap: 6px; color: #cbd5dd; font-size: 11px; font-weight: 700; white-space: nowrap; }
             .lcl-dot { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
-            .solution-card { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; box-shadow: 0 18px 44px rgba(0,0,0,.24); overflow: hidden; }
+            .solution-card { margin-top: 16px; border-radius: var(--radius-md); border: 0; background: #0b1d28; box-shadow: var(--shadow-card); overflow: hidden; }
             .solution-card-head { padding: 20px 20px 18px; border-bottom: 1px solid rgba(148,163,184,.1); }
             .solution-card-head h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .solution-card-head p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
@@ -325,33 +551,36 @@ def inject_css() -> None:
             .net-rank-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 10px; color: #9aa8b3; font-size: 11px; line-height: 1.45; }
             .net-rank-legend-item { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
             .net-rank-legend-sw { width: 12px; height: 12px; border-radius: 999px; display: inline-block; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
-            .net-rank-legend-sw.interv { background: linear-gradient(90deg, #ffb11c, #f08f12); }
-            .net-rank-legend-sw.ok { background: linear-gradient(90deg, #3f86ad, #296b8f); }
+            .net-rank-legend-sw.interv { background: #ed9617; }
+            .net-rank-legend-sw.ok { background: #465468; }
             .net-rank-legend-note { color: #7f909c; }
             .net-rank-row { display: grid; grid-template-columns: 190px 1fr 64px; grid-template-rows: auto auto; align-items: center; column-gap: 16px; row-gap: 6px; margin: 0; padding: 12px 0 14px; border-bottom: 1px solid rgba(148,163,184,.08); transition: background .15s ease, border-color .15s ease, box-shadow .15s ease; border-radius: 12px; }
             .net-rank-row:last-child { border-bottom: none; padding-bottom: 4px; }
             .net-rank-row:hover { background: rgba(9,30,42,.42); }
             .net-rank-row.active { background: rgba(9,30,42,.22); box-shadow: inset 0 0 0 1px rgba(0,194,232,.14); }
-            .net-rank-name { grid-row: 1 / span 2; align-self: start; color: #e8f1f8; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-top: 3px; }
-            .net-rank-name:hover { color: #00c2e8; }
-            .net-rank-row.active .net-rank-name { color: #5fd4ff; }
-            .net-rank-track { height: 18px; border-radius: 999px; background: #172a37; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08), inset 0 1px 8px rgba(0,0,0,.28); position: relative; }
-            .net-rank-bar { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #3f86ad, #296b8f); position: relative; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05); }   /* extensão total / parte OK */
-            .net-rank-interv { position: absolute; left: 0; top: 0; height: 100%; background: linear-gradient(90deg, #ffb11c, #f08f12); border-radius: 999px; display: flex; align-items: center; justify-content: flex-end; min-width: 2px; }
+            .net-rank-name { grid-row: 1 / span 2; align-self: start; color: #f2f7fb !important; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-top: 3px; }
+            .net-rank-name:hover { color: #ffffff !important; }
+            .net-rank-row.active .net-rank-name { color: #f2f7fb !important; }
+            .net-rank-track { height: 26px; border-radius: 7px; background: #141d29; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); position: relative; }
+            .net-rank-bar { height: 100%; border-radius: 7px; background: #465468; position: relative; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }   /* extensão total / parte OK */
+            .net-rank-interv { position: absolute; left: 0; top: 0; height: 100%; background: #ed9617; border-radius: 7px 0 0 7px; display: flex; align-items: center; justify-content: flex-start; min-width: 2px; }
             .net-rank-interv-label { padding: 0 8px; color: #08202b; font-size: 10px; font-weight: 900; letter-spacing: .02em; white-space: nowrap; text-shadow: none; }
             .net-rank-val { color: #f2f7fb; font-size: 13px; font-weight: 850; text-align: right; white-space: nowrap; }
             .net-rank-extra { grid-column: 2 / span 2; color: #8f9eaa; font-size: 11px; line-height: 1.35; }
-            .net-rank-group { margin: 0 0 12px; padding: 14px 12px 13px; border: 1px solid rgba(0,194,232,.14); border-radius: 14px; background: rgba(7,22,31,.36); transition: background .15s ease, box-shadow .15s ease; }
-            .net-rank-group:hover { background: rgba(9,30,42,.42); }
+            .net-rank-group { margin: 0 0 12px; padding: 16px 18px 15px; border: 1px solid rgba(70,91,112,.42); border-radius: 12px; background: rgba(13,25,37,.52); transition: background .15s ease, border-color .15s ease, box-shadow .15s ease; }
+            .net-rank-group:hover { background: rgba(15,31,45,.58); border-color: rgba(91,119,145,.52); }
             .net-rank-group.active { box-shadow: inset 0 0 0 1px rgba(0,194,232,.14); }
             .net-rank-group:last-child { margin-bottom: 0; }
             .net-rank-group-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-            .net-rank-group-title { color: #e8f1f8; font-size: 13px; font-weight: 850; text-decoration: none; }
-            .net-rank-group-title:hover { color: #00c2e8; }
+            .net-rank-group-title { color: #f2f7fb !important; font-size: 13px; font-weight: 850; text-decoration: none; }
+            .net-rank-group-title:hover { color: #ffffff !important; }
             .net-rank-group-meta { color: #8f9eaa; font-size: 11px; font-weight: 750; white-space: nowrap; }
-            .net-rank-slice { display: grid; grid-template-columns: 174px 1fr 64px; grid-template-rows: auto auto; align-items: center; column-gap: 14px; row-gap: 5px; padding: 9px 0; border-top: 1px solid rgba(148,163,184,.08); }
+            .net-rank-slice { display: grid; grid-template-columns: minmax(0, 1fr) 64px; grid-template-rows: auto auto auto; align-items: center; column-gap: 14px; row-gap: 6px; padding: 4px 0 0; border-top: 1px solid rgba(148,163,184,.08); }
             .net-rank-slice:first-of-type { border-top: 0; }
-            .net-rank-slice-name { grid-row: 1 / span 2; color: #54d6ff; font-size: 12px; font-weight: 850; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .net-rank-slice-name { grid-column: 1 / span 2; grid-row: 1; color: #f2f7fb; font-size: 12px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .net-rank-slice .net-rank-track { grid-column: 1; grid-row: 2; }
+            .net-rank-slice .net-rank-val { grid-column: 2; grid-row: 2; }
+            .net-rank-slice .net-rank-extra { grid-column: 1 / span 2; grid-row: 3; }
             @media (max-width: 920px) {
                 .net-rank-row { grid-template-columns: minmax(0, 1fr) 70px; grid-template-rows: auto auto auto; row-gap: 7px; padding: 12px 0 15px; }
                 .net-rank-name { grid-column: 1 / span 2; grid-row: 1; white-space: normal; }
@@ -361,8 +590,8 @@ def inject_css() -> None:
                 .net-rank-slice { grid-template-columns: minmax(0, 1fr) 70px; grid-template-rows: auto auto auto; row-gap: 7px; }
                 .net-rank-slice-name { grid-column: 1 / span 2; grid-row: 1; white-space: normal; }
             }
-            .iagon-hero { display: flex; gap: 14px; align-items: center; margin: 4px 0 16px; padding: 18px 20px; border-radius: 16px; border: 1px solid #1d3848; background: linear-gradient(120deg, rgba(0,194,232,.10), rgba(11,29,40,.45)); }
-            .iagon-avatar { width: 46px; height: 46px; flex: none; display: grid; place-items: center; border-radius: 14px; background: linear-gradient(135deg, #00c2e8, #0a6ee0); color: #04121a; font-size: 22px; font-weight: 800; box-shadow: 0 10px 28px rgba(0,194,232,.35); }
+            .iagon-hero { display: flex; gap: 14px; align-items: center; margin: 4px 0 16px; padding: 18px 20px; border-radius: 16px; border: 1px solid rgba(0,194,232,.22); background: rgba(0,194,232,.06); }
+            .iagon-avatar { width: 46px; height: 46px; flex: none; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--cyan); color: #04121a; font-size: 22px; font-weight: 800; box-shadow: var(--shadow-card); }
             .iagon-hero h3 { margin: 0; color: var(--text); font-size: 16px; font-weight: 850; }
             .iagon-hero p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; max-width: 760px; line-height: 1.5; }
             .iagon-suggest-label { color: #8f9eaa; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 800; margin: 8px 0 8px; }
@@ -371,7 +600,7 @@ def inject_css() -> None:
             .segment-table td { padding: 8px 10px; border-top: 1px solid rgba(148,163,184,.08); font-size: 11px; }
             .solution-chip-cell { border-radius: 6px; font-weight: 850; text-align: center; }
             .solution-table td.detail-toggle-cell { text-align: center; white-space: nowrap; }
-            .detail-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; padding: 5px 12px; border-radius: 999px; border: 1px solid #244257; background: #0b1a23; color: var(--cyan); font-size: 11px; font-weight: 800; white-space: nowrap; user-select: none; transition: background .15s, border-color .15s; }
+            .detail-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; padding: 5px 12px; border-radius: var(--radius-sm); border: 1px solid #244257; background: #0b1a23; color: var(--cyan); font-size: 11px; font-weight: 800; white-space: nowrap; user-select: none; transition: background .15s, border-color .15s; }
             .detail-toggle:hover { background: #06303a; border-color: #00c2e8; }
             .detail-toggle .caret { font-size: 9px; line-height: 1; transition: transform .15s ease; }
             .detail-row td.detail-cell { padding: 0 !important; border-top: 0 !important; background: rgba(6,16,24,.4); }
@@ -393,6 +622,8 @@ def inject_css() -> None:
             .snv-cost-track { height: 16px; background: rgba(148,163,184,.12); border-radius: 4px; overflow: hidden; }
             .snv-cost-bar { display: block; height: 100%; border-radius: 4px; min-width: 2px; }
             .snv-cost-val { color: #9aa8b3; font-size: 11px; white-space: nowrap; }
+            .snv-schedule-label { color: #8f9eaa; }
+            .snv-cost-year { color: #9fb0bd; }
             .proj-chart { margin-top: 18px; }
             .proj-legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 14px; padding-top: 13px; border-top: 1px solid rgba(148,163,184,.12); }
             .proj-leg { display: inline-flex; align-items: center; gap: 8px; color: #cbd5dd; font-size: 12px; font-weight: 700; }
@@ -402,7 +633,7 @@ def inject_css() -> None:
             .alert-item { display: grid; grid-template-columns: 10px 1fr; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 10px; border: 1px solid #1d3848; background: #0b1d28; color: #dce6ed; font-size: 13px; }
             .alert-item .alert-dot { width: 9px; height: 9px; border-radius: 999px; }
             .alert-critico { border-color: rgba(255,49,74,.5); }
-            .alert-critico .alert-dot { background: #ff314a; box-shadow: 0 0 10px rgba(255,49,74,.6); }
+            .alert-critico .alert-dot { background: #ff314a; }
             .alert-atencao { border-color: rgba(255,138,0,.45); }
             .alert-atencao .alert-dot { background: #ff8a00; }
             .alert-ok .alert-dot { background: #22c55e; }
@@ -421,18 +652,9 @@ def inject_css() -> None:
             .cp-sw { width: 13px; height: 13px; border-radius: 3px; display: inline-block; }
             tr.snv-row:has(+ tr.detail-row .detail-checkbox:checked) .detail-toggle { background: #06303a; border-color: #00c2e8; }
             tr.snv-row:has(+ tr.detail-row .detail-checkbox:checked) .detail-toggle .caret { transform: rotate(90deg); }
-            div[data-testid="stPopover"] button {
-                min-height: 38px;
-                border-radius: 10px;
-                border: 1px solid #38bdf8;
-                background: rgba(0,194,232,.10);
-                color: var(--cyan);
-                font-size: 12px;
-                font-weight: 850;
-            }
             .iap-pill { display: inline-flex; align-items: center; gap: 8px; }
             .iap-pill-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
-            .solution-distribution { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; padding: 20px 20px 24px; box-shadow: 0 18px 44px rgba(0,0,0,.18); overflow: hidden; }
+            .solution-distribution { margin-top: 16px; border-radius: var(--radius-md); border: 0; background: #0b1d28; padding: 20px 20px 24px; box-shadow: var(--shadow-card); overflow: hidden; }
             .solution-distribution-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
             .solution-distribution-title { display: flex; align-items: center; gap: 10px; }
             .solution-distribution-icon { width: 32px; height: 32px; border-radius: 12px; display: grid; place-items: center; background: #00c2e8; color: #031019; font-weight: 900; }
@@ -446,7 +668,7 @@ def inject_css() -> None:
             .dnit-priority-mode-inline + div { position: relative; z-index: 4; }
             .solution-bars { height: 270px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
             .solution-y-axis { position: relative; height: 188px; margin-top: 18px; border-right: 1px solid rgba(148,163,184,.14); }
-            .solution-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; }
+            .solution-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; white-space: nowrap; }
             .solution-chart-area { position: relative; padding-top: 18px; overflow-x: auto; overflow-y: visible; scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.5) rgba(148,163,184,.12); }
             /* Barra de rolagem SEMPRE visível (no macOS o overlay fica oculto e o gráfico parece estourar). */
             .solution-chart-area::-webkit-scrollbar { height: 10px; }
@@ -456,26 +678,138 @@ def inject_css() -> None:
             .solution-chart-plot { height: 188px; border-bottom: 2px solid rgba(148,163,184,.34); background: repeating-linear-gradient(to top, transparent 0, transparent 48px, rgba(148,163,184,.10) 49px, transparent 50px); }
             .solution-bar-grid { height: 188px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); align-items: end; gap: 26px; padding: 0 16px; min-width: 100%; }
             .solution-bar-item { height: 188px; display: grid; align-items: end; justify-items: center; min-width: 156px; }
-            .solution-bar { width: min(100%, 118px); min-height: 3px; border-radius: 5px 5px 0 0; position: relative; box-shadow: 0 10px 22px rgba(0,0,0,.18); }
+            .solution-bar { width: min(100%, 118px); min-height: 3px; border-radius: 5px 5px 0 0; position: relative; }
             .solution-bar-value { position: absolute; top: -30px; left: 50%; transform: translateX(-50%); color: #f4f7fb; font-size: 11px; font-weight: 850; white-space: nowrap; text-align: center; line-height: 1.15; }
             .solution-bar-value span { display: block; color: #9aa8b3; font-size: 10px; font-weight: 750; margin-top: 2px; }
             .solution-label-grid { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); gap: 26px; padding: 9px 16px 0; min-width: 100%; justify-items: center; }
             .solution-bar-label { color: #9aa8b3; font-size: 11px; text-align: center; white-space: normal; line-height: 1.25; min-width: 156px; max-width: 156px; }
-            .solution-panel { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; padding: 20px; box-shadow: 0 18px 44px rgba(0,0,0,.18); }
+            /* Barra empilhada por camada (Geotecnia · Estrutura do pavimento):
+               reaproveita o grid .solution-bar-grid/.solution-bar-item, só troca
+               a barra de cor única por uma coluna com N camadas empilhadas. */
+            .pavement-bar { width: min(100%, 96px); height: 100%; display: flex; flex-direction: column-reverse; border-radius: 5px 5px 0 0; overflow: hidden; }
+            .pavement-bar-seg { width: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 850; line-height: 1; }
+            .pavement-bar-seg:not(:first-child) { border-top: 2px solid #0b1d28; }
+            /* Tooltip "Dados" (hover): CSS puro, sem JS — mesmo padrão dos
+               rótulos de valor flutuantes (.solution-bar-value), só que
+               exibido só no :hover do trecho. */
+            .pavement-bar-item { position: relative; overflow: visible; cursor: default; }
+            /* Sobreposto na própria área do gráfico (não flutua acima da caixa):
+               o container tem rolagem horizontal (overflow-x:auto), e nesse caso
+               o navegador recorta o overflow-y também (mesmo declarado "visible"),
+               cortando qualquer coisa que tente escapar por cima da caixa. */
+            .pavement-tooltip {
+                display: none; position: absolute; left: 50%; top: 50%;
+                transform: translate(-50%, -50%); width: 220px; background: #10151b;
+                border: 1px solid rgba(148,163,184,.32); border-radius: 10px;
+                box-shadow: 0 18px 40px rgba(0,0,0,.55); z-index: 60; text-align: left; overflow: hidden;
+            }
+            .pavement-bar-item:hover .pavement-tooltip { display: block; }
+            .pavement-tooltip-head {
+                background: #05080b; color: #fff; font-size: 11px; font-weight: 800;
+                letter-spacing: .06em; text-transform: uppercase; padding: 7px 12px;
+            }
+            .pavement-tooltip-body { padding: 8px 12px 9px; font-size: 11px; line-height: 1.45; color: #dbe5ec; }
+            .pavement-tooltip-row { display: flex; justify-content: space-between; gap: 10px; white-space: nowrap; }
+            .pavement-tooltip-row span { color: #9aa8b3; }
+            .pavement-tooltip-row strong { color: #fff; font-weight: 800; }
+            .solution-panel { margin-top: 16px; border-radius: var(--radius-md); border: 0; background: #0b1d28; padding: 20px; box-shadow: var(--shadow-card); }
             .solution-panel-title { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .solution-panel-subtitle { margin: 6px 0 20px; color: var(--muted); font-size: 12px; line-height: 1.45; }
             .solution-panel-spacer { height: 12px; }
             .solution-filter-label { margin: 0 0 6px; color: #8f9eaa; font-size: 10px; letter-spacing: .11em; text-transform: uppercase; font-weight: 850; }
             div[data-testid="stMultiSelect"] label,
             div[data-testid="stSlider"] label { display: none; }
-            div[data-baseweb="tag"] {
-                background: rgba(0,194,232,.14) !important;
-                border: 1px solid rgba(0,194,232,.30) !important;
-                color: #d8eef5 !important;
-                box-shadow: inset 0 0 0 1px rgba(6,16,24,.12);
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+                height: 40px !important;
+                min-height: 40px !important;
+                max-height: 40px !important;
+                overflow: hidden !important;
             }
-            div[data-baseweb="tag"] span { color: #d8eef5 !important; font-weight: 800 !important; }
-            div[data-baseweb="tag"] svg { color: #9bcbd7 !important; fill: #9bcbd7 !important; }
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div > div:first-child {
+                min-width: 0 !important;
+                flex-wrap: nowrap !important;
+                overflow-x: auto !important;
+                overflow-y: hidden !important;
+                scrollbar-width: none;
+            }
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div > div:first-child:has(> [data-baseweb="tag"] ~ [data-baseweb="tag"]) {
+                position: relative;
+                counter-reset: selected-items;
+            }
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div > div:first-child:has(> [data-baseweb="tag"] ~ [data-baseweb="tag"]) > [data-baseweb="tag"] {
+                counter-increment: selected-items;
+            }
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div > div:first-child:has(> [data-baseweb="tag"] ~ [data-baseweb="tag"]):not(:focus-within) > [data-baseweb="tag"] {
+                position: absolute !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+            }
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div > div:first-child:has(> [data-baseweb="tag"] ~ [data-baseweb="tag"]):not(:focus-within)::after {
+                content: counter(selected-items) " selecionados";
+                align-self: center;
+                color: #dceaf3;
+                font-size: 13px;
+                font-weight: 800;
+                line-height: 1;
+                white-space: nowrap;
+                pointer-events: none;
+            }
+            div[data-testid="stMultiSelect"] [data-baseweb="select"] > div > div:first-child::-webkit-scrollbar {
+                display: none;
+            }
+            [data-baseweb="tag"] {
+                flex: 0 0 auto !important;
+                background: #123b5d !important;
+                border: 1px solid #2d6f9f !important;
+                color: #eef8ff !important;
+                box-shadow: inset 0 0 0 1px rgba(6,16,24,.16);
+            }
+            [data-baseweb="tag"] span { color: #eef8ff !important; font-weight: 800 !important; }
+            [data-baseweb="tag"] svg { color: #b9dcf4 !important; fill: #b9dcf4 !important; }
+            [role="listbox"] [role="option"][aria-selected="true"] {
+                background: rgba(18,59,93,.24) !important;
+                box-shadow: inset 3px 0 0 #2d6f9f, inset 0 0 0 1px rgba(45,111,159,.24) !important;
+                color: #eef8ff !important;
+                font-weight: 800 !important;
+            }
+            [role="listbox"] [role="option"][aria-selected="true"]:hover {
+                background: rgba(18,59,93,.38) !important;
+            }
+            div[data-testid="stPopoverBody"] div[data-testid="stCheckbox"] {
+                border-radius: 9px;
+                padding: 3px 8px;
+                transition: background .15s ease, box-shadow .15s ease;
+            }
+            div[data-testid="stPopoverBody"] div[data-testid="stCheckbox"]:has(input:checked) {
+                background: rgba(18,59,93,.24);
+                box-shadow: inset 3px 0 0 #2d6f9f, inset 0 0 0 1px rgba(45,111,159,.22);
+            }
+            /* st.expander vem sem estilo nosso: usa a borda/fundo claro padrão do Streamlit,
+               destoando do resto do painel. Achata pro mesmo padrão dos outros cards. */
+            div[data-testid="stExpander"] {
+                border: none !important;
+                border-radius: var(--radius-md) !important;
+                background: var(--surface) !important;
+                box-shadow: var(--shadow-card) !important;
+                overflow: hidden;
+            }
+            div[data-testid="stExpander"] details {
+                border: none !important;
+                background: transparent !important;
+            }
+            div[data-testid="stExpander"] summary {
+                background: transparent !important;
+                color: var(--text) !important;
+                font-weight: 800 !important;
+            }
+            div[data-testid="stExpander"] summary svg {
+                color: var(--muted) !important;
+                fill: var(--muted) !important;
+            }
+            div[data-testid="stExpanderDetails"] {
+                background: transparent !important;
+                border: none !important;
+            }
             .pagination-summary { color: #9aa8b3; font-size: 12px; padding-top: 28px; text-align: right; }
             div[data-testid="stNumberInput"] label { display: none; }
             div[data-testid="stNumberInput"] input,
@@ -489,7 +823,7 @@ def inject_css() -> None:
                 font-size: 12px;
                 font-weight: 800;
             }
-            .economic-panel { margin-top: 16px; border-radius: 14px; border: 1px solid #1d3848; background: #0b1d28; padding: 20px; box-shadow: 0 18px 44px rgba(0,0,0,.18); }
+            .economic-panel { margin-top: 16px; border-radius: var(--radius-md); border: 0; background: #0b1d28; padding: 20px; box-shadow: var(--shadow-card); }
             .comparison-x { height: 100%; min-height: 88px; display: grid; place-items: center; color: #00c2e8; font-size: 28px; line-height: 1; font-weight: 900; opacity: .82; padding-top: 18px; }
             .comparison-side-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; }
             .comparison-side-title b { color:#e8f1f8; font-size:13px; font-weight:850; }
@@ -497,7 +831,7 @@ def inject_css() -> None:
             .comparison-side-grid { display:grid; grid-template-columns:minmax(160px,.72fr) minmax(240px,1.28fr); gap:12px; align-items:end; }
             .comparison-param-title { color:#8f9eaa; font-size:10px; letter-spacing:.12em; text-transform:uppercase; font-weight:850; margin:18px 0 10px; padding-top:16px; border-top:1px solid rgba(34,211,238,.10); }
             .comparison-summary { display:grid; grid-template-columns:minmax(0,1fr) 34px minmax(0,1fr); align-items:stretch; gap:12px; margin:10px 0 14px; }
-            .comparison-pill { border:1px solid rgba(34,211,238,.22); background:linear-gradient(135deg, rgba(8,28,38,.92), rgba(7,18,27,.92)); border-radius:12px; padding:12px 14px; min-height:64px; }
+            .comparison-pill { border:1px solid rgba(34,211,238,.22); background: var(--surface); border-radius:var(--radius-sm); padding:12px 14px; min-height:64px; }
             .comparison-pill small { display:block; color:#8f9eaa; font-size:10px; letter-spacing:.12em; text-transform:uppercase; font-weight:850; margin-bottom:7px; }
             .comparison-pill strong { display:block; color:#e8f1f8; font-size:14px; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
             .comparison-pill span { display:block; color:#00c2e8; font-size:11px; font-weight:800; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -506,7 +840,17 @@ def inject_css() -> None:
             .comparison-param-summary b { color:#00c2e8; font-weight:900; }
             .comparison-param-chip { border:1px solid rgba(148,163,184,.16); background:rgba(8,26,36,.72); border-radius:999px; padding:7px 10px; }
             .comparison-param-row { margin-bottom:12px; }
-            div[data-testid="stRadio"] label p { color:#c9d6df !important; font-weight:inherit !important; font-size:inherit !important; }
+            div[data-testid="stRadio"] label,
+            div[data-testid="stRadio"] label p,
+            div[data-testid="stRadio"] label span,
+            div[data-testid="stRadio"] label div,
+            div[data-testid="stRadio"] [data-testid="stMarkdownContainer"],
+            div[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {
+                color: #c9d6df !important;
+                opacity: 1 !important;
+                font-weight: inherit !important;
+                font-size: inherit !important;
+            }
             div[data-testid="stRadio"] [role="radiogroup"] label { opacity:1 !important; }
             .economic-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
             .economic-title { display: flex; align-items: center; gap: 10px; }
@@ -556,7 +900,7 @@ def inject_css() -> None:
             .segment-timeline-segment strong { display: block; font-size: 11px; font-weight: 900; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .segment-timeline-segment span { display: block; color: #8f9eaa; font-size: 10px; font-weight: 800; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .segment-timeline-head { left: 0; z-index: 3; }
-            .segment-timeline-chip { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; border-radius: 8px; padding: 4px 8px; font-size: 10px; font-weight: 900; line-height: 1; box-shadow: 0 8px 20px rgba(0,0,0,.18); max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .segment-timeline-chip { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; border-radius: 8px; padding: 4px 8px; font-size: 10px; font-weight: 900; line-height: 1; box-shadow: var(--shadow-card); max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
             .segment-timeline-empty { background: rgba(8,26,36,.28); }
             .segment-timeline-note { color: #9aa8b3; font-size: 11px; margin: -8px 0 12px; }
             .priority-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; margin-right: 7px; }
@@ -618,7 +962,6 @@ def inject_css() -> None:
                 }
 
                 .page-title,
-                .brand-title,
                 .chart-heading h3,
                 .solution-card-head h3,
                 .metric-value,
@@ -641,6 +984,8 @@ def inject_css() -> None:
                 .solution-table strong,
                 .comparison-pill strong,
                 .net-rank-group-title,
+                .net-rank-name,
+                .net-rank-slice-name,
                 .net-rank-val,
                 .segment-control-caption + div[data-testid="stRadio"] label p {
                     color: var(--text) !important;
@@ -651,7 +996,6 @@ def inject_css() -> None:
                 .metric-title,
                 .chart-heading p,
                 .metric-subtitle,
-                .brand-subtitle,
                 .solution-card-head p,
                 .economic-head p,
                 .solution-panel-subtitle,
@@ -669,7 +1013,16 @@ def inject_css() -> None:
                 .economic-legend,
                 .iap-legend-note,
                 .net-rank-extra,
-                .net-rank-group-meta {
+                .net-rank-group-meta,
+                .proj-leg,
+                .linear-legend-item,
+                .lcl-cell {
+                    color: var(--muted) !important;
+                }
+                /* Legendas montadas com <span style="color:#cbd5df"> inline
+                   (tom claro pensado pro fundo escuro) — precisa de
+                   !important pra vencer o inline no tema claro. */
+                .solution-distribution-meta span {
                     color: var(--muted) !important;
                 }
                 [data-testid="stMarkdownContainer"] p,
@@ -699,7 +1052,7 @@ def inject_css() -> None:
                     color: #6b7f8f !important;
                 }
                 .iap-card .iap-donut {
-                    box-shadow: 0 16px 34px rgba(18,43,58,.08) !important;
+                    box-shadow: 0 1px 2px rgba(18,43,58,.12) !important;
                 }
                 .iap-card .iap-donut:after {
                     background: #ffffff !important;
@@ -729,7 +1082,7 @@ def inject_css() -> None:
                 .comparison-pill {
                     background: #ffffff !important;
                     border-color: #bfd2dc !important;
-                    box-shadow: 0 12px 26px rgba(18,43,58,.08) !important;
+                    box-shadow: 0 1px 2px rgba(18,43,58,.10) !important;
                 }
                 .comparison-param-title {
                     border-top-color: rgba(95,114,128,.22) !important;
@@ -752,7 +1105,11 @@ def inject_css() -> None:
                 .status-pill[style*="grid-template-columns"] div[style*="letter-spacing: .14em"] {
                     color: #6b7f8f !important;
                 }
+                div[data-testid="stRadio"] label,
                 div[data-testid="stRadio"] label p,
+                div[data-testid="stRadio"] label span,
+                div[data-testid="stRadio"] label div,
+                div[data-testid="stRadio"] [data-testid="stMarkdownContainer"],
                 div[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {
                     color: #13232e !important;
                 }
@@ -768,6 +1125,8 @@ def inject_css() -> None:
                 }
 
                 div[data-baseweb="select"] > div,
+                div[data-testid="stPopover"] button,
+                div[data-testid="stTextInput"] input,
                 .filter-placeholder,
                 .status-pill,
                 .detail-toggle,
@@ -777,12 +1136,34 @@ def inject_css() -> None:
                     border-color: #bfd2dc !important;
                     color: var(--text) !important;
                 }
+                div[data-testid="stTextInput"] input::placeholder {
+                    color: #6b7f8f !important;
+                    opacity: 1 !important;
+                }
+                div[data-testid="stCaptionContainer"],
+                div[data-testid="stCaptionContainer"] p {
+                    color: var(--muted) !important;
+                }
+                div[data-testid="stPopover"] button:hover {
+                    background: #f3f8fb !important;
+                    border-color: #8fb4c6 !important;
+                }
                 div[data-baseweb="select"] span,
                 div[data-baseweb="select"] svg,
                 div[data-testid="stSelectbox"] input,
                 div[data-testid="stMultiSelect"] input {
                     color: var(--text) !important;
                     fill: var(--text) !important;
+                }
+                div[data-testid="stPopover"] button p,
+                div[data-testid="stPopover"] button span {
+                    background: transparent !important;
+                    border: 0 !important;
+                    color: var(--text) !important;
+                }
+                div[data-testid="stPopover"] button svg {
+                    color: #6b7f8f !important;
+                    fill: #6b7f8f !important;
                 }
                 div[data-baseweb="popover"] {
                     background: #ffffff !important;
@@ -800,21 +1181,21 @@ def inject_css() -> None:
                 li[role="option"]:hover {
                     background: #e7f2f7 !important;
                 }
-                div[data-baseweb="tag"] {
+                [data-baseweb="tag"] {
                     background: #dff6fb !important;
                     border-color: #8fcfde !important;
                     color: #075668 !important;
                     box-shadow: none !important;
                 }
-                div[data-baseweb="tag"] span,
-                div[data-baseweb="tag"] svg {
+                [data-baseweb="tag"] span,
+                [data-baseweb="tag"] svg {
                     color: #075668 !important;
                     fill: #075668 !important;
                 }
 
                 .metric-card,
                 .chart-card,
-                div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[data-testid="stVerticalBlock"] > div:first-child .iap-zoom-marker),
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iap-zoom-marker)),
                 .solution-card,
                 .solution-distribution,
                 .solution-panel,
@@ -826,20 +1207,33 @@ def inject_css() -> None:
                 .segment-timeline-card {
                     background: #ffffff !important;
                     border-color: var(--border) !important;
-                    box-shadow: 0 16px 34px rgba(18,43,58,.10) !important;
+                    box-shadow: 0 1px 2px rgba(18,43,58,.10) !important;
                 }
-                div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[data-testid="stVerticalBlock"] > div:first-child .iap-zoom-marker) {
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iap-zoom-marker)) {
                     background: #ffffff !important;
                 }
+                .chart-card,
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iap-zoom-marker)),
+                .solution-card,
+                .solution-distribution,
+                .solution-panel,
+                .economic-panel,
+                .comparison-summary-row,
+                .scenario-summary-card,
+                .segment-timeline-card {
+                    border-color: transparent !important;
+                    box-shadow: 0 1px 2px rgba(18,43,58,.08) !important;
+                }
                 .metric-card {
-                    background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(241,247,250,.98)) !important;
+                    background: #ffffff !important;
                 }
                 .metric-icon {
-                    background: rgba(19,35,46,.08) !important;
+                    background: color-mix(in srgb, currentColor 14%, transparent) !important;
+                    box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 24%, transparent) !important;
                 }
                 .net-rank-group {
                     background: transparent !important;
-                    border-color: #d7e4eb !important;
+                    border-color: transparent !important;
                     box-shadow: none !important;
                 }
                 .net-rank-group:hover,
@@ -849,23 +1243,58 @@ def inject_css() -> None:
                 }
 
                 .side-item {
-                    color: #516575 !important;
+                    color: #22323e !important;
                 }
                 .side-item.active {
-                    background: #dff6fb !important;
-                    color: #007f9b !important;
+                    background: #e7ecf3 !important;
+                    color: #14304f !important;
                 }
                 .side-description {
                     color: #78909d !important;
                 }
                 .side-item.active .side-description {
-                    color: #33899a !important;
+                    color: #3a5a78 !important;
                 }
-                [data-testid="stSidebar"] div[data-testid="stButton"] button {
-                    border-color: #bfd2dc !important;
+                /* Azul-marinho escuro (não cyan) no tema claro — cyan sobre
+                   fundo claro fica com pouco contraste/aparência "lavada". */
+                .brand-title, .brand-title-tick i {
+                    color: #14304f !important;
+                }
+                .brand-title-tick i {
+                    background: #14304f !important;
+                }
+                .side-group-label {
+                    color: #7f909c !important;
+                    border-top-color: rgba(95,114,128,.18) !important;
+                }
+                /* Accent de cor pontual (não tudo marinho): o CTA do IAGON
+                   mantém o cyan vivo original (é uma chamada de ação, faz
+                   sentido destoar do resto) — texto escuro de volta, já que
+                   o fundo aqui continua claro/vivo. */
+                .side-cta {
+                    background: #00c2e8 !important;
+                    box-shadow: 0 8px 20px rgba(0,127,155,.28) !important;
+                }
+                .side-cta-icon,
+                .side-cta-label {
+                    color: #001018 !important;
+                }
+                .side-cta-description {
+                    color: #0a2b33 !important;
+                }
+                /* Segundo ponto de accent: um traço cyan no item de menu
+                   ativo, pra não ficar 100% monocromático marinho. */
+                .side-item.active {
+                    border-left: 3px solid #00c2e8 !important;
+                    padding-left: 7px !important;
+                }
+                .side-theme-toggle {
+                    color: #7f909c !important;
+                }
+                .side-theme-toggle:hover {
+                    color: #007f9b !important;
+                    border-color: #8fd9ec !important;
                     background: #ffffff !important;
-                    color: #13232e !important;
-                    box-shadow: 0 10px 24px rgba(18,43,58,.08) !important;
                 }
                 [data-testid="collapsedControl"] {
                     border-color: #bfd2dc !important;
@@ -907,11 +1336,13 @@ def inject_css() -> None:
                 }
                 .detail-summary,
                 .snv-strip-axis,
+                .snv-schedule-label,
                 .snv-cost-val {
                     color: #5f7280 !important;
                 }
                 .snv-strip-leg,
-                .snv-cost-lbl {
+                .snv-cost-lbl,
+                .snv-cost-year {
                     color: #334755 !important;
                 }
                 .snv-cost-track {
@@ -930,6 +1361,163 @@ def inject_css() -> None:
 def _filter_label(label: str) -> None:
     """Renderiza o rótulo pequeno acima de um filtro da top bar."""
     st.markdown(f'<div class="filter-label">{label}</div>', unsafe_allow_html=True)
+
+
+def _update_compact_multiselect(
+    key: str,
+    option_keys: list[tuple[object, str]],
+    snapshot_key: str,
+) -> None:
+    """Atualiza a seleção principal a partir das caixas exibidas no popover."""
+    selected = [option for option, option_key in option_keys if st.session_state.get(option_key, False)]
+    st.session_state[key] = selected
+    st.session_state[snapshot_key] = {
+        "selected": selected,
+        "options": [option for option, _ in option_keys],
+    }
+
+
+def _set_compact_multiselect_all(
+    key: str,
+    option_keys: list[tuple[object, str]],
+    snapshot_key: str,
+    value: bool,
+) -> None:
+    """Marca ou desmarca todas as opções de uma vez (botões 'Marcar todos'/'Limpar'),
+    para não precisar clicar opção por opção quando se quer comparar só 2-3 itens
+    dentre dezenas (ex.: anos)."""
+    for option, option_key in option_keys:
+        st.session_state[option_key] = value
+    selected = [option for option, _ in option_keys] if value else []
+    st.session_state[key] = selected
+    st.session_state[snapshot_key] = {
+        "selected": selected,
+        "options": [option for option, _ in option_keys],
+    }
+
+
+def _update_compact_singleselect(
+    key: str,
+    selected_option,
+    option_keys: list[tuple[object, str]],
+    snapshot_key: str,
+) -> None:
+    """Mantém uma única caixa marcada no seletor simples."""
+    for option, option_key in option_keys:
+        st.session_state[option_key] = option == selected_option
+    st.session_state[key] = selected_option
+    st.session_state[snapshot_key] = {
+        "selected": selected_option,
+        "options": [option for option, _ in option_keys],
+    }
+
+
+def _compact_multiselect(
+    label: str,
+    options: list,
+    *,
+    key: str,
+    default: list | None = None,
+    format_func=None,
+    placeholder: str = "Selecione uma ou mais opções",
+) -> list:
+    """Multisseletor compacto que mantém todas as opções visíveis para alternância."""
+    options = list(options)
+    formatter = format_func or (lambda value: str(value))
+    option_set = set(options)
+    current = [value for value in (st.session_state.get(key, default or []) or []) if value in option_set]
+    st.session_state[key] = current
+
+    option_keys: list[tuple[object, str]] = []
+    for option in options:
+        digest = hashlib.sha1(repr(option).encode("utf-8")).hexdigest()[:12]
+        option_keys.append((option, f"_compact_{key}_{digest}"))
+
+    snapshot_key = f"_compact_snapshot_{key}"
+    expected_snapshot = {"selected": current, "options": options}
+    if st.session_state.get(snapshot_key) != expected_snapshot:
+        for option, option_key in option_keys:
+            st.session_state[option_key] = option in current
+        st.session_state[snapshot_key] = expected_snapshot
+
+    if not current:
+        summary = placeholder
+    elif len(current) == 1:
+        summary = str(formatter(current[0]))
+    else:
+        summary = f"{len(current)} selecionados"
+
+    with st.popover(summary, use_container_width=True):
+        if not options:
+            st.caption("Sem opções disponíveis para este recorte.")
+        elif len(options) > 3:
+            # Atalho pra quando o padrão vem com tudo marcado (ex.: anos): limpar
+            # tudo e marcar só o punhado que interessa, em vez de desmarcar um a um.
+            # Empilhados (sem st.columns): o popover pode estar dentro de uma
+            # coluna já existente, e o Streamlit só permite 1 nível de colunas
+            # aninhadas — um st.columns aqui quebra nesses casos.
+            st.button(
+                "Marcar todos", key=f"{key}_mark_all", use_container_width=True,
+                on_click=_set_compact_multiselect_all, args=(key, option_keys, snapshot_key, True),
+            )
+            st.button(
+                "Limpar", key=f"{key}_clear_all", use_container_width=True,
+                on_click=_set_compact_multiselect_all, args=(key, option_keys, snapshot_key, False),
+            )
+        for option, option_key in option_keys:
+            st.checkbox(
+                str(formatter(option)),
+                key=option_key,
+                on_change=_update_compact_multiselect,
+                args=(key, option_keys, snapshot_key),
+            )
+
+    return list(st.session_state.get(key, current) or [])
+
+
+def _compact_singleselect(
+    label: str,
+    options: list,
+    *,
+    key: str,
+    default=None,
+    format_func=None,
+    placeholder: str = "Selecione uma opção",
+):
+    """Seletor único com o mesmo campo visual usado nos filtros múltiplos."""
+    options = list(options)
+    formatter = format_func or (lambda value: str(value))
+    if not options:
+        with st.popover(placeholder, use_container_width=True):
+            st.caption("Sem opções disponíveis para este recorte.")
+        return None
+
+    current = st.session_state.get(key)
+    if current not in options:
+        current = default if default in options else options[0]
+        st.session_state[key] = current
+
+    option_keys: list[tuple[object, str]] = []
+    for option in options:
+        digest = hashlib.sha1(repr(option).encode("utf-8")).hexdigest()[:12]
+        option_keys.append((option, f"_compact_single_{key}_{digest}"))
+
+    snapshot_key = f"_compact_single_snapshot_{key}"
+    expected_snapshot = {"selected": current, "options": options}
+    if st.session_state.get(snapshot_key) != expected_snapshot:
+        for option, option_key in option_keys:
+            st.session_state[option_key] = option == current
+        st.session_state[snapshot_key] = expected_snapshot
+
+    with st.popover(str(formatter(current)), use_container_width=True):
+        for option, option_key in option_keys:
+            st.checkbox(
+                str(formatter(option)),
+                key=option_key,
+                on_change=_update_compact_singleselect,
+                args=(key, option, option_keys, snapshot_key),
+            )
+    return st.session_state.get(key, current)
 
 
 def _preselect_road_from_url(roads: list[str]) -> None:
@@ -1076,26 +1664,23 @@ def render_top_bar(
     # "Tipo de Matriz" é o seletor único; cada opção mapeia para um diagnóstico interno
     # (Paragon ↔ intervencoes_iap, Matriz Cadastrada ↔ intervencoes_dnit/pipeline DNIT).
     matrix_options = [_DIAGNOSIS_TO_MATRIX.get(o, o) for o in options]
-    left, right = st.columns([0.82, 1.92], gap="large")
+    header_slot = st.empty()
+    filters, _filter_spacer = st.columns([1.92, 0.82], gap="large")
     selected_out: str | None = selected_road
     scenario_key: str | None = None
     diagnosis = page_title
 
     def _matrix_selectbox() -> str:
-        # Selectbox de "Tipo de Matriz" (Paragon / Matriz Cadastrada / Comparativo).
-        # Evita exceção do Streamlit quando o valor salvo (ex.: Comparativo) não existe
-        # nas opções desta página.
-        if st.session_state.get("topbar_matrix_type") not in matrix_options:
-            st.session_state.pop("topbar_matrix_type", None)
-        choice = st.selectbox(
+        # Popover compacto (mesmo padrão da Visão geral); trata sozinho o valor salvo
+        # que não exista mais nas opções desta página (ex.: vindo de "Comparativo").
+        return _compact_singleselect(
             "Tipo de Matriz",
             matrix_options,
             key="topbar_matrix_type",
-            label_visibility="collapsed",
+            default=matrix_options[0] if matrix_options else None,
         )
-        return choice
 
-    with right:
+    with filters:
         if not show_filters:
             # Modo rede (Visão geral): só o seletor Tipo de Matriz, sem rodovia/cenário.
             if show_diagnosis:
@@ -1112,11 +1697,11 @@ def render_top_bar(
                 _filter_label("Rodovias")
                 roads = get_available_roads()
                 _preselect_road_from_url(roads)
-                selected_out = st.selectbox(
+                selected_out = _compact_singleselect(
                     "Rodovia",
                     roads,
                     key="topbar_road",
-                    label_visibility="collapsed",
+                    default=roads[0] if roads else None,
                 )
             with matriz_col:
                 _filter_label("Tipo de Matriz")
@@ -1139,40 +1724,41 @@ def render_top_bar(
                         _filter_label("Cenários")
                         scenario_keys = [s["key"] for s in scenarios]
                         scen_by_key = {s["key"]: s for s in scenarios}
-                        _fmt = lambda k: _short_scenario_label(scen_by_key.get(k))
+                        _fmt = lambda k: (
+                            _network_scenario_label(scen_by_key.get(k))
+                            or str((scen_by_key.get(k) or {}).get("cenario") or k)
+                        )
                         if multi_scenario and scenario_keys:
                             # Campo ÚNICO de cenários (multi): a 1ª seleção dirige os cards;
                             # a lista alimenta o comparativo abaixo (sem 2º campo).
-                            sel = st.multiselect(
+                            sel = _compact_multiselect(
                                 "Cenários",
                                 scenario_keys,
                                 default=[scenario_keys[0]],
                                 format_func=_fmt,
                                 key=f"topbar_scen_{selected_out}_{matrix_type}",
-                                label_visibility="collapsed",
                             )
                             st.session_state["_topbar_selected_scenarios"] = sel
                             scenario_key = sel[0] if sel else None
                         else:
-                            scenario_key = st.selectbox(
+                            scenario_key = _compact_singleselect(
                                 "Cenário",
                                 scenario_keys,
+                                key=f"topbar_scen_single_{selected_out}_{matrix_type}",
                                 format_func=_fmt,
-                                label_visibility="collapsed",
+                                default=scenario_keys[0] if scenario_keys else None,
                             ) if scenario_keys else None
             else:
                 scenario_key = None
 
-    with left:
-        st.markdown(
-            f"""
-            <div class="top-copy">
-                <p class="eyebrow">RELATÓRIOS</p>
-                <h1 class="page-title">{page_title if (keep_title or not show_diagnosis) else diagnosis}</h1>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    header_slot.markdown(
+        f"""
+        <div class="top-copy">
+            <h1 class="page-title">{page_title if (keep_title or not show_diagnosis) else diagnosis}</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     return diagnosis, selected_out, scenario_key
 
@@ -1317,24 +1903,25 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
     """Barra superior da Visão geral com seleção múltipla de rodovia, cenário e ano."""
     options = ["Diagnóstico Paragon", "Diagnóstico DNIT"]
     matrix_options = [_DIAGNOSIS_TO_MATRIX.get(o, o) for o in options]
-    left, right = st.columns([0.82, 2.25], gap="large")
+    header_slot = st.empty()
+    filters, _filter_spacer = st.columns([2.25, 0.82], gap="large")
     diagnosis = "Visão geral"
     selected_roads: list[str] = []
     selected_scenarios: list[str] = []
     selected_years: list[int] = []
 
-    with right:
+    with filters:
         road_col, matriz_col, scenario_col, year_col = st.columns([1.0, 0.9, 1.45, 0.75], gap="small")
 
         with matriz_col:
             _filter_label("Tipo de Matriz")
             if st.session_state.get("topbar_network_matrix_type") not in matrix_options:
                 st.session_state["topbar_network_matrix_type"] = matrix_options[0]
-            matrix_choice = st.selectbox(
+            matrix_choice = _compact_singleselect(
                 "Tipo de Matriz",
                 matrix_options,
                 key="topbar_network_matrix_type",
-                label_visibility="collapsed",
+                default=matrix_options[0],
             )
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
@@ -1353,12 +1940,11 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
 
         with road_col:
             _filter_label("Rodovia")
-            selected_roads = st.multiselect(
+            selected_roads = _compact_multiselect(
                 "Rodovia",
                 road_options,
                 key=road_key,
                 placeholder="Selecione uma rodovia",
-                label_visibility="collapsed",
             )
             if road_options and not selected_roads:
                 st.session_state[road_key] = [road_options[0]]
@@ -1385,7 +1971,7 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
 
         with scenario_col:
             _filter_label("Cenário")
-            selected_scenarios = st.multiselect(
+            selected_scenarios = _compact_multiselect(
                     "Cenário",
                     [item["token"] for item in scenario_options],
                     key=scenario_key,
@@ -1398,7 +1984,6 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
                         if len(effective_roads) > 1 else
                         "Selecione um cenário"
                     ),
-                    label_visibility="collapsed",
                 )
             if scenario_options and len(effective_roads) == 1 and not selected_scenarios:
                 st.session_state[pending_key] = [str(scenario_options[0]["token"])]
@@ -1431,29 +2016,152 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
         st.session_state[year_key] = current_years
         with year_col:
             _filter_label("Ano")
-            selected_years = st.multiselect(
+            selected_years = _compact_multiselect(
                     "Ano",
                     year_options,
                     key=year_key,
                     placeholder="Selecione o ano",
-                    label_visibility="collapsed",
                 )
             if year_options and not selected_years:
                 st.session_state[year_pending_key] = [year_options[0]]
                 st.rerun()
 
-    with left:
-        st.markdown(
-            """
-            <div class="top-copy">
-                <p class="eyebrow">RELATÓRIOS</p>
-                <h1 class="page-title">Visão geral</h1>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    header_slot.markdown(
+        """
+        <div class="top-copy">
+            <h1 class="page-title">Visão geral</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     return diagnosis, selected_roads, selected_scenarios, selected_years
+
+
+def render_economic_top_bar() -> tuple[str, list[str], list[tuple[str, str]], dict[tuple[str, str], str]]:
+    """Barra superior do Cenário econômico com seleção múltipla de rodovia e cenário.
+
+    Mesmo padrão de combinação já usado na Visão geral (soma tudo que for
+    selecionado): reaproveita `_collect_network_scenario_options` e
+    `_sanitize_network_scenario_selection`. Devolve os pares (rodovia,
+    scenario_key) já resolvidos e o rótulo curto de cada par — quem chama não
+    precisa lidar com tokens.
+    """
+    options = ["Diagnóstico Paragon", "Diagnóstico DNIT"]
+    matrix_options = [_DIAGNOSIS_TO_MATRIX.get(o, o) for o in options]
+    header_slot = st.empty()
+    filters, _filter_spacer = st.columns([1.92, 0.82], gap="large")
+    diagnosis = "Diagnóstico Paragon"
+    selected_roads: list[str] = []
+    selected_scenarios: list[str] = []
+
+    with filters:
+        road_col, matriz_col, scenario_col = st.columns([0.8, 0.85, 1.35], gap="small")
+
+        with matriz_col:
+            _filter_label("Tipo de Matriz")
+            if st.session_state.get("topbar_eco_matrix_type") not in matrix_options:
+                st.session_state["topbar_eco_matrix_type"] = matrix_options[0]
+            matrix_choice = _compact_singleselect(
+                "Tipo de Matriz",
+                matrix_options,
+                key="topbar_eco_matrix_type",
+                default=matrix_options[0],
+            )
+            diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
+
+        matrix_type = matrix_choice if matrix_choice in ("Paragon", "Matriz Cadastrada") else "Paragon"
+        road_key = "topbar_eco_road"
+        scenario_key = "topbar_eco_scenario_values"
+        road_options = get_dnit_available_roads() if diagnosis == "Diagnóstico DNIT" else get_available_roads()
+        current_roads = [
+            str(road) for road in (st.session_state.get(road_key) or [])
+            if str(road) in road_options
+        ]
+        if road_options and not current_roads:
+            current_roads = [road_options[0]]
+        st.session_state[road_key] = current_roads
+
+        with road_col:
+            _filter_label("Rodovia")
+            selected_roads = _compact_multiselect(
+                "Rodovia",
+                road_options,
+                key=road_key,
+                placeholder="Selecione uma rodovia",
+            )
+            if road_options and not selected_roads:
+                st.session_state[road_key] = [road_options[0]]
+                st.rerun()
+            _sync_selected_road(selected_roads[0] if len(selected_roads) == 1 else None)
+
+        effective_roads = _network_filter_roads(selected_roads, diagnosis)
+        scenario_options = _collect_network_scenario_options(effective_roads, matrix_type)
+        option_by_token = {str(item["token"]): item for item in scenario_options}
+        valid_scenario_tokens = set(option_by_token.keys())
+        pending_key = "_topbar_eco_scenario_pending"
+        warning_key = "_topbar_eco_scenario_warning"
+        if pending_key in st.session_state:
+            pending_values = [
+                token for token in st.session_state.pop(pending_key)
+                if token in valid_scenario_tokens
+            ]
+            st.session_state[scenario_key] = pending_values
+        current_scenarios = st.session_state.get(scenario_key, []) or []
+        current_scenarios = [token for token in current_scenarios if token in valid_scenario_tokens]
+        if scenario_options and len(effective_roads) == 1 and not current_scenarios:
+            current_scenarios = [str(scenario_options[0]["token"])]
+        st.session_state[scenario_key] = current_scenarios
+        scenario_warning = st.session_state.pop(warning_key, None)
+
+        with scenario_col:
+            _filter_label("Cenário")
+            selected_scenarios = _compact_multiselect(
+                "Cenário",
+                [item["token"] for item in scenario_options],
+                key=scenario_key,
+                format_func=lambda token: option_by_token.get(str(token), {}).get("display_label", str(token)),
+                placeholder=(
+                    "Cenário padrão por rodovia"
+                    if len(effective_roads) > 1 else
+                    "Selecione um cenário"
+                ),
+            )
+            if scenario_options and len(effective_roads) == 1 and not selected_scenarios:
+                st.session_state[pending_key] = [str(scenario_options[0]["token"])]
+                st.rerun()
+            sanitized_scenarios, sanitize_message = _sanitize_network_scenario_selection(
+                selected_scenarios,
+                scenario_options,
+            )
+            if sanitize_message:
+                st.session_state[pending_key] = sanitized_scenarios
+                st.session_state[warning_key] = sanitize_message
+                st.rerun()
+            selected_scenarios = sanitized_scenarios
+            if scenario_warning:
+                st.caption(scenario_warning)
+
+    road_scenario_pairs = [
+        (option_by_token[token]["road"], option_by_token[token]["scenario_key"])
+        for token in selected_scenarios
+        if token in option_by_token
+    ]
+    labels_by_pair = {
+        (item["road"], item["scenario_key"]): item["short_label"]
+        for item in option_by_token.values()
+    }
+
+    header_slot.markdown(
+        """
+        <div class="top-copy">
+            <h1 class="page-title">Cenário econômico</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    return diagnosis, selected_roads, road_scenario_pairs, labels_by_pair
 
 
 def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], int | None]:
@@ -1463,13 +2171,14 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
     """
     options = ["Diagnóstico Paragon", "Diagnóstico DNIT"]
     matrix_options = [_DIAGNOSIS_TO_MATRIX.get(o, o) for o in options]
-    left, right = st.columns([0.82, 2.25], gap="large")
+    header_slot = st.empty()
+    filters, _filter_spacer = st.columns([2.25, 0.82], gap="large")
     selected_road = default_road
     scenario_keys: list[str] = []
     selected_year: int | None = None
     diagnosis = "Diagnóstico Paragon"
 
-    with right:
+    with filters:
         road_col, matriz_col, scenario_col, year_col = st.columns([1.0, 0.9, 1.45, 0.75], gap="small")
 
         def _placeholder(text: str) -> None:
@@ -1485,22 +2194,20 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
             _filter_label("Rodovia")
             roads = get_available_roads()
             _preselect_road_from_url(roads)
-            selected_road = st.selectbox(
+            selected_road = _compact_singleselect(
                 "Rodovia",
                 roads,
                 key="topbar_road",
-                label_visibility="collapsed",
+                default=roads[0] if roads else None,
             )
 
         with matriz_col:
             _filter_label("Tipo de Matriz")
-            if st.session_state.get("topbar_matrix_type") not in matrix_options:
-                st.session_state.pop("topbar_matrix_type", None)
-            matrix_choice = st.selectbox(
+            matrix_choice = _compact_singleselect(
                 "Tipo de Matriz",
                 matrix_options,
                 key="topbar_matrix_type",
-                label_visibility="collapsed",
+                default=matrix_options[0] if matrix_options else None,
             )
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
@@ -1516,14 +2223,13 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
                 if not current and scenario_keys:
                     current = scenario_keys[:1]
                     st.session_state[storage_key] = current
-                selected = st.multiselect(
+                selected = _compact_multiselect(
                     "Cenários",
                     scenario_keys,
                     default=current,
                     key=storage_key,
                     format_func=lambda k: _network_scenario_label(scen_by_key.get(k)),
                     placeholder="Selecione um ou mais",
-                    label_visibility="collapsed",
                 )
                 scenario_keys = [str(value) for value in selected]
             else:
@@ -1536,25 +2242,23 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
         with year_col:
             _filter_label("Ano")
             if years:
-                selected_year = st.selectbox(
+                selected_year = _compact_singleselect(
                     "Ano",
                     years,
                     key=f"topbar_diag_year_{selected_road}_{matrix_type}_{'|'.join(scenario_keys) or 'default'}",
-                    label_visibility="collapsed",
+                    default=years[0],
                 )
             else:
                 _placeholder("Sem anos")
 
-    with left:
-        st.markdown(
-            """
-            <div class="top-copy">
-                <p class="eyebrow">RELATÓRIOS</p>
-                <h1 class="page-title">Diagnóstico</h1>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    header_slot.markdown(
+        """
+        <div class="top-copy">
+            <h1 class="page-title">Diagnóstico</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     return diagnosis, selected_road, scenario_keys, selected_year
 
@@ -1567,13 +2271,14 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int
     """
     options = ["Diagnóstico Paragon", "Diagnóstico DNIT"]
     matrix_options = [_DIAGNOSIS_TO_MATRIX.get(o, o) for o in options]
-    left, right = st.columns([0.82, 2.25], gap="large")
+    header_slot = st.empty()
+    filters, _filter_spacer = st.columns([2.25, 0.82], gap="large")
     selected_road = default_road
     scenario_keys: list[str] = []
     selected_year: int | None = None
     diagnosis = "Diagnóstico Paragon"
 
-    with right:
+    with filters:
         road_col, matriz_col, scenario_col, year_col = st.columns([1.0, 0.9, 1.45, 0.75], gap="small")
 
         def _placeholder(text: str) -> None:
@@ -1589,23 +2294,21 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int
             _filter_label("Rodovia")
             roads = get_available_roads()
             _preselect_road_from_url(roads)
-            selected_road = st.selectbox(
+            selected_road = _compact_singleselect(
                 "Rodovia",
                 roads,
                 key="topbar_solution_road",
-                label_visibility="collapsed",
+                default=roads[0] if roads else None,
             )
             _sync_selected_road(selected_road)
 
         with matriz_col:
             _filter_label("Tipo de Matriz")
-            if st.session_state.get("topbar_solution_matrix_type") not in matrix_options:
-                st.session_state.pop("topbar_solution_matrix_type", None)
-            matrix_choice = st.selectbox(
+            matrix_choice = _compact_singleselect(
                 "Tipo de Matriz",
                 matrix_options,
                 key="topbar_solution_matrix_type",
-                label_visibility="collapsed",
+                default=matrix_options[0] if matrix_options else None,
             )
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
@@ -1628,14 +2331,13 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int
                 if not current and available_scenario_keys:
                     current = available_scenario_keys[:1]
                 st.session_state[storage_key] = current
-                scenario_keys = st.multiselect(
+                scenario_keys = _compact_multiselect(
                     "Cenário",
                     available_scenario_keys,
                     key=storage_key,
                     default=current,
                     format_func=lambda k: _network_scenario_label(scen_by_key.get(k)),
                     placeholder="Selecione um ou mais cenários",
-                    label_visibility="collapsed",
                 )
             else:
                 _placeholder("Sem cenários para a rodovia")
@@ -1647,25 +2349,23 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int
         with year_col:
             _filter_label("Ano")
             if years:
-                selected_year = st.selectbox(
+                selected_year = _compact_singleselect(
                     "Ano",
                     years,
                     key=f"topbar_solution_year_{selected_road}_{matrix_type}_{'|'.join(scenario_keys) or 'default'}",
-                    label_visibility="collapsed",
+                    default=years[0],
                 )
             else:
                 _placeholder("Sem anos")
 
-    with left:
-        st.markdown(
-            """
-            <div class="top-copy">
-                <p class="eyebrow">RELATÓRIOS</p>
-                <h1 class="page-title">Soluções</h1>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    header_slot.markdown(
+        """
+        <div class="top-copy">
+            <h1 class="page-title">Soluções</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     return diagnosis, selected_road, scenario_keys, selected_year
 
@@ -1698,14 +2398,13 @@ def _render_economic_master_filters(
             st.session_state[storage_key] = current
 
     _filter_caption("Cenários")
-    selected_keys = st.multiselect(
+    selected_keys = _compact_multiselect(
         "Cenários",
         keys,
         default=current,
         key=storage_key,
         format_func=lambda k: labels.get(str(k), str(k)),
         placeholder="Selecione um ou mais",
-        label_visibility="collapsed",
     )
 
     return [str(value) for value in selected_keys], labels
@@ -1764,12 +2463,11 @@ def _render_comparison_side_filter(road: str, side: str, default_matrix: str) ->
     matrix_col, scenario_col = st.columns([0.72, 1.28], gap="small")
     with matrix_col:
         _filter_caption("Tipo")
-        matrix_type = st.selectbox(
+        matrix_type = _compact_singleselect(
             f"Tipo de matriz {side.upper()}",
             matrix_options,
-            index=matrix_options.index(current_matrix),
             key=matrix_key,
-            label_visibility="collapsed",
+            default=current_matrix,
         )
 
     scenarios = get_available_scenarios(road, matrix_type)
@@ -1785,14 +2483,13 @@ def _render_comparison_side_filter(road: str, side: str, default_matrix: str) ->
 
     with scenario_col:
         _filter_caption("Cenários")
-        selected = st.multiselect(
+        selected = _compact_multiselect(
             f"Cenários {side.upper()}",
             keys,
             default=current,
             key=scenario_key,
             format_func=lambda k: labels.get(str(k), str(k)),
             placeholder="Selecione um ou mais",
-            label_visibility="collapsed",
         )
     return {
         "side": side.upper(),
@@ -1828,37 +2525,36 @@ def render_comparison_top_bar(default_road: str) -> tuple[str, str]:
     if st.session_state.get("topbar_road") not in roads:
         st.session_state["topbar_road"] = roads[0]
 
-    left, right = st.columns([0.82, 1.92], gap="large")
-    with right:
+    header_slot = st.empty()
+    filters, _filter_spacer = st.columns([1.92, 0.82], gap="large")
+    with filters:
         road_col, view_col, spacer = st.columns([0.8, 0.9, 1.3], gap="small")
         with road_col:
             _filter_label("Rodovia")
-            selected_road = st.selectbox(
+            selected_road = _compact_singleselect(
                 "Rodovia",
                 roads,
                 key="topbar_road",
-                label_visibility="collapsed",
+                default=roads[0] if roads else None,
             )
         with view_col:
             _filter_label("Visualização")
-            view_mode = st.selectbox(
+            view_mode = _compact_singleselect(
                 "Visualização",
                 ["Técnico", "Econômico"],
                 key="topbar_comparison_view_mode",
-                label_visibility="collapsed",
+                default="Técnico",
             )
         with spacer:
             st.empty()
-    with left:
-        st.markdown(
-            """
-            <div class="top-copy">
-                <p class="eyebrow">RELATÓRIOS</p>
-                <h1 class="page-title">Comparativo entre cenários</h1>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    header_slot.markdown(
+        """
+        <div class="top-copy">
+            <h1 class="page-title">Comparativo entre cenários</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     _sync_selected_road(selected_road)
     return selected_road, view_mode
 
@@ -1878,6 +2574,11 @@ def render_metric_cards(cards: list[dict]) -> None:
 def _format_km(value: float) -> str:
     """Formata quilometragem com 2 casas e vírgula decimal (padrão pt-BR)."""
     return f"{value:.2f}".replace(".", ",")
+
+
+def _format_count(value: float) -> str:
+    """Formata uma contagem inteira com separador de milhar pt-BR (sem decimais)."""
+    return f"{value:,.0f}".replace(",", ".")
 
 
 def _filter_caption(label: str) -> None:
@@ -2153,30 +2854,27 @@ def _render_solution_filters(table_df):
     first_row = st.columns([1, 1, 1], gap="medium")
     with first_row[0]:
         _filter_caption("SRE")
-        selected_sre = st.multiselect(
+        selected_sre = _compact_multiselect(
             "SRE",
             sre_options,
             key="solution_filter_sre",
             placeholder="Todos os SREs",
-            label_visibility="collapsed",
         )
     with first_row[1]:
         _filter_caption("Conceito IAP")
-        selected_iap_classes = st.multiselect(
+        selected_iap_classes = _compact_multiselect(
             "Conceito IAP",
             iap_options,
             key="solution_filter_iap",
             placeholder="Todos os conceitos",
-            label_visibility="collapsed",
         )
     with first_row[2]:
         _filter_caption("Tipo de solução")
-        selected_solutions = st.multiselect(
+        selected_solutions = _compact_multiselect(
             "Tipo de solução",
             solution_options,
             key="solution_filter_solution",
             placeholder="Todas as soluções",
-            label_visibility="collapsed",
         )
 
     filtered = table_df.copy()
@@ -2370,10 +3068,10 @@ def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type
     de = next((k for k in keys if "decrescente" in labels[k].lower()), None)
     default = [k for k in (cr, de) if k] or ([topbar_key] if topbar_key in keys else keys[:1])
     _filter_caption("Cenários (sentidos) — selecione um ou mais")
-    selected = st.multiselect(
+    selected = _compact_multiselect(
         "Cenários (sentidos)", keys, default=default,
         format_func=lambda k: _short_scenario_label(by_key.get(k)),  # nome curto (igual às outras telas)
-        key=f"{widget_key}_{road}", label_visibility="collapsed",
+        key=f"{widget_key}_{road}",
     )
     return (selected or default), labels
 
@@ -2610,11 +3308,11 @@ def _render_solution_table_controls(filtered_table, *, export_fn=None):
     page_size_options = [25, 50, 100, "Todos"]
     with page_size_col:
         _filter_caption("Registros por página")
-        page_size = st.selectbox(
+        page_size = _compact_singleselect(
             "Registros por página",
             page_size_options,
-            index=0,
-            label_visibility="collapsed",
+            key="sol_table_page_size",
+            default=page_size_options[0],
         )
 
     if page_size == "Todos":
@@ -2698,21 +3396,21 @@ def _render_dnit_solution_filters(table_df, zona_order):
     first_row = st.columns([1, 1, 1], gap="medium")
     with first_row[0]:
         _filter_caption("SRE")
-        selected_sre = st.multiselect(
+        selected_sre = _compact_multiselect(
             "SRE", sre_options, key="dnit_solution_filter_sre",
-            placeholder="Todos os SREs", label_visibility="collapsed"
+            placeholder="Todos os SREs"
         )
     with first_row[1]:
         _filter_caption("Faixa IRI (matriz)")
-        selected_faixa = st.multiselect(
+        selected_faixa = _compact_multiselect(
             "Faixa IRI", faixa_options, key="dnit_solution_filter_faixa",
-            placeholder="Todas as faixas", label_visibility="collapsed"
+            placeholder="Todas as faixas"
         )
     with first_row[2]:
         _filter_caption("Tipo de solução")
-        selected_solucao = st.multiselect(
+        selected_solucao = _compact_multiselect(
             "Tipo de solução", solucao_options, key="dnit_solution_filter_solucao",
-            placeholder="Todas as soluções", label_visibility="collapsed"
+            placeholder="Todas as soluções"
         )
 
     filtered = table_df.copy()
@@ -3031,6 +3729,18 @@ def _axis_max_10(value: float) -> int:
 def _axis_ticks_10(axis_max: int) -> list[int]:
     """Ticks do eixo Y de 10 em 10, do topo até 0 (para os gráficos HTML)."""
     return list(range(int(axis_max), -1, -10))
+
+
+def _axis_ticks_n(axis_max: int, steps: int = 5) -> list[int]:
+    """Ticks igualmente espaçados em `steps` divisões, do topo até 0.
+
+    Usado (em vez de _axis_ticks_10) em eixos cuja escala pode ser muito maior
+    que dezenas — ex.: volume de tráfego em centenas de milhares. Ticks de 10
+    em 10 nessa escala geram milhares de rótulos espremidos, ilegíveis.
+    """
+    if axis_max <= 0:
+        return [0]
+    return [round(axis_max * i / steps) for i in range(steps, -1, -1)]
 
 
 def _axis_max_headroom(value: float) -> int:
@@ -3779,17 +4489,20 @@ def _render_segment_intervention_timeline(
         for row in grouped.to_dict("records"):
             cell_lookup.setdefault((row["_timeline_group_key"], int(row["_timeline_year"])), []).append(row)
 
+        has_rodovia = "Rodovia" in source.columns and source["Rodovia"].nunique() > 1
+
         def segment_label(row: pd.Series) -> tuple[str, str, str]:
             snv = str(row.get("SNV", "") or "").strip()
+            rodovia = str(row.get("Rodovia", "") or "").strip() if has_rodovia else ""
             scenario = _timeline_scenario_short(str(row.get("Sentido", "") or "").strip())
             km_ini = row.get("Km Inicial")
             km_fim = row.get("Km Final")
             km_txt = ""
             if pd.notna(km_ini) and pd.notna(km_fim):
                 km_txt = f"km {float(km_ini):.1f}-{float(km_fim):.1f}"
-            main = snv or "Segmento"
+            main = f"{rodovia} · {snv}" if rodovia and snv else (snv or "Segmento")
             sub = " · ".join(piece for piece in [scenario, km_txt] if piece)
-            full = " · ".join(piece for piece in [snv, str(row.get("Sentido", "") or "").strip(), km_txt] if piece)
+            full = " · ".join(piece for piece in [rodovia, snv, str(row.get("Sentido", "") or "").strip(), km_txt] if piece)
             return main, sub, full or main
 
         header_cells = ['<div class="segment-timeline-cell segment-timeline-head">Segmento</div>']
@@ -4575,7 +5288,7 @@ def _segment_detail_markup(row: dict, budget_items) -> str:
             bars = "".join(
                 '<div class="snv-cost-row">'
                 + (
-                    f'<span class="snv-cost-lbl"><b style="color:#9fb0bd">{int(r2["Ano"])}</b> · {_sol(r2["Solução"])}</span>'
+                    f'<span class="snv-cost-lbl"><b class="snv-cost-year">{int(r2["Ano"])}</b> · {_sol(r2["Solução"])}</span>'
                     if has_ano else f'<span class="snv-cost-lbl">{_sol(r2["Solução"])}</span>'
                 )
                 + f'<span class="snv-cost-track"><span class="snv-cost-bar" style="width:{float(r2["Custo"]) / mx * 100:.1f}%;'
@@ -4585,7 +5298,7 @@ def _segment_detail_markup(row: dict, budget_items) -> str:
                 for r2 in by.to_dict("records")
             )
             parts.append(
-                '<div style="font-size:10px;letter-spacing:.05em;color:#8f9eaa;'
+                '<div class="snv-schedule-label" style="font-size:10px;letter-spacing:.05em;'
                 'text-transform:uppercase;margin:6px 0 2px">Programação por ano</div>'
                 f'<div class="snv-cost-bars">{bars}</div>'
             )
@@ -4641,7 +5354,7 @@ def _render_solution_segments_map(segments_df, budget_items: pd.DataFrame, selec
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
         <style>
           html, body {{ margin:0; padding:0; background:#061018; }}
-          #map {{ height: 360px; width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid #1d3848; }}
+          #map {{ height: 360px; width: 100%; border-radius: 12px; overflow: hidden; border: 0; }}
           .leaflet-control-container .leaflet-top, .leaflet-control-container .leaflet-bottom {{ display:none; }}
         </style>
       </head>
@@ -4769,15 +5482,18 @@ def _render_economic_priority_table(
     mode_col, sort_col, summary_col = st.columns([0.9, 0.7, 1.4], gap="medium")
     with mode_col:
         _filter_caption("Visualização")
-        view_mode = st.selectbox(
+        view_mode = _compact_singleselect(
             "Visualização da tabela",
             ["Segmentos atendidos pelo orçamento", "Todos os segmentos"],
-            label_visibility="collapsed",
+            key="eco_priority_view_mode",
+            default="Segmentos atendidos pelo orçamento",
         )
     with sort_col:
         _filter_caption("Ordenar por")
-        sort_by = st.selectbox(
-            "Ordenar por", ["Prioridade", "Km inicial"], label_visibility="collapsed",
+        sort_by = _compact_singleselect(
+            "Ordenar por", ["Prioridade", "Km inicial"],
+            key="eco_priority_sort_by",
+            default="Prioridade",
         )
 
     if view_mode == "Segmentos atendidos pelo orçamento":
@@ -4811,8 +5527,9 @@ def _render_economic_priority_table(
         view = view.sort_values([c for c in _sc if c in view.columns], kind="stable")
     view = view.head(400).reset_index(drop=True)
     has_sentido = "Sentido" in view.columns
+    has_rodovia = "Rodovia" in view.columns and view["Rodovia"].nunique() > 1
     rows_markup = []
-    cspan = 10 if has_sentido else 9
+    cspan = 10 + int(has_rodovia) if has_sentido else 9 + int(has_rodovia)
     _mem = prio_memory or {}
     for index, row in enumerate(view.to_dict("records"), start=1):
         snv = str(row["SNV"])
@@ -4822,6 +5539,7 @@ def _render_economic_priority_table(
         detail_chart = _segment_detail_markup(row, budget_items)
         sentido = str(row.get("Sentido", ""))
         sentido_td = f"<td>{html.escape(sentido)}</td>" if has_sentido else ""
+        rodovia_td = f"<td>{html.escape(str(row.get('Rodovia', '')))}</td>" if has_rodovia else ""
         # Memória de cálculo do IPI do SEGMENTO (clique no valor).
         mem = _mem.get(int(seg_id)) if (seg_id is not None and pd.notna(seg_id)) else {}
         mem_markup = _priority_memory_markup(mem or {})
@@ -4829,6 +5547,7 @@ def _render_economic_priority_table(
         rows_markup.append(
             "<tr class='snv-row'>"
             f"<td class='muted'>{int(row['Prioridade'])}</td>"
+            + rodovia_td +
             f"<td class='mono'>{html.escape(snv)}</td>"
             + sentido_td +
             f"<td>{_format_km(float(row['Km Inicial']))}</td>"
@@ -4868,7 +5587,7 @@ def _render_economic_priority_table(
             <table class="solution-table">
               <thead>
                 <tr>
-                  <th>Rank</th>
+                  <th>Rank</th>""" + ("<th>Rodovia</th>" if has_rodovia else "") + """
                   <th>SRE</th>""" + ("<th>Sentido</th>" if has_sentido else "") + """
                   <th>Km Inicial</th>
                   <th>Km Final</th>
@@ -5105,21 +5824,21 @@ def _render_economic_page(
                 "value": _format_money(metrics["total_need"]),
                 "subtitle": f"Custo estimado no escopo: {scope_label}",
                 "tone": "cyan",
-                "icon": "$",
+                "icon": "money",
             },
             {
                 "title": "COBERTURA",
                 "value": f"{annual_coverage:.1f}%",
                 "subtitle": f"{_format_money(available_budget)} disponível no escopo",
                 "tone": "green",
-                "icon": "↗",
+                "icon": "trend-up",
             },
             {
                 "title": "TRECHOS ATENDIDOS",
                 "value": f"{attended_km:.1f} / {scope_km:.1f} km",
                 "subtitle": "Km de segmentos cobertos pelo orçamento",
                 "tone": "orange",
-                "icon": "#",
+                "icon": "ruler",
             },
             {
                 "title": "ORÇAMENTO FALTANTE",
@@ -5130,7 +5849,7 @@ def _render_economic_page(
                     else "Adicional para cobrir 100% da necessidade"
                 ),
                 "tone": "yellow",
-                "icon": "△",
+                "icon": "alert-triangle",
             },
         ]
     )
@@ -5256,28 +5975,82 @@ def _combined_economic_data(road, keys, labels, year: int | None = None):
     }
 
 
+def _combined_economic_data_multi(
+    road_scenario_pairs: list[tuple[str, str]],
+    labels: dict[tuple[str, str], str],
+    year: int | None = None,
+) -> dict:
+    """Generaliza `_combined_economic_data` para somar VÁRIAS RODOVIAS × cenários.
+
+    `road_scenario_pairs` é uma lista de (rodovia, scenario_key); `labels` mapeia
+    esse mesmo par para o rótulo curto de exibição (Sentido). Cada linha ganha
+    também a coluna `Rodovia`, para as telas conseguirem distinguir de qual
+    rodovia veio cada segmento quando há mais de uma selecionada."""
+    tables, budgets, segs, per_sentido = [], [], [], []
+    n = len(road_scenario_pairs)
+    multi_road = len({road for road, _ in road_scenario_pairs}) > 1
+    for i, (road, k) in enumerate(road_scenario_pairs):
+        d = get_solutions_data(road, scenario_key=k, year=year)
+        t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
+        sent = str(labels.get((road, k), k))
+        per_sentido.append(
+            {
+                "sentido": (f"{road} · {sent}" if multi_road else sent),
+                "need": _necessidade_total(t, b, 9999),
+            }
+        )
+        if t is not None and not t.empty:
+            t = t.copy()
+            t["Sentido"] = sent
+            t["Rodovia"] = road
+            tables.append(t)
+        if b is not None and not b.empty:
+            b = b.copy()
+            b["Sentido"] = sent
+            b["Rodovia"] = road
+            budgets.append(b)
+        if s is not None and not s.empty:
+            s = s.copy()
+            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
+            s["sentido"] = sent
+            s["rodovia"] = road
+            segs.append(s)
+    return {
+        "table": pd.concat(tables, ignore_index=True) if tables else None,
+        "budget_items": pd.concat(budgets, ignore_index=True) if budgets else None,
+        "segments": pd.concat(segs, ignore_index=True) if segs else None,
+        "per_sentido": per_sentido,
+    }
+
+
 def _render_economic_need_breakdown(table_df: pd.DataFrame | None, budget_items: pd.DataFrame | None) -> None:
-    """Linha compacta com a necessidade por cenário, sem duplicar o card principal."""
+    """Linha compacta com a necessidade por cenário (e por rodovia, quando há mais
+    de uma selecionada), sem duplicar o card principal."""
     if table_df is None or table_df.empty or "Sentido" not in table_df.columns:
         return
     source = budget_items if budget_items is not None and not budget_items.empty else table_df
     cost_col = "Custo" if "Custo" in source.columns else "Custo econômico"
     if cost_col not in source.columns or "Sentido" not in source.columns:
         return
+    has_rodovia = "Rodovia" in source.columns and source["Rodovia"].nunique() > 1
+    group_cols = (["Rodovia"] if has_rodovia else []) + ["Sentido"]
     grouped = (
-        source.groupby("Sentido", as_index=False)[cost_col]
+        source.groupby(group_cols, as_index=False)[cost_col]
         .sum()
         .sort_values(cost_col, ascending=False)
     )
     if len(grouped) <= 1:
         return
-    pills = [
-        '<span class="need-breakdown-pill">'
-        f'<span>{html.escape(_timeline_scenario_short(row["Sentido"]))}</span>'
-        f'<strong>{html.escape(_format_money(float(row[cost_col])))}</strong>'
-        '</span>'
-        for row in grouped.to_dict("records")
-    ]
+    pills = []
+    for row in grouped.to_dict("records"):
+        short = _timeline_scenario_short(row["Sentido"])
+        label = f"{row['Rodovia']} · {short}" if has_rodovia else short
+        pills.append(
+            '<span class="need-breakdown-pill">'
+            f'<span>{html.escape(label)}</span>'
+            f'<strong>{html.escape(_format_money(float(row[cost_col])))}</strong>'
+            '</span>'
+        )
     st.markdown(f'<div class="need-breakdown">{"".join(pills)}</div>', unsafe_allow_html=True)
 
 
@@ -5409,28 +6182,27 @@ def _render_dnit_priority_controls(view_key: str, sort_key: str, mode_key: str) 
     view_col, sort_col, mode_col, summary_col = st.columns([0.95, 0.75, 0.85, 1.1], gap="medium")
     with view_col:
         _filter_caption("Visualização")
-        view_mode = st.selectbox(
+        view_mode = _compact_singleselect(
             "Visualização da tabela DNIT",
             ["Segmentos atendidos pelo orçamento", "Todos os segmentos"],
             key=view_key,
-            label_visibility="collapsed",
+            default="Segmentos atendidos pelo orçamento",
         )
     with sort_col:
         _filter_caption("Ordenar por")
-        sort_by = st.selectbox(
+        sort_by = _compact_singleselect(
             "Ordenar por",
             ["Prioridade", "Km inicial"],
             key=sort_key,
-            label_visibility="collapsed",
+            default="Prioridade",
         )
     with mode_col:
         _filter_caption("Índice de priorização")
-        selected_label = st.selectbox(
+        selected_label = _compact_singleselect(
             "Índice de priorização",
             list(options.keys()),
-            index=list(options.keys()).index(current_label),
             key=mode_key,
-            label_visibility="collapsed",
+            default=current_label,
         )
     with summary_col:
         st.empty()
@@ -5480,23 +6252,80 @@ def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
     }
 
 
-def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
+def _combined_dnit_economic_data_multi(
+    road_scenario_pairs: list[tuple[str, str]],
+    labels: dict[tuple[str, str], str],
+    year: int | None = None,
+) -> dict:
+    """Generaliza `_combined_dnit_economic_data` para somar VÁRIAS RODOVIAS × cenários
+    (mesmo espírito de `_combined_economic_data_multi`, mas para a Matriz Cadastrada)."""
+    tables, budgets, segs, per_sentido = [], [], [], []
+    n = len(road_scenario_pairs)
+    multi_road = len({road for road, _ in road_scenario_pairs}) > 1
+    zona_colors = zona_order = ano_base = None
+    for i, (road, k) in enumerate(road_scenario_pairs):
+        d = get_dnit_economic_data(road, scenario_key=k, year=year)
+        if not d.get("available"):
+            continue
+        t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
+        sent = _sentido_faixa(labels.get((road, k), k))
+        need = float(t["Custo estimado"].sum()) if t is not None and not t.empty else 0.0
+        per_sentido.append(
+            {"sentido": (f"{road} · {sent}" if multi_road else sent), "need": need}
+        )
+        zona_colors = zona_colors or d.get("zona_colors")
+        zona_order = zona_order or d.get("zona_order")
+        ano_base = ano_base or d.get("ano_base")
+        if t is not None and not t.empty:
+            t = t.copy()
+            t["Sentido"] = sent
+            t["Rodovia"] = road
+            tables.append(t)
+        if b is not None and not b.empty:
+            b = b.copy()
+            b["Sentido"] = sent
+            b["Rodovia"] = road
+            budgets.append(b)
+        if s is not None and not s.empty:
+            s = s.copy()
+            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
+            s["sentido"] = sent
+            s["rodovia"] = road
+            segs.append(s)
+    return {
+        "available": bool(tables),
+        "table": pd.concat(tables, ignore_index=True) if tables else pd.DataFrame(),
+        "budget_items": pd.concat(budgets, ignore_index=True) if budgets else pd.DataFrame(),
+        "segments": pd.concat(segs, ignore_index=True) if segs else pd.DataFrame(),
+        "per_sentido": per_sentido,
+        "zona_colors": zona_colors,
+        "zona_order": zona_order,
+        "ano_base": ano_base,
+    }
+
+
+def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> None:
     """Cenário econômico DNIT — usa orçamentos gravados em analise_gerencial_orcamentos
-    e priorização por IPT/IPE/combinado. Espelha estrutura visual do Paragon."""
-    _dnit_keys = [str(key) for key in scenario_keys if key]
-    if not _dnit_keys:
-        st.info("Selecione ao menos um cenário para continuar.")
+    e priorização por IPT/IPE/combinado. Espelha estrutura visual do Paragon.
+
+    Aceita 1+ pares (rodovia, cenário); 2+ pares (mesma rodovia ou rodovias
+    diferentes) somam a análise, no mesmo espírito da Visão geral."""
+    _dnit_pairs = [(str(r), str(k)) for r, k in road_scenario_pairs if r and k]
+    if not _dnit_pairs:
+        st.info("Selecione ao menos uma rodovia e um cenário para continuar.")
         return
-    scenario_scope_key = f"{road}:{'|'.join(_dnit_keys)}"
-    _dnit_multi = len(_dnit_keys) >= 2
+    _dnit_roads = list(dict.fromkeys(r for r, _ in _dnit_pairs))
+    road = _dnit_roads[0]
+    scenario_scope_key = f"{'|'.join(_dnit_roads)}:{'|'.join(k for _, k in _dnit_pairs)}"
+    _dnit_multi = len(_dnit_pairs) >= 2
     if _dnit_multi:
-        _dnit_labels = {
-            str(s["key"]): _network_scenario_label(s) or str(s.get("cenario") or s["key"])
-            for s in get_available_scenarios(road, "Matriz Cadastrada")
-        }
-        data = _combined_dnit_economic_data(road, _dnit_keys, _dnit_labels)
+        _dnit_labels: dict[tuple[str, str], str] = {}
+        for _r in _dnit_roads:
+            for s in get_available_scenarios(_r, "Matriz Cadastrada"):
+                _dnit_labels[(_r, str(s["key"]))] = _network_scenario_label(s) or str(s.get("cenario") or s["key"])
+        data = _combined_dnit_economic_data_multi(_dnit_pairs, _dnit_labels)
     else:
-        _dkey = _dnit_keys[0]
+        road, _dkey = _dnit_pairs[0]
         data = get_dnit_economic_data(road, _dkey)
     if not data.get("available") or data.get("table") is None or data["table"].empty:
         disponiveis = get_dnit_available_roads()
@@ -5593,15 +6422,15 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
 
     render_metric_cards([
         {"title": "NECESSIDADE TOTAL", "value": _format_money(total_need),
-         "subtitle": f"Custo estimado no escopo: {scope_label}", "tone": "cyan", "icon": "$"},
+         "subtitle": f"Custo estimado no escopo: {scope_label}", "tone": "cyan", "icon": "money"},
         {"title": "COBERTURA", "value": f"{annual_coverage:.1f}%",
-         "subtitle": f"{_format_money(available_budget)} disponível no escopo", "tone": "green", "icon": "↗"},
+         "subtitle": f"{_format_money(available_budget)} disponível no escopo", "tone": "green", "icon": "trend-up"},
         {"title": "TRECHOS ATENDIDOS", "value": f"{attended_km:.1f} / {scope_km:.1f} km",
-         "subtitle": "Km de segmentos cobertos pelo orçamento", "tone": "orange", "icon": "#"},
+         "subtitle": "Km de segmentos cobertos pelo orçamento", "tone": "orange", "icon": "ruler"},
         {"title": "ORÇAMENTO FALTANTE", "value": _format_money(faltante),
          "subtitle": ("Necessidade já coberta pelo orçamento" if faltante == 0
                       else "Adicional para cobrir 100% da necessidade"),
-         "tone": "yellow", "icon": "△"},
+         "tone": "yellow", "icon": "alert-triangle"},
     ])
     _render_economic_need_breakdown(snv_budget_table, budget_items)
 
@@ -5686,7 +6515,7 @@ def _render_dnit_economic_page(road: str, scenario_keys: list[str]) -> None:
     zona_colors = data.get("zona_colors") or {}
     _render_work_plan_button(
         scenario_key=scenario_scope_key,
-        road=road,
+        road=", ".join(_dnit_roads),
         scenario_label="Matriz Revitaliza DNIT/RO",
         annual_budget=annual_budget,
         horizon=calc_horizon,
@@ -5749,6 +6578,7 @@ def _render_dnit_economic_priority_table(
     )
 
     has_sentido = "Sentido" in view.columns
+    has_rodovia = "Rodovia" in view.columns and view["Rodovia"].nunique() > 1
     if sort_by == "Km inicial":
         sort_cols = (["Sentido"] if has_sentido else []) + ["Km Inicial", "Km Final"]
         view = view.sort_values([c for c in sort_cols if c in view.columns], kind="stable")
@@ -5757,7 +6587,7 @@ def _render_dnit_economic_priority_table(
     view = view.head(400).reset_index(drop=True)
 
     rows_html = []
-    cspan = 14 if has_sentido else 13
+    cspan = (14 if has_sentido else 13) + int(has_rodovia)
     for _, row in view.iterrows():
         row_pos = len(rows_html) + 1
         sre = str(row.get("SNV"))
@@ -5766,11 +6596,13 @@ def _render_dnit_economic_priority_table(
             segment_key = str(int(row.get("_segment_id")))
         atendido = segment_key in attended_segments
         sentido_td = f"<td>{html.escape(str(row.get('Sentido', '')))}</td>" if has_sentido else ""
+        rodovia_td = f"<td>{html.escape(str(row.get('Rodovia', '')))}</td>" if has_rodovia else ""
         toggle_id = f"dnit-segment-detail-{row_pos}"
         detail_markup = _segment_detail_markup(row.to_dict(), budget_items)
         rows_html.append(
             "<tr class='snv-row'>"
             f"<td>{int(row['Prioridade'])}</td>"
+            + rodovia_td +
             f"<td>{html.escape(sre)}</td>"
             + sentido_td +
             f"<td>{_format_km(float(row['Km Inicial']))}</td>"
@@ -5805,7 +6637,7 @@ def _render_dnit_economic_priority_table(
           </div>
           <table class="solution-table">
             <thead><tr>
-              <th>PRIOR.</th><th>SRE</th>{'<th>SENTIDO</th>' if has_sentido else ''}<th>KM INICIAL</th><th>KM FINAL</th><th>EXTENSÃO</th>
+              <th>PRIOR.</th>{'<th>RODOVIA</th>' if has_rodovia else ''}<th>SRE</th>{'<th>SENTIDO</th>' if has_sentido else ''}<th>KM INICIAL</th><th>KM FINAL</th><th>EXTENSÃO</th>
               <th>IRI</th><th>IPT</th><th>IPE</th><th>COMBINADO</th><th>ÍNDICE USADO</th>
               <th>SOLUÇÃO RECOMENDADA</th><th>CUSTO</th><th>STATUS</th>
             </tr></thead>
@@ -6828,8 +7660,8 @@ def _render_iagon_comparativo(road: str, paragon: dict, dnit: dict, annual_budge
 
     corpo = html.escape(texto).replace("\n\n", "<br><br>").replace("\n", "<br>")
     st.markdown(
-        '<div style="margin-top:16px;border:1px solid rgba(0,194,232,.30);border-radius:14px;'
-        'background:linear-gradient(180deg,rgba(0,194,232,.07),rgba(0,194,232,.02));padding:16px 18px">'
+        '<div style="margin-top:16px;border:1px solid rgba(0,194,232,.22);border-radius:14px;'
+        'background:rgba(0,194,232,.05);padding:16px 18px">'
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'
         '<div style="width:30px;height:30px;border-radius:9px;background:#00c2e8;color:#04141b;'
         'display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px">IA</div>'
@@ -7475,12 +8307,12 @@ def _render_comparison_dnit_performance_block(road: str, side_a: dict, side_b: d
 
     labels_by_segment = {str(item["token"]): str(item["label"]) for item in segment_options}
     segment_tokens = list(labels_by_segment.keys())
-    selected_segment = st.selectbox(
+    selected_segment = _compact_singleselect(
         "Segmento",
         segment_tokens,
-        index=0,
         format_func=lambda token: labels_by_segment.get(str(token), str(token)),
         key=f"comparison_performance_segment_{_normalize_road_code(road) or road}_{'|'.join(selected)}",
+        default=segment_tokens[0] if segment_tokens else None,
     )
     data = dict(data)
     series = data.get("series")
@@ -7783,15 +8615,15 @@ def _render_dnit_projection_page(road: str, scenario_key: str | None) -> None:
     render_metric_cards([
         {"title": "TOTAL DE OBRAS", "value": f"{n_obras}",
          "subtitle": f"Intervenções DNIT entre {data['ano_inicial']}–{data['ano_final']}",
-         "tone": "cyan", "icon": "#"},
+         "tone": "cyan", "icon": "list"},
         {"title": "TRECHOS COM OBRA", "value": f"{n_sres}",
-         "subtitle": "SREs com pelo menos 1 intervenção", "tone": "green", "icon": "◍"},
+         "subtitle": "SREs com pelo menos 1 intervenção", "tone": "green", "icon": "check-circle"},
         {"title": "CUSTO TOTAL", "value": _format_money(custo_total),
          "subtitle": f"Programa de {data['ano_inicial']}–{data['ano_final']}",
-         "tone": "orange", "icon": "$"},
+         "tone": "orange", "icon": "money"},
         {"title": "ANO DE PICO", "value": str(ano_pico) if ano_pico else "—",
          "subtitle": f"{_format_money(custo_pico)} concentrados no ano",
-         "tone": "yellow", "icon": "△"},
+         "tone": "yellow", "icon": "bar-chart"},
     ])
     st.markdown("<div style='height: 14px'></div>", unsafe_allow_html=True)
 
@@ -7934,12 +8766,11 @@ def _render_dnit_projection_page(road: str, scenario_key: str | None) -> None:
         with sel_col:
             _filter_caption("Trecho (SRE)")
             sre_default = iri_proj["sre_list"][0]
-            selected_sre = st.selectbox(
+            selected_sre = _compact_singleselect(
                 "Trecho",
                 iri_proj["sre_list"],
-                index=0,
-                label_visibility="collapsed",
                 key=f"dnit_iri_sre_{road}",
+                default=sre_default,
             )
             selected_sre = selected_sre or sre_default
         serie = iri_proj["sre_series"].get(str(selected_sre))
@@ -8154,21 +8985,21 @@ def _render_dnit_overview(road: str, scenario_keys: list[str] | str | None, year
                 "value": f"{data['iri_avg']:.2f}",
                 "subtitle": "Irregularidade (m/km)",
                 "tone": "cyan",
-                "icon": "≈",
+                "icon": "activity",
             },
             {
                 "title": "IGG MÉDIO",
                 "value": f"{data['igg_avg']:.0f}",
                 "subtitle": "Gravidade global (defeitos)",
                 "tone": "cyan",
-                "icon": "▦",
+                "icon": "grid",
             },
             {
                 "title": "% IRI CRÍTICO (> 4)",
                 "value": f"{data['critico_pct']:.1f}%",
                 "subtitle": "Faixa laranja/vermelha da matriz",
                 "tone": "orange",
-                "icon": "◎",
+                "icon": "target",
             },
         ]
     )
@@ -8323,7 +9154,8 @@ def _build_network_overview_impl(
                     ext = (segs["km_final"].astype(float) - segs["km_inicial"].astype(float)).clip(lower=0)
                     ext_sum = float(ext.sum()) or 1.0
                     interv_km = 0.0
-                    prio_alta_crit = 0
+                    prio_alta = 0
+                    prio_crit = 0
                     custo_total = 0.0
 
                     if table is not None and not table.empty:
@@ -8343,10 +9175,8 @@ def _build_network_overview_impl(
                                 for _, row in work.iterrows()
                             ]
                             prio = {item["snv"]: item for item in calcular_indice_priorizacao_dnit(segmentos)}
-                            prio_alta_crit = sum(
-                                1 for v in prio.values()
-                                if v.get("classificacao") in ("Prioridade Crítica", "Prioridade Alta")
-                            )
+                            prio_alta = sum(1 for v in prio.values() if v.get("classificacao") == "Prioridade Alta")
+                            prio_crit = sum(1 for v in prio.values() if v.get("classificacao") == "Prioridade Crítica")
                         interv_km = float(table["Extensão"].astype(float).sum())
                         custo_total = _necessidade_total(
                             table,
@@ -8369,7 +9199,10 @@ def _build_network_overview_impl(
                             "iap_bad_pct": 0.0,
                             "iri_bad_pct": float(dn.get("critico_pct") or 0.0),
                             "custo": custo_total,
-                            "prio": prio_alta_crit,
+                            "prio": prio_alta + prio_crit,
+                            "prio_alta": prio_alta,
+                            "prio_crit": prio_crit,
+                            "total_segments": int(len(segs)),
                         }
                     )
 
@@ -8406,11 +9239,12 @@ def _build_network_overview_impl(
                 else:
                     interv_km = 0.0
 
-                prio = _prioridade_por_snv(work)
-                prio_alta_crit = sum(
-                    1 for v in prio.values()
-                    if v.get("classificacao") in ("Prioridade Crítica", "Prioridade Alta")
-                )
+                # Prioridade contada por SEGMENTO (não agregada por SNV/SRE): cada linha
+                # da tabela é um segmento físico, então o total de segmentos também
+                # vem daqui (len(table)).
+                prio = _prioridade_por_segmento(work)
+                prio_alta = sum(1 for v in prio.values() if v.get("classificacao") == "Prioridade Alta")
+                prio_crit = sum(1 for v in prio.values() if v.get("classificacao") == "Prioridade Crítica")
 
                 rows.append(
                     {
@@ -8431,7 +9265,10 @@ def _build_network_overview_impl(
                             _budget_items_for_year(sol.get("budget_items"), year),
                             _ECONOMIC_DEFAULT_HORIZON,
                         ),
-                        "prio": prio_alta_crit,
+                        "prio": prio_alta + prio_crit,
+                        "prio_alta": prio_alta,
+                        "prio_crit": prio_crit,
+                        "total_segments": int(len(table)),
                     }
                 )
 
@@ -8450,11 +9287,17 @@ def _build_network_overview_impl(
 
     df = pd.DataFrame(rows)
     prio_total = int(df["prio"].sum())
+    prio_alta_total = int(df.get("prio_alta", pd.Series(dtype=float)).sum())
+    prio_crit_total = int(df.get("prio_crit", pd.Series(dtype=float)).sum())
+    total_segments_total = int(df.get("total_segments", pd.Series(dtype=float)).sum())
     tot_ext = float(df["ext_km"].sum()) or 1.0
 
     return {
         "roads_df": df,
         "prio_total": prio_total,
+        "prio_alta_total": prio_alta_total,
+        "prio_crit_total": prio_crit_total,
+        "total_segments": total_segments_total,
         "net_iap": float((df["IAP"] * df["ext_km"]).sum() / tot_ext),
         "net_iri": float((df["IRI"] * df["ext_km"]).sum() / tot_ext),
         "net_igg": float((df["IGG"] * df["ext_km"]).sum() / tot_ext),
@@ -8680,9 +9523,35 @@ def _render_network_overview(
     df = data["roads_df"]
     # Na rede, médias de IAP/IRI/IGG não dizem muito (misturam rodovias/metodologias) —
     # o que importa é o backlog de prioridade e o custo. Mantemos só esses dois.
+    prio_subtitle = "Alta: IPI 50–69 · Crítica: IPI ≥ 70"
+    prio_alta = int(data.get("prio_alta_total", 0))
+    prio_crit = int(data.get("prio_crit_total", 0))
+    total_segments = int(data.get("total_segments", 0))
     render_metric_cards(
         [
-            {"title": "TRECHOS PRIORITÁRIOS", "value": f"{data['prio_total']}", "subtitle": "Prioridade Alta/Crítica (IP)", "tone": "orange", "icon": "▲"},
+            {
+                "title": "SEGMENTOS PRIORITÁRIOS",
+                "value": f"{data['prio_total']}",
+                "subtitle": prio_subtitle,
+                "tone": "orange",
+                "icon": "flag",
+                "class_name": "metric-card-overview",
+                "details": [
+                    {"label": "Alta", "value": prio_alta, "tone": "high"},
+                    {"label": "Crítica", "value": prio_crit, "tone": "critical"},
+                ],
+            },
+            {
+                "title": "TOTAL DE SEGMENTOS",
+                "value": f"{total_segments}",
+                "subtitle": (
+                    f"{data['prio_total']} prioritários na malha filtrada"
+                    if total_segments else "Segmentos na malha filtrada"
+                ),
+                "tone": "cyan",
+                "icon": "list",
+                "class_name": "metric-card-overview",
+            },
             {
                 "title": "CUSTO TOTAL",
                 "value": _format_money(data["net_custo"]),
@@ -8692,11 +9561,23 @@ def _render_network_overview(
                     f"Necessidade · {data['total_km']:.0f} km"
                 ),
                 "tone": "green",
-                "icon": "$",
+                "icon": "money",
+                "class_name": "metric-card-overview",
             },
         ]
     )
-    st.markdown("<div style='height: 24px'></div>", unsafe_allow_html=True)
+    map_subtitle = (
+        "Trechos coloridos pela Matriz DNIT no recorte selecionado."
+        if is_dnit else
+        "Trechos coloridos por conceito IAP no recorte selecionado."
+    )
+    st.markdown(
+        '<div class="overview-map-head">'
+        f'<div><h3>Mapa da malha filtrada</h3><p>{map_subtitle}</p></div>'
+        f'<div class="overview-map-meta">Extensão <strong>{data["total_km"]:.0f} km</strong></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     if is_dnit:
         render_dnit_map(data["dnit_map"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
@@ -10915,6 +11796,970 @@ def _render_scenario_comparison(road: str, selected_keys: list[str] | None = Non
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Página: TRÁFEGO (Volume Médio Diário Anual + Projeção de crescimento)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Cor por tipo de veículo: comerciais (2 a 9 eixos) usam uma rampa sequencial de
+# um único matiz (azul), do mais claro ao mais escuro — o nº de eixos é uma
+# progressão ordenada (mais eixos = veículo mais pesado), não identidades soltas.
+# Passeio é uma categoria à parte (violeta), fora da rampa. Não são cores de
+# classificação técnica (IAP/IRI/alertas) — só identidade visual do gráfico.
+_TRAFFIC_AXLE_RAMP = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95"]
+_TRAFFIC_PASSEIO_COLOR = "#d6e6fb"
+
+
+def _traffic_vehicle_color(tipo_veiculo: str) -> str:
+    tipo = str(tipo_veiculo)
+    if tipo == "Passeio":
+        return _TRAFFIC_PASSEIO_COLOR
+    try:
+        idx = VEHICLE_ORDER.index(tipo)
+    except ValueError:
+        return "#8f9eaa"
+    return _TRAFFIC_AXLE_RAMP[min(idx, len(_TRAFFIC_AXLE_RAMP) - 1)]
+
+
+def _traffic_road_label(code: str) -> str:
+    return f"BR-{code}" if str(code).isdigit() else str(code)
+
+
+# 1 cor sólida (fixa) por segmento — sem gradiente por nº de eixos e sem
+# hues novos: só tons já dentro da mesma gama azul de _TRAFFIC_AXLE_RAMP,
+# espaçados (a cada 2 passos da rampa de 8) pra ficarem bem distinguíveis
+# entre si. Acima de 4 segmentos, cicla de volta pro 1º tom.
+_TRAFFIC_SEGMENT_FLAT_COLORS = [_TRAFFIC_AXLE_RAMP[i] for i in (0, 2, 4, 6)]
+
+
+def _traffic_segment_bar_color(segment_index: int, tipo_veiculo: str) -> str:
+    """Cor de uma barra no gráfico de eixos com múltiplos segmentos: cada
+    segmento é 1 bloco de cor sólida (sem variar por nº de eixos), escolhida
+    dentro da mesma gama azul de sempre."""
+    return _TRAFFIC_SEGMENT_FLAT_COLORS[segment_index % len(_TRAFFIC_SEGMENT_FLAT_COLORS)]
+
+
+def _render_traffic_axle_bar_chart(
+    df_grafico: pd.DataFrame, segmentos_sel: list, segmento_label: dict
+) -> None:
+    """Distribuição comercial por nº de eixos. Com 1 segmento selecionado é 1
+    barra por tipo de veículo (igual ao gráfico original); com 2+, vira grupos
+    de barras lado a lado (1 por segmento) dentro de cada tipo de veículo —
+    mesmo padrão estrutural de _render_traffic_projection_bar_chart."""
+    if df_grafico.empty:
+        st.info("Sem dados de composição comercial para este recorte.")
+        return
+    tipos = [t for t in VEHICLE_ORDER if t != "Passeio" and t in set(df_grafico["tipo veiculo"])]
+    pivot = {
+        (r["tipo veiculo"], r["segmento"]): float(r["percentual"]) * 100
+        for r in df_grafico.to_dict("records")
+    }
+    max_percent = max((pivot.values()), default=1.0) or 1.0
+    axis_max = _axis_max_10(max(max_percent, 1.0))
+    ticks = _axis_ticks_10(axis_max)
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{t / axis_max * 100:.2f}%;">{t:.0f}%</span>'
+        for t in ticks
+    )
+
+    # Com 2+ segmentos as barras ficam mais estreitas e próximas, e o rótulo
+    # (%) de bairras vizinhas de altura parecida colidia horizontalmente.
+    # Fonte menor + offset vertical alternado (empilha em vez de sobrepor).
+    multi = len(segmentos_sel) > 1
+    label_font_size = "9px" if multi else "11px"
+    groups_html, labels_html = [], []
+    for tipo in tipos:
+        bars = []
+        for idx, s in enumerate(segmentos_sel):
+            percent = pivot.get((tipo, s), 0.0)
+            height = max(percent / axis_max * 100, 2 if percent > 0 else 0)
+            color = _traffic_segment_bar_color(idx, tipo)
+            label = f"{percent:.0f}%" if multi else f"{percent:.1f}%".replace(".", ",")
+            label_top = f"{-12 - (idx % 2) * 12}px" if multi else "-30px"
+            value_label = (
+                f'<span class="solution-bar-value" style="top:{label_top};font-size:{label_font_size}">{label}</span>'
+                if percent > 0 else ""
+            )
+            bars.append(
+                f'<div class="solution-bar" style="height:{height:.2f}%;background:{color};'
+                f'width:{max(14, 64 // max(len(segmentos_sel), 1))}px;min-width:14px;flex:0 0 auto;position:relative">'
+                f'{value_label}</div>'
+            )
+        groups_html.append(
+            '<div class="solution-bar-item" style="display:flex;gap:3px;align-items:flex-end;'
+            f'justify-content:center;min-width:auto">{"".join(bars)}</div>'
+        )
+        labels_html.append(f'<div class="solution-bar-label">{html.escape(str(tipo))}</div>')
+
+    # Legenda por SEGMENTO (não por tipo de veículo — o eixo X já identifica
+    # isso): 1 swatch por segmento selecionado, na cor sólida daquele segmento.
+    legend = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#cbd5df;margin:0 12px 6px 0">'
+        f'<span style="width:11px;height:11px;border-radius:3px;background:'
+        f'{_traffic_segment_bar_color(idx, "")};'
+        f'display:inline-block"></span>{html.escape(segmento_label[s])}</span>'
+        for idx, s in enumerate(segmentos_sel)
+    )
+
+    st.markdown(
+        '<div class="solution-distribution"><div class="solution-distribution-head">'
+        '<div class="solution-distribution-title"><div class="solution-distribution-icon">▦</div>'
+        '<div><h3>Distribuição por número de eixos</h3>'
+        '<p>Participação de cada tipo de veículo comercial no tráfego</p></div></div>'
+        f'<div class="solution-distribution-meta">{legend}</div></div>'
+        '<div class="solution-bars">'
+        f'<div class="solution-y-axis">{tick_markup}</div>'
+        '<div class="solution-chart-area"><div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid" style="grid-auto-columns:minmax(96px, 1fr)">{"".join(groups_html)}</div></div>'
+        f'<div class="solution-label-grid" style="grid-auto-columns:minmax(96px, 1fr)">{"".join(labels_html)}</div>'
+        '</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_traffic_composition_donut(
+    segmentos_sel: list, df_road: pd.DataFrame, segmento_label: dict
+) -> None:
+    """1 rosca Passeio × Comercial por segmento selecionado, lado a lado (em
+    linhas de até 2 colunas — o layout de .iap-body tem uma coluna central
+    fixa de 260px pro donut, então 3+ colunas deixam pouco espaço pra
+    legenda e ela acaba estourando o card)."""
+    if not segmentos_sel:
+        st.info("Sem dados de composição para este recorte.")
+        return
+    for start in range(0, len(segmentos_sel), 2):
+        chunk = segmentos_sel[start:start + 2]
+        columns = st.columns(len(chunk))
+        for col, s in zip(columns, chunk):
+            df_s = df_road[df_road["dados.segmento_trafego"] == s]
+            veiculos_passeio = float(df_s["dados.passeio"].sum())
+            veiculos_comerciais = float(df_s[VEHICLE_COLUMNS].sum().sum())
+            total = veiculos_passeio + veiculos_comerciais
+            with col:
+                if total <= 0:
+                    st.info(f"Sem dados de composição pro segmento {s}.")
+                    continue
+                dist = pd.DataFrame(
+                    [
+                        {"classe": "Passeio", "percentual": veiculos_passeio / total * 100, "color": _TRAFFIC_PASSEIO_COLOR},
+                        {"classe": "Comercial", "percentual": veiculos_comerciais / total * 100, "color": _TRAFFIC_AXLE_RAMP[-1]},
+                    ]
+                )
+                render_iap_distribution(
+                    dist,
+                    _format_count(total),
+                    title=f"Segmento {s}",
+                    subtitle=segmento_label[s],
+                    center_label="VEÍCULOS/DIA",
+                    value_fmt="{}",
+                )
+        if start + 2 < len(segmentos_sel):
+            st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+
+def _render_trafego_vmda() -> None:
+    df_vmda = get_vmda_wide()
+    if df_vmda.empty:
+        st.info("Sem dados de VMDA disponíveis no banco.")
+        return
+
+    road_col, seg_col = st.columns([1, 1], gap="small")
+    roads = sorted(df_vmda["rodovia"].dropna().unique(), key=lambda c: str(c))
+    with road_col:
+        _filter_label("Rodovia")
+        rodovia_sel = _compact_singleselect(
+            "Rodovia", roads, key="trafego_vmda_road",
+            format_func=_traffic_road_label, default=roads[0] if roads else None,
+        )
+
+    df_road = df_vmda[df_vmda["rodovia"] == rodovia_sel]
+    segmentos = sorted(df_road["dados.segmento_trafego"].dropna().unique(), key=lambda s: str(s))
+    # Rótulo com a faixa de km do segmento (ex.: "1 - km 0 a km 20") — só o
+    # número do segmento não diz nada quando a rodovia tem mais de um.
+    _segmento_km_range = {
+        s: (
+            float(df_road[df_road["dados.segmento_trafego"] == s]["km_inicial"].min()),
+            float(df_road[df_road["dados.segmento_trafego"] == s]["km_final"].max()),
+        )
+        for s in segmentos
+    }
+    _segmento_label = {
+        s: f"{s} - km {_segmento_km_range[s][0]:.0f} a km {_segmento_km_range[s][1]:.0f}" for s in segmentos
+    }
+    with seg_col:
+        _filter_label("Segmento de tráfego")
+        segmentos_sel = _compact_multiselect(
+            "Segmento", segmentos, key=f"trafego_vmda_seg_{rodovia_sel}",
+            default=segmentos[:1],
+            format_func=lambda s: _segmento_label[s],
+        )
+    # Mantém a ordem estável de `segmentos` (não a ordem de clique) — é o que
+    # decide qual segmento fica com a rampa (índice 0) nos gráficos abaixo.
+    segmentos_sel = [s for s in segmentos if s in segmentos_sel]
+
+    df_filtrado = df_road[df_road["dados.segmento_trafego"].isin(segmentos_sel)]
+    if df_filtrado.empty:
+        st.info("Sem dados para este recorte.")
+        return
+
+    ano_base = df_filtrado["dados.ano_base"].max()
+    vmda_total = float(df_filtrado["dados.vmda_total"].sum())
+    veiculos_passeio = float(df_filtrado["dados.passeio"].sum())
+    veiculos_comerciais = float(df_filtrado[VEHICLE_COLUMNS].sum().sum())
+
+    render_metric_cards([
+        # Tom único (cyan neutro) nos 4 cards: são só contagens/agregados, sem
+        # sentido de bom/ruim — cor de status (verde/laranja/amarelo) aqui
+        # seria ruído. Cor de identidade real (Passeio × Comercial) fica só
+        # no donut logo abaixo, que já tem essa distinção.
+        {"title": "ANO BASE", "value": str(ano_base), "subtitle": "Ano do levantamento de tráfego",
+         "tone": "cyan", "icon": "calendar"},
+        {"title": "VMDA", "value": _format_count(vmda_total), "subtitle": "Volume médio diário anual",
+         "tone": "cyan", "icon": "trend-up"},
+        {"title": "VEÍCULOS DE PASSEIO", "value": _format_count(veiculos_passeio),
+         "subtitle": "Soma no recorte selecionado", "tone": "cyan", "icon": "car"},
+        {"title": "VEÍCULOS COMERCIAIS", "value": _format_count(veiculos_comerciais),
+         "subtitle": "2 a 9 eixos, soma no recorte", "tone": "cyan", "icon": "truck"},
+    ])
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    # Mapa: SEMPRE todos os segmentos da rodovia (visão de rede), independente
+    # do segmento escolhido acima — esse filtro só afeta os cards/gráficos.
+    if segmentos:
+        _segmento_vmda = df_road.groupby("dados.segmento_trafego")["dados.vmda_total"].sum()
+        map_df = pd.DataFrame([
+            {
+                "segmento": s,
+                "km_inicial": _segmento_km_range[s][0],
+                "km_final": _segmento_km_range[s][1],
+                "vmda_total": float(_segmento_vmda.get(s, 0.0)),
+            }
+            for s in segmentos
+        ])
+        map_df["paths"] = get_road_segment_paths(
+            rodovia_sel, list(zip(map_df["km_inicial"], map_df["km_final"]))
+        )
+        vmin, vmax = float(map_df["vmda_total"].min()), float(map_df["vmda_total"].max())
+        map_df["color"] = map_df["vmda_total"].apply(lambda v: _vmda_color_scale(v, vmin, vmax))
+        render_traffic_vmda_map(map_df)
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+    df_long = get_vmda_long()
+    df_long = df_long[
+        (df_long["rodovia"] == rodovia_sel) & (df_long["dados.segmento_trafego"].isin(segmentos_sel))
+    ].copy()
+
+    # % do total comercial calculado POR SEGMENTO (mesma conta de antes, uma
+    # vez pra cada segmento selecionado) — é o que alimenta o comparativo.
+    frames = []
+    for s in segmentos_sel:
+        df_s = df_long[df_long["dados.segmento_trafego"] == s]
+        df_com = df_s[df_s["tipo veiculo"] != "Passeio"].groupby("tipo veiculo", as_index=False)["volume"].sum()
+        total_com = float(df_com["volume"].sum()) or 1.0
+        df_com["percentual"] = df_com["volume"] / total_com
+        df_com["segmento"] = s
+        frames.append(df_com)
+    df_comerciais = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+        columns=["tipo veiculo", "volume", "percentual", "segmento"]
+    )
+
+    # Barra de eixos precisa de espaço horizontal pra caber as 8 categorias sem
+    # cortar — por isso cada gráfico ocupa a largura cheia (empilhados), em vez
+    # de dividir a tela ao meio.
+    _render_traffic_axle_bar_chart(df_comerciais, segmentos_sel, _segmento_label)
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_traffic_composition_donut(segmentos_sel, df_road, _segmento_label)
+
+
+def _traffic_line_chart(df_linha: pd.DataFrame) -> str:
+    """Gráfico de linhas (taxa de crescimento anual por tipo de veículo), em SVG
+    estático — mesmo padrão dos outros gráficos técnicos do painel (sem libs
+    externas). `df_linha` tem colunas ano/tipo veiculo/taxa."""
+    anos = sorted(df_linha["dados.ano_taxa"].dropna().unique())
+    tipos = [t for t in VEHICLE_ORDER if t in set(df_linha["tipo veiculo"])]
+    if not anos or not tipos:
+        return '<p style="color:#8f9eaa;font-size:12px">Sem dados para o gráfico.</p>'
+
+    n = len(anos)
+    pivot = {(int(r["dados.ano_taxa"]), r["tipo veiculo"]): float(r["taxa"]) for r in df_linha.to_dict("records")}
+    all_values = [v for v in pivot.values() if v is not None]
+    y_min = min(0.0, min(all_values) if all_values else 0.0)
+    y_max = max(all_values) if all_values else 0.05
+    y_max = y_max * 1.15 if y_max > 0 else 0.05
+
+    W, H = 1080, 340
+    L, R, T, B = 46, 16, 18, 34
+    pw, ph = W - L - R, H - T - B
+
+    def X(i: int) -> float:
+        return L + (i / (n - 1) if n > 1 else 0) * pw
+
+    def Y(v: float) -> float:
+        span = (y_max - y_min) or 1.0
+        return T + (1 - (v - y_min) / span) * ph
+
+    parts: list[str] = []
+    zero_y = Y(0.0)
+    parts.append(f'<line x1="{L}" y1="{zero_y:.1f}" x2="{L + pw}" y2="{zero_y:.1f}" stroke="rgba(148,163,184,.28)" stroke-width="1"/>')
+    for step in range(5):
+        gy = T + ph * step / 4
+        val = y_max - (y_max - y_min) * step / 4
+        parts.append(f'<line x1="{L}" y1="{gy:.1f}" x2="{L + pw}" y2="{gy:.1f}" stroke="rgba(148,163,184,.10)" stroke-width="1"/>')
+        parts.append(f'<text x="{L - 8}" y="{gy + 3:.1f}" fill="#8f9eaa" font-size="10" text-anchor="end">{val * 100:.1f}%</text>')
+
+    for tipo in tipos:
+        color = _traffic_vehicle_color(tipo)
+        pts = " ".join(f"{X(i):.1f},{Y(pivot.get((int(ano), tipo), 0.0)):.1f}" for i, ano in enumerate(anos))
+        parts.append(f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2.2"/>')
+        for i, ano in enumerate(anos):
+            v = pivot.get((int(ano), tipo), 0.0)
+            tip = html.escape(f"{tipo} · {ano} · {v * 100:.2f}%")
+            parts.append(f'<circle cx="{X(i):.1f}" cy="{Y(v):.1f}" r="3" fill="{color}"><title>{tip}</title></circle>')
+
+    step_x = max(1, n // 12)
+    for i, ano in enumerate(anos):
+        if i % step_x == 0 or i == n - 1:
+            parts.append(f'<text x="{X(i):.1f}" y="{T + ph + 18}" fill="#8f9eaa" font-size="10" text-anchor="middle">{int(ano)}</text>')
+
+    svg = (
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet" '
+        f'style="display:block;width:100%;height:auto">{"".join(parts)}</svg>'
+    )
+    legend = "".join(
+        f'<span class="proj-leg"><span class="sw" style="background:{_traffic_vehicle_color(t)}"></span>{html.escape(t)}</span>'
+        for t in tipos
+    )
+    return f'<div class="proj-chart">{svg}</div><div class="proj-legend">{legend}</div>'
+
+
+def _render_traffic_projection_bar_chart(df_proj_grafico: pd.DataFrame) -> None:
+    """Volume projetado por ano, barras agrupadas por tipo de veículo — reaproveita
+    as classes estruturais .solution-bars / .solution-bar-grid do painel."""
+    if df_proj_grafico.empty:
+        st.info("Sem volume projetado para este recorte.")
+        return
+    anos = sorted(df_proj_grafico["dados.ano_taxa"].dropna().unique())
+    tipos = [t for t in VEHICLE_ORDER if t in set(df_proj_grafico["tipo veiculo"])]
+    pivot = {
+        (int(r["dados.ano_taxa"]), r["tipo veiculo"]): float(r["volume projetado"])
+        for r in df_proj_grafico.to_dict("records")
+    }
+    max_vol = max(pivot.values(), default=1.0) or 1.0
+    axis_max = _axis_max_10(max_vol)
+    ticks = _axis_ticks_n(axis_max)
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{t / axis_max * 100:.2f}%;">{int(t):,}</span>'.replace(",", ".")
+        for t in ticks
+    )
+    groups_html = []
+    for ano in anos:
+        bars = ""
+        for tipo in tipos:
+            v = pivot.get((int(ano), tipo), 0.0)
+            h = max(v / axis_max * 100, 1.5) if v > 0 else 0.0
+            color = _traffic_vehicle_color(tipo)
+            bars += (
+                f'<div class="solution-bar" style="height:{h:.2f}%;background:{color};width:14px;min-width:14px;flex:0 0 auto">'
+                '</div>'
+            )
+        groups_html.append(
+            '<div class="solution-bar-item" style="display:flex;gap:3px;align-items:flex-end;justify-content:center;min-width:auto">'
+            f'{bars}</div>'
+        )
+    labels_html = "".join(f'<div class="solution-bar-label">{int(ano)}</div>' for ano in anos)
+    legend = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#cbd5df;margin:0 12px 6px 0">'
+        f'<span style="width:11px;height:11px;border-radius:3px;background:{_traffic_vehicle_color(t)};display:inline-block"></span>'
+        f'{html.escape(t)}</span>'
+        for t in tipos
+    )
+    st.markdown(
+        '<div class="solution-distribution"><div class="solution-distribution-head">'
+        '<div class="solution-distribution-title"><div class="solution-distribution-icon">▦</div>'
+        '<div><h3>Projeção de volume por tipo de veículo</h3>'
+        '<p>Volume projetado por ano a partir da taxa de crescimento</p></div></div>'
+        f'<div class="solution-distribution-meta">{legend}</div></div>'
+        # grid-template-columns mais largo que o padrão (42px): os volumes de
+        # tráfego têm muito mais dígitos do que os outros gráficos que reaproveitam
+        # .solution-bars (ex.: custos em milhares), então os rótulos do eixo Y
+        # precisam de mais espaço para não quebrar linha e virar um bloco ilegível.
+        '<div class="solution-bars" style="grid-template-columns:72px minmax(0, 1fr)">'
+        f'<div class="solution-y-axis">{tick_markup}</div>'
+        '<div class="solution-chart-area"><div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid" style="grid-auto-columns:minmax(64px, 1fr)">{"".join(groups_html)}</div></div>'
+        f'<div class="solution-label-grid" style="grid-auto-columns:minmax(64px, 1fr)">{labels_html}</div>'
+        '</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_trafego_projecao() -> None:
+    df_taxa = get_taxa_long()
+    df_vmda_long = get_vmda_long()
+    if df_taxa.empty:
+        st.info("Sem dados de taxa de crescimento disponíveis no banco.")
+        return
+
+    road_col, seg_col, ano_col = st.columns([1, 1, 1], gap="small")
+    roads = sorted(df_taxa["rodovia"].dropna().unique(), key=lambda c: str(c))
+    road_options = ["Todos"] + roads
+    with road_col:
+        _filter_label("Rodovia")
+        rodovia_sel = _compact_singleselect(
+            "Rodovia", road_options, key="trafego_proj_road",
+            format_func=lambda v: "Todos" if v == "Todos" else _traffic_road_label(v),
+            # Já entra com uma rodovia marcada (não "Todos") para a tela já
+            # abrir com um recorte útil.
+            default=roads[0] if roads else "Todos",
+        )
+
+    df_filtro = df_taxa if rodovia_sel == "Todos" else df_taxa[df_taxa["rodovia"] == rodovia_sel]
+    segmentos_only = sorted(df_filtro["dados.segmento_trafego"].dropna().unique(), key=lambda s: str(s))
+    segmentos = ["Todos"] + segmentos_only
+    with seg_col:
+        _filter_label("Segmento")
+        segmento_sel = _compact_singleselect(
+            "Segmento", segmentos, key=f"trafego_proj_seg_{rodovia_sel}",
+            # Idem: já entra com um segmento marcado em vez de "Todos".
+            default=segmentos_only[0] if segmentos_only else "Todos",
+        )
+    if segmento_sel != "Todos":
+        df_filtro = df_filtro[df_filtro["dados.segmento_trafego"] == segmento_sel]
+
+    anos_opts = sorted(int(a) for a in df_filtro["dados.ano_taxa"].dropna().unique())
+    with ano_col:
+        _filter_label("Ano")
+        # Multisseletor: permite marcar mais de um ano de taxa ao mesmo tempo.
+        anos_sel = _compact_multiselect(
+            "Ano", anos_opts, key=f"trafego_proj_ano_{rodovia_sel}_{segmento_sel}",
+            default=anos_opts,
+        )
+    df_filtro = df_filtro[df_filtro["dados.ano_taxa"].isin(anos_sel)]
+
+    if df_filtro.empty:
+        st.info("Nenhum dado encontrado para os filtros selecionados.")
+        return
+
+    df_linha = df_filtro.groupby(["dados.ano_taxa", "tipo veiculo"], as_index=False)["taxa"].mean()
+    st.markdown(
+        '<section class="chart-card">'
+        '<div class="chart-heading"><h3>Taxa de crescimento ao ano por tipo de veículo</h3>'
+        '<p>Evolução percentual anual por categoria de veículo</p></div>'
+        f'{_traffic_line_chart(df_linha)}'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+    df_base_volume = df_vmda_long.copy()
+    if rodovia_sel != "Todos":
+        df_base_volume = df_base_volume[df_base_volume["rodovia"] == rodovia_sel]
+    if segmento_sel != "Todos":
+        df_base_volume = df_base_volume[df_base_volume["dados.segmento_trafego"] == segmento_sel]
+
+    df_base_volume["dados.ano_base"] = pd.to_numeric(df_base_volume["dados.ano_base"], errors="coerce").astype("Int64")
+    df_base_volume["ano_base_min"] = df_base_volume.groupby(["trecho", "tipo veiculo"])["dados.ano_base"].transform("min")
+    df_base_volume = df_base_volume[df_base_volume["dados.ano_base"] == df_base_volume["ano_base_min"]].copy()
+    df_base_volume = df_base_volume.groupby(["trecho", "tipo veiculo", "dados.ano_base"], as_index=False)["volume"].sum()
+
+    df_proj = df_filtro.merge(df_base_volume, how="left", on=["trecho", "tipo veiculo"])
+    df_proj["volume"] = pd.to_numeric(df_proj["volume"], errors="coerce").fillna(0)
+    df_proj["taxa"] = pd.to_numeric(df_proj["taxa"], errors="coerce").fillna(0)
+    df_proj["dados.ano_taxa"] = pd.to_numeric(df_proj["dados.ano_taxa"], errors="coerce").astype("Int64")
+    df_proj["dados.ano_base"] = pd.to_numeric(df_proj["dados.ano_base"], errors="coerce").astype("Int64")
+    df_proj = df_proj.dropna(subset=["dados.ano_taxa", "dados.ano_base"])
+    df_proj["volume projetado"] = df_proj.apply(
+        lambda row: row["volume"] if row["dados.ano_taxa"] == row["dados.ano_base"]
+        else row["volume"] * ((1 + row["taxa"]) ** (row["dados.ano_taxa"] - row["dados.ano_base"])),
+        axis=1,
+    ).round(0)
+
+    df_proj_grafico = df_proj.groupby(["dados.ano_taxa", "tipo veiculo"], as_index=False)["volume projetado"].sum()
+    _render_traffic_projection_bar_chart(df_proj_grafico)
+
+
+def _render_trafego_page() -> None:
+    st.markdown(
+        """
+        <div class="top-row">
+            <div>
+                <p class="eyebrow">ANÁLISE TÉCNICA</p>
+                <h1 class="page-title">Tráfego</h1>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    view_mode = _compact_singleselect(
+        "Visualização", ["Volume diário", "Projeção"], key="trafego_view_mode", default="Volume diário",
+    )
+    st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
+    if view_mode == "Projeção":
+        _render_trafego_projecao()
+    else:
+        _render_trafego_vmda()
+
+
+# Camadas do pavimento, ordem estrutural (de baixo pra cima no gráfico).
+# Subleito não é uma espessura medida (ver services/geotecnia_service.py) —
+# por isso não recebe rótulo de valor, só a cor de preenchimento.
+_PAVEMENT_LAYER_LABELS = {
+    "subleito": "Subleito", "reforco": "Reforço", "subbase": "Sub-base",
+    "base": "Base", "revestimento": "Revestimento",
+}
+# Paleta ordinal (um hue só, luminosidade monótona) pras 3 camadas de baixo —
+# ver dataviz skill. Revestimento sai da rampa de propósito: cinza claro, pra
+# parecer o próprio asfalto/pavimento (pedido explícito, não segue a rampa).
+_PAVEMENT_LAYER_COLORS = {
+    "subleito": "#f5d98a", "reforco": "#e0b568", "subbase": "#c99548",
+    "base": "#b17530", "revestimento": "#696969",
+}
+_PAVEMENT_LAYER_TEXT = {
+    "subleito": "#2a1c08", "reforco": "#2a1c08", "subbase": "#2a1c08",
+    "base": "#fff7ea", "revestimento": "#23262a",
+}
+
+
+def _pavement_tooltip_html(row) -> str:
+    """Card 'DADOS' (hover) de um trecho: km, extensão e material+espessura
+    de cada camada real (Subleito fica de fora — não é medido)."""
+    def _num_br(v) -> str:
+        return "" if pd.isna(v) else f"{float(v):.2f}".replace(".", ",")
+
+    rows = [
+        ("Segmento", f"KM {_num_br(row['km_inicial'])} - {_num_br(row['km_final'])}"),
+        ("KM Inicial", _num_br(row["km_inicial"])),
+        ("KM Final", _num_br(row["km_final"])),
+    ]
+    if pd.notna(row.get("extensao")):
+        rows.append(("Extensão", f"{_num_br(row['extensao'])} km"))
+    for layer, label in (("revestimento", "Revestimento"), ("base", "Base"), ("subbase", "Sub-base")):
+        espessura = float(row.get(layer, 0) or 0)
+        if espessura <= 0:
+            continue
+        material = str(row.get(f"material_{layer}") or "").strip()
+        prefixo = f"{material} - " if material else ""
+        rows.append((label, f"{prefixo}{espessura:.0f} cm"))
+    reforco = float(row.get("reforco", 0) or 0)
+    if reforco > 0:
+        rows.append(("Reforço", f"{reforco:.0f} cm"))
+
+    rows_html = "".join(
+        f'<div class="pavement-tooltip-row"><span>{html.escape(label)}:</span><strong>{html.escape(value)}</strong></div>'
+        for label, value in rows
+    )
+    return (
+        '<div class="pavement-tooltip">'
+        '<div class="pavement-tooltip-head">Dados</div>'
+        f'<div class="pavement-tooltip-body">{rows_html}</div>'
+        '</div>'
+    )
+
+
+def _render_pavement_structure_panel(title: str, df_dir: pd.DataFrame) -> None:
+    """Painel 'Estrutura - Crescente/Decrescente': uma barra empilhada por
+    trecho, camadas na ordem estrutural (Subleito embaixo, Revestimento em
+    cima)."""
+    legend = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#cbd5df;margin:0 12px 6px 0">'
+        f'<span style="width:11px;height:11px;border-radius:3px;background:{_PAVEMENT_LAYER_COLORS[layer]};display:inline-block"></span>'
+        f'{html.escape(_PAVEMENT_LAYER_LABELS[layer])}</span>'
+        for layer in LAYER_ORDER
+    )
+    head = (
+        '<div class="solution-distribution-head">'
+        '<div class="solution-distribution-title"><div class="solution-distribution-icon">▦</div>'
+        f'<div><h3>{html.escape(title)}</h3></div></div>'
+        f'<div class="solution-distribution-meta">{legend}</div></div>'
+    )
+    if df_dir.empty:
+        st.markdown(f'<div class="solution-distribution">{head}</div>', unsafe_allow_html=True)
+        st.info("Sem dados para este sentido.")
+        return
+
+    axis_max = _axis_max_10(float(df_dir[LAYER_ORDER].sum(axis=1).max()))
+    ticks = _axis_ticks_n(axis_max)
+    tick_markup = "".join(
+        f'<span class="solution-y-tick" style="bottom:{t / axis_max * 100:.2f}%;">{int(t)}</span>'
+        for t in ticks
+    )
+
+    bars_html, labels_html = [], []
+    for _, row in df_dir.iterrows():
+        segs = []
+        for layer in LAYER_ORDER:
+            valor = float(row[layer])
+            altura = (valor / axis_max * 100) if axis_max else 0.0
+            if altura <= 0:
+                continue
+            mostra_valor = layer != "subleito" and altura >= 8
+            conteudo = f"{valor:.0f}" if mostra_valor else ""
+            segs.append(
+                f'<div class="pavement-bar-seg" style="height:{altura:.2f}%;'
+                f'background:{_PAVEMENT_LAYER_COLORS[layer]};color:{_PAVEMENT_LAYER_TEXT[layer]}">'
+                f'{conteudo}</div>'
+            )
+        bars_html.append(
+            '<div class="solution-bar-item pavement-bar-item">'
+            f'<div class="pavement-bar">{"".join(segs)}</div>'
+            f'{_pavement_tooltip_html(row)}'
+            '</div>'
+        )
+        labels_html.append(f'<div class="solution-bar-label">{html.escape(str(row["segmento"]))}</div>')
+
+    st.markdown(
+        f'<div class="solution-distribution">{head}'
+        '<div class="solution-bars" style="grid-template-columns:56px minmax(0, 1fr)">'
+        f'<div class="solution-y-axis">{tick_markup}</div>'
+        '<div class="solution-chart-area"><div class="solution-chart-plot">'
+        f'<div class="solution-bar-grid" style="grid-auto-columns:minmax(96px, 1fr)">{"".join(bars_html)}</div></div>'
+        f'<div class="solution-label-grid" style="grid-auto-columns:minmax(96px, 1fr)">{"".join(labels_html)}</div>'
+        '</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+# Mesmas cores de classe já usadas no Diagnóstico (_CONDITION_LEGEND em
+# components/charts/linear_diagram.py): Bom=verde, Regular=amarelo,
+# Ruim=vermelho (Péssimo). Aplicado igual nas 3 composições (IRI/ATR/IGG).
+_CONDITION_CLASS_COLORS = {"Bom": "#00a651", "Regular": "#fff200", "Ruim": "#d71920", "Mau": "#d71920"}
+# Cor por faixa/pista nos gráficos de linha (1 cor sólida por faixa) — mesma
+# ordem categórica já validada (blue/orange/água) usada no comparativo de
+# segmentos do Tráfego. Cicla se aparecer uma 4ª faixa.
+_FAIXA_LINE_COLORS = ["#3987e5", "#d95926", "#199e70", "#8f5820"]
+
+
+def _condition_line_chart_svg(
+    df: pd.DataFrame, km_col: str, value_col: str, faixa_col: str,
+    thresholds: list[tuple[float, float, str]], y_max: float,
+) -> str:
+    """SVG de linha (valor × extensão) com faixas de fundo por classe
+    (Bom/Regular/Ruim) e 1 linha por faixa/pista — quebrada onde há lacuna
+    > 0,5km entre amostras consecutivas (não liga trechos sem levantamento),
+    mesmo padrão estrutural de _traffic_line_chart."""
+    data = df.dropna(subset=[km_col, value_col])
+    if data.empty:
+        return '<p style="color:#8f9eaa;font-size:12px">Sem dados para o gráfico.</p>'
+
+    km_min = float(data[km_col].min())
+    km_max = float(data[km_col].max())
+    span_km = (km_max - km_min) or 1.0
+
+    W, H = 1080, 240
+    L, R, T, B = 46, 12, 12, 30
+    pw, ph = W - L - R, H - T - B
+
+    def X(km: float) -> float:
+        return L + (km - km_min) / span_km * pw
+
+    def Y(v: float) -> float:
+        v = min(max(v, 0.0), y_max)
+        return T + (1 - v / y_max) * ph
+
+    parts: list[str] = []
+    for y1, y2, classe in thresholds:
+        y_top, y_bot = Y(y2), Y(y1)
+        parts.append(
+            f'<rect x="{L}" y="{y_top:.1f}" width="{pw:.1f}" height="{(y_bot - y_top):.1f}" '
+            f'fill="{_CONDITION_CLASS_COLORS.get(classe, "#8f9eaa")}" opacity=".32"/>'
+        )
+    for i in range(6):
+        val = y_max * i / 5
+        gy = Y(val)
+        parts.append(f'<line x1="{L}" y1="{gy:.1f}" x2="{L + pw}" y2="{gy:.1f}" stroke="rgba(148,163,184,.14)" stroke-width="1"/>')
+        parts.append(f'<text x="{L - 8}" y="{gy + 3:.1f}" fill="#8f9eaa" font-size="10" text-anchor="end">{val:.0f}</text>')
+
+    faixas = sorted(data[faixa_col].dropna().astype(str).unique(), key=lambda f: (len(f), f))
+    for idx, faixa in enumerate(faixas):
+        color = _FAIXA_LINE_COLORS[idx % len(_FAIXA_LINE_COLORS)]
+        sub = data[data[faixa_col].astype(str) == faixa].sort_values(km_col)
+        runs: list[list[tuple[float, float]]] = []
+        run: list[tuple[float, float]] = []
+        prev_km = None
+        for km, val in zip(sub[km_col], sub[value_col]):
+            if prev_km is not None and (km - prev_km) > 0.5:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = []
+            run.append((km, val))
+            prev_km = km
+        if len(run) >= 2:
+            runs.append(run)
+        for run in runs:
+            pts = " ".join(f"{X(km):.1f},{Y(val):.1f}" for km, val in run)
+            parts.append(f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.4"/>')
+
+    n_labels = 12
+    for i in range(n_labels + 1):
+        km = km_min + span_km * i / n_labels
+        parts.append(f'<text x="{X(km):.1f}" y="{T + ph + 20}" fill="#8f9eaa" font-size="10" text-anchor="middle">{km:.0f}</text>')
+
+    return (
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet" '
+        f'style="display:block;width:100%;height:auto">{"".join(parts)}</svg>'
+    )
+
+
+def _render_condition_line_section(
+    titulo: str, subtitulo: str, df_sentido: pd.DataFrame,
+    km_col: str, value_col: str, faixa_col: str,
+    thresholds: list[tuple[float, float, str]], y_max: float,
+) -> None:
+    """Card com o gráfico de linha (valor × extensão) de um sentido, mais a
+    legenda (classe + faixa) — usado pros 6 gráficos (IRI/ATR/d0 ×
+    Crescente/Decrescente)."""
+    if df_sentido.empty:
+        st.markdown(
+            f'<section class="chart-card"><div class="chart-heading"><h3>{html.escape(titulo)}</h3>'
+            f'<p>{html.escape(subtitulo)}</p></div>'
+            '<p style="color:#8f9eaa;font-size:12px">Sem dados para este sentido.</p></section>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    classes_vistas = []
+    for _, _, classe in thresholds:
+        if classe not in classes_vistas:
+            classes_vistas.append(classe)
+    faixas = sorted(df_sentido[faixa_col].dropna().astype(str).unique(), key=lambda f: (len(f), f))
+    legend = "".join(
+        f'<span class="proj-leg"><span class="sw" style="background:{_CONDITION_CLASS_COLORS.get(c, "#8f9eaa")}"></span>{html.escape(c)}</span>'
+        for c in classes_vistas
+    ) + "".join(
+        f'<span class="proj-leg"><span class="sw" style="background:{_FAIXA_LINE_COLORS[i % len(_FAIXA_LINE_COLORS)]}"></span>Faixa {html.escape(f)}</span>'
+        for i, f in enumerate(faixas)
+    )
+    svg = _condition_line_chart_svg(df_sentido, km_col, value_col, faixa_col, thresholds, y_max)
+    st.markdown(
+        '<section class="chart-card">'
+        f'<div class="chart-heading"><h3>{html.escape(titulo)}</h3><p>{html.escape(subtitulo)}</p></div>'
+        f'<div class="proj-chart">{svg}</div>'
+        f'<div class="proj-legend">{legend}</div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_condition_composition_donut(title: str, df_comp: pd.DataFrame) -> None:
+    """Rosca de composição por classe (Bom/Regular/Ruim), % da extensão (km)."""
+    dist = df_comp.copy()
+    if not dist.empty:
+        dist["classe"] = dist["classe"].astype(str)
+        dist["color"] = dist["classe"].map(_CONDITION_CLASS_COLORS).fillna("#8f9eaa")
+        dist = dist[["classe", "percentual", "color"]]
+    total_km = float(df_comp["extensao"].sum()) if not df_comp.empty else 0.0
+    render_iap_distribution(
+        dist, total_km,
+        title=title, subtitle="Composição por classe (% da extensão)",
+        center_label="KM", value_fmt="{:.0f}",
+    )
+
+
+def _pavimentacao_km_slider(rodovia_sel: str, km_min: float, km_max: float, instance: str) -> tuple[float, float]:
+    """Slider de km sincronizado entre várias instâncias na mesma página (uma
+    acima das roscas, uma abaixo de cada par Crescente/Decrescente): mexer em
+    qualquer uma atualiza todas as outras.
+
+    Streamlit não deixa 2 widgets com a mesma `key`, então cada instância tem
+    sua própria key (`widget_key`), mas todas leem/escrevem um único valor
+    compartilhado em `st.session_state[shared_key]`. A cada rerun, ANTES de
+    criar os widgets, propaga o valor compartilhado pra key desta instância —
+    por isso não passamos `value=` (conflitaria com pré-setar o session_state).
+    """
+    shared_key = f"pavimentacao_km_shared_{rodovia_sel}"
+    widget_key = f"pavimentacao_km_{instance}_{rodovia_sel}"
+
+    slider_min = float(int(km_min))
+    slider_max = float(int(km_max) + (1 if km_max > int(km_max) else 0))
+    if slider_max <= slider_min:
+        slider_max = slider_min + 1.0
+
+    if shared_key not in st.session_state:
+        st.session_state[shared_key] = (slider_min, slider_max)
+    st.session_state[widget_key] = st.session_state[shared_key]
+
+    def _sync():
+        st.session_state[shared_key] = st.session_state[widget_key]
+
+    st.slider(
+        "Filtrar trecho (km)", min_value=slider_min, max_value=slider_max, step=1.0,
+        key=widget_key, on_change=_sync,
+        help="Arraste as alças para ampliar um trecho específico da rodovia.",
+    )
+    return st.session_state[shared_key]
+
+
+def _render_pavimentacao_page() -> None:
+    st.markdown(
+        """
+        <div class="top-row">
+            <div>
+                <p class="eyebrow">ANÁLISE TÉCNICA</p>
+                <h1 class="page-title">Pavimentação</h1>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    roads = get_pavimentacao_roads()
+    if not roads:
+        st.info("Sem dados de condição de pavimento disponíveis no banco.")
+        return
+
+    road_col, _spacer_col, _spacer_col2 = st.columns([1, 1, 1], gap="small")
+    with road_col:
+        _filter_label("Rodovia")
+        rodovia_sel = _compact_singleselect(
+            "Rodovia", roads, key="pavimentacao_road",
+            format_func=_traffic_road_label, default=roads[0],
+        )
+
+    df_iri = get_iri_series(rodovia_sel)
+    df_atr = get_atr_series(rodovia_sel)
+    df_d0 = get_d0_series(rodovia_sel)
+
+    def _km_bounds(df: pd.DataFrame) -> tuple[float, float] | None:
+        if df.empty:
+            return None
+        km_final_efetivo = df["km_final"].fillna(df["km_inicial"])
+        return float(df["km_inicial"].min()), float(km_final_efetivo.max())
+
+    bounds = [b for b in (_km_bounds(df_iri), _km_bounds(df_atr), _km_bounds(df_d0)) if b is not None]
+    km_min = min(b[0] for b in bounds) if bounds else 0.0
+    km_max = max(b[1] for b in bounds) if bounds else 1.0
+
+    st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
+    km_range = _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "top")
+
+    st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+    # 3 na mesma linha: precisa de uma marcação (.pavimentacao-donut-marker)
+    # pro CSS conseguir mirar só esses 3 cards e apertar o componente de
+    # rosca (que por padrão reserva 260px fixos pro círculo — não cabem 3
+    # com legenda legível sem esse ajuste, ver CSS .pavimentacao-donut-marker).
+    col_iri, col_atr, col_igg = st.columns(3, gap="medium")
+    with col_iri:
+        st.markdown('<span class="pavimentacao-donut-marker"></span>', unsafe_allow_html=True)
+        _render_condition_composition_donut("Composição IRI", get_iri_composition(rodovia_sel, km_range))
+    with col_atr:
+        st.markdown('<span class="pavimentacao-donut-marker"></span>', unsafe_allow_html=True)
+        _render_condition_composition_donut("Composição ATR", get_atr_composition(rodovia_sel, km_range))
+    with col_igg:
+        st.markdown('<span class="pavimentacao-donut-marker"></span>', unsafe_allow_html=True)
+        _render_condition_composition_donut("Composição IGG", get_igg_composition(rodovia_sel, km_range))
+
+    df_iri_f = df_iri[(df_iri["km_final"].fillna(df_iri["km_inicial"]) >= km_range[0]) & (df_iri["km_inicial"] <= km_range[1])]
+    sentido_iri = df_iri_f["sentido_trafego"].astype(str).str.strip().str.lower()
+    _IRI_THRESHOLDS = [(0.0, 2.7, "Bom"), (2.7, 3.5, "Regular"), (3.5, 30.0, "Ruim")]
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_condition_line_section(
+        "IRI - Crescente", "IRI por extensão (km) — sentido crescente",
+        df_iri_f[~sentido_iri.str.contains("decr")],
+        km_col="km_inicial", value_col="iri_medio", faixa_col="faixa",
+        thresholds=_IRI_THRESHOLDS, y_max=30.0,
+    )
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_condition_line_section(
+        "IRI - Decrescente", "IRI por extensão (km) — sentido decrescente",
+        df_iri_f[sentido_iri.str.contains("decr")],
+        km_col="km_inicial", value_col="iri_medio", faixa_col="faixa",
+        thresholds=_IRI_THRESHOLDS, y_max=30.0,
+    )
+    st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+    km_range = _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "after_iri")
+
+    df_atr_f = df_atr[(df_atr["km_final"].fillna(df_atr["km_inicial"]) >= km_range[0]) & (df_atr["km_inicial"] <= km_range[1])]
+    sentido_atr = df_atr_f["sentido_trafego"].astype(str).str.strip().str.lower()
+    _ATR_THRESHOLDS = [(0.0, 7.0, "Bom"), (7.0, 10.0, "Regular"), (10.0, 15.0, "Ruim")]
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_condition_line_section(
+        "ATR - Crescente", "ATR por extensão (km) — sentido crescente",
+        df_atr_f[~sentido_atr.str.contains("decr")],
+        km_col="km_inicial", value_col="atr", faixa_col="faixa",
+        thresholds=_ATR_THRESHOLDS, y_max=15.0,
+    )
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_condition_line_section(
+        "ATR - Decrescente", "ATR por extensão (km) — sentido decrescente",
+        df_atr_f[sentido_atr.str.contains("decr")],
+        km_col="km_inicial", value_col="atr", faixa_col="faixa",
+        thresholds=_ATR_THRESHOLDS, y_max=15.0,
+    )
+    st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+    km_range = _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "after_atr")
+
+    df_d0_f = df_d0[(df_d0["km_final"].fillna(df_d0["km_inicial"]) >= km_range[0]) & (df_d0["km_inicial"] <= km_range[1])]
+    sentido_d0 = df_d0_f["sentido_trafego"].astype(str).str.strip().str.lower()
+    _D0_THRESHOLDS = [(0.0, 40.0, "Bom"), (40.0, 80.0, "Regular"), (80.0, 300.0, "Mau")]
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_condition_line_section(
+        "d0 - Crescente", "d0 por extensão (km) — sentido crescente",
+        df_d0_f[~sentido_d0.str.contains("decr")],
+        km_col="km_inicial", value_col="d0", faixa_col="faixa",
+        thresholds=_D0_THRESHOLDS, y_max=300.0,
+    )
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_condition_line_section(
+        "d0 - Decrescente", "d0 por extensão (km) — sentido decrescente",
+        df_d0_f[sentido_d0.str.contains("decr")],
+        km_col="km_inicial", value_col="d0", faixa_col="faixa",
+        thresholds=_D0_THRESHOLDS, y_max=300.0,
+    )
+    st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+    _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "after_d0")
+
+
+def _render_geotecnia_page() -> None:
+    st.markdown(
+        """
+        <div class="top-row">
+            <div>
+                <p class="eyebrow">ANÁLISE TÉCNICA</p>
+                <h1 class="page-title">Geotecnia</h1>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    roads = get_pavement_structure_roads()
+    if not roads:
+        st.info("Sem levantamento estrutural disponível no banco.")
+        return
+
+    road_col, _spacer_col, _spacer_col2 = st.columns([1, 1, 1], gap="small")
+    with road_col:
+        _filter_label("Rodovia")
+        rodovia_sel = _compact_singleselect(
+            "Rodovia", roads, key="geotecnia_road",
+            format_func=_traffic_road_label, default=roads[0],
+        )
+
+    df = get_pavement_structure(rodovia_sel)
+    if df.empty:
+        st.info("Sem dados de estrutura para esta rodovia.")
+        return
+
+    # Slider de zoom em km (mesmo componente do Diagnóstico, apply_km_zoom).
+    # O último trecho de cada grupo rodovia+sentido+faixa fica sem km_final
+    # (ver services/geotecnia_service.py) — pro slider, tratamos esse trecho
+    # como se tivesse 1km de extensão, só pra não sumir do cálculo de zoom;
+    # o rótulo exibido no gráfico continua "Xkm - km" (sem o valor final).
+    km_final_efetivo = df["km_final"].fillna(df["km_inicial"] + 1.0)
+    df_para_zoom = df.assign(km_final=km_final_efetivo)
+    _, km_range = apply_km_zoom(df_para_zoom, key=f"geotecnia_km_zoom_{rodovia_sel}", label="Filtrar trecho (km)")
+    if km_range is not None:
+        df = df[(km_final_efetivo >= km_range[0]) & (df["km_inicial"] <= km_range[1])]
+
+    st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
+    sentido = df["sentido_trafego"].astype(str).str.strip().str.lower()
+    is_decrescente = sentido.str.contains("decr")
+
+    _render_pavement_structure_panel("Estrutura - Crescente", df[~is_decrescente])
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_pavement_structure_panel("Estrutura - Decrescente", df[is_decrescente])
+
+
 def main() -> None:
     """Ponto de entrada e ROTEADOR da aplicação.
 
@@ -10932,7 +12777,10 @@ def main() -> None:
     if page == "projecao":
         page = "cenario"
         st.query_params["page"] = "cenario"
-    if page not in {"visaogeral", "overview", "solucoes", "comparativo", "cenario", "risco"}:
+    if page not in {
+        "visaogeral", "overview", "solucoes", "comparativo", "cenario", "risco",
+        "trafego", "pavimentacao", "geotecnia",
+    }:
         page = "overview"
     render_sidebar(active_key=page)
 
@@ -11046,48 +12894,52 @@ def main() -> None:
 
     # ─── Página CENÁRIO ECONÔMICO (quanto custa) ─── Paragon / DNIT
     if page == "cenario":
-        diagnosis, selected_road, scenario_key = render_top_bar(
-            default_road,
-            page_title="Cenário econômico",
-            show_diagnosis=True,
-            keep_title=True,
-            show_scenario=False,
-            diagnosis_options=[
-                "Diagnóstico Paragon",
-                "Diagnóstico DNIT",
-            ],
-        )
+        diagnosis, _eco_selected_roads, _eco_pairs, _eco_labels_by_pair = render_economic_top_bar()
         st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
-        _eco_keys, _eco_labels = _render_economic_master_filters(
-            selected_road,
-            matrix_type="Matriz Cadastrada" if diagnosis == "Diagnóstico DNIT" else "Paragon",
-            widget_prefix="dnit_eco" if diagnosis == "Diagnóstico DNIT" else "eco",
-        )
-        if diagnosis == "Diagnóstico DNIT":
-            _render_dnit_economic_page(selected_road, _eco_keys)
+        if not _eco_pairs:
+            st.info("Selecione ao menos uma rodovia e um cenário para continuar.")
             return
-        if len(_eco_keys) >= 2:
-            _ec = _combined_economic_data(selected_road, _eco_keys, _eco_labels)
+        _eco_roads = list(dict.fromkeys(road for road, _ in _eco_pairs))
+        if diagnosis == "Diagnóstico DNIT":
+            _render_dnit_economic_page(_eco_pairs)
+            return
+        if len(_eco_pairs) >= 2:
+            _ec = _combined_economic_data_multi(_eco_pairs, _eco_labels_by_pair)
             _render_economic_page(
                 _ec["table"],
                 _ec["budget_items"],
                 _ec["segments"],
-                scenario_key=f"{selected_road}:multi",
-                road=selected_road,
+                scenario_key=f"{'|'.join(_eco_roads)}:multi",
+                road=", ".join(_eco_roads),
                 scenario_label="Paragon · múltiplos cenários",
             )
         else:
-            _ekey = _eco_keys[0] if _eco_keys else scenario_key
-            data = get_solutions_data(selected_road, scenario_key=_ekey)
-            scenario_label = get_scenario_label(selected_road, _ekey) or "Paragon"
+            _eco_road, _ekey = _eco_pairs[0]
+            data = get_solutions_data(_eco_road, scenario_key=_ekey)
+            scenario_label = get_scenario_label(_eco_road, _ekey) or "Paragon"
             _render_economic_page(
                 data["table"],
                 data.get("budget_items"),
                 data.get("segments"),
-                scenario_key=f"{selected_road}:{_ekey}",
-                road=selected_road,
+                scenario_key=f"{_eco_road}:{_ekey}",
+                road=_eco_road,
                 scenario_label=scenario_label,
             )
+        return
+
+    # ─── Página ANÁLISE TÉCNICA · Tráfego (VMDA + Projeção) ───
+    if page == "trafego":
+        _render_trafego_page()
+        return
+
+    # ─── Página ANÁLISE TÉCNICA · Geotecnia (estrutura do pavimento) ───
+    if page == "geotecnia":
+        _render_geotecnia_page()
+        return
+
+    # ─── Página ANÁLISE TÉCNICA · Pavimentação (condição atual) ───
+    if page == "pavimentacao":
+        _render_pavimentacao_page()
         return
 
     # ─── Página VISÃO GERAL (rede) — panorama de todas as rodovias ───

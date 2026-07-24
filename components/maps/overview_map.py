@@ -60,7 +60,7 @@ def _render_empty_overview_map(message: str) -> None:
           <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
           <style>
             html, body { margin: 0; padding: 0; background: #061018; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-            .map-card { position: relative; height: 456px; border-radius: 14px; overflow: hidden; background: #0b1d28; border: 1px solid #1d3848; }
+            .map-card { position: relative; height: 456px; border-radius: 14px; overflow: hidden; background: #0b1d28; border: 0; }
             #map { height: 100%; width: 100%; }
             .empty-note {
               position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -261,7 +261,7 @@ def render_overview_map(
           <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
           <style>
             html, body { margin: 0; padding: 0; background: #061018; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-            .map-card { position: relative; height: 456px; border-radius: 14px; overflow: hidden; background: #0b1d28; border: 1px solid #1d3848; }
+            .map-card { position: relative; height: 456px; border-radius: 14px; overflow: hidden; background: #0b1d28; border: 0; }
             .map-card:fullscreen { width: 100vw; height: 100vh; border-radius: 0; border: 0; }
             .map-card:fullscreen #map { height: 100vh; }
             #map { height: 100%; width: 100%; }

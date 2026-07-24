@@ -1,6 +1,6 @@
 """Menu lateral (sidebar) do relatório.
 
-Monta a barra lateral com a marca (título/subtítulo de core.constants) e a lista
+Monta a barra lateral com a marca (título de core.constants) e a lista
 de navegação a partir de MENU_ITEMS. Cada item vira um link `?page=<key>` que
 recarrega a página no mesmo alvo (navegação por query param, sem JS). A marcação
 é injetada via st.sidebar.markdown; o visual fica no CSS global (.sidebar-shell,
@@ -12,7 +12,7 @@ import html
 
 import streamlit as st
 
-from core.constants import MENU_ITEMS, PAGE_SUBTITLE, PAGE_TITLE
+from core.constants import MENU_ITEMS, PAGE_TITLE
 
 
 # Ícones do menu como fragmentos de <path> SVG, indexados pela chave "icon" de
@@ -26,6 +26,11 @@ _ICON_SVGS = {
     "scale": "<path d='M12 3v18M5 7h14M6 7l-3 7h6zM18 7l-3 7h6z'/>",
     "shield": "<path d='M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6z'/>",
     "spark": "<path d='M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z'/>",
+    "search": "<circle cx='10' cy='10' r='6'/><path d='M15 15l6 6'/>",
+    "dollar": "<path d='M12 2v20'/><path d='M17 6.5c0-1.9-2.2-3-5-3s-5 1.3-5 3 2.2 3 5 3 5 1.1 5 3-2.2 3-5 3-5-1.1-5-3'/>",
+    "truck": "<path d='M2 16V7a1 1 0 0 1 1-1h9v10H2z'/><path d='M12 10h4l4 3.2V16h-8z'/><circle cx='6.5' cy='18' r='1.6'/><circle cx='16.5' cy='18' r='1.6'/>",
+    "road": "<path d='M8 21L10 3M16 21L14 3'/><path d='M12 4v3M12 10.5v3M12 17v3'/>",
+    "layers": "<path d='M12 3l9 5-9 5-9-5 9-5z'/><path d='M3 13l9 5 9-5'/><path d='M3 17l9 5 9-5'/>",
 }
 
 
@@ -53,7 +58,28 @@ def render_sidebar(active_key: str = "overview") -> None:
     """
     current_theme = str(st.session_state.get("dashboard_theme", "dark"))
     items_html = []
+    cta_html = []
+    last_group = "__unset__"
     for item in MENU_ITEMS:
+        group = item.get("group")
+        # Itens sem group (ex.: IAGON) não entram na lista de navegação: viram
+        # um card de destaque próprio, renderizado fora do .side-menu.
+        if group is None:
+            active_class = " active" if item["key"] == active_key else ""
+            href = f'?page={html.escape(item["key"])}&theme={html.escape(current_theme)}'
+            cta_html.append(
+                f'<a class="side-cta{active_class}" href="{href}" target="_self">'
+                f'<div class="side-cta-icon">{_menu_icon(item["icon"])}</div>'
+                '<div class="side-copy">'
+                f'<div class="side-cta-label">{html.escape(item["label"])}</div>'
+                f'<div class="side-cta-description">{html.escape(item["description"])}</div>'
+                '</div>'
+                '</a>'
+            )
+            continue
+        if group != last_group:
+            items_html.append(f'<div class="side-group-label">{html.escape(group)}</div>')
+        last_group = group
         # Destaca o item cuja key bate com a página ativa.
         active_class = " active" if item["key"] == active_key else ""
         href = f'?page={html.escape(item["key"])}&theme={html.escape(current_theme)}'
@@ -70,22 +96,17 @@ def render_sidebar(active_key: str = "overview") -> None:
     sidebar_html = (
         '<div class="sidebar-shell">'
         '<div class="brand-row">'
-        '<div class="brand-mark"><span>◉</span></div>'
-        '<div>'
-        f'<div class="brand-title">{html.escape(PAGE_TITLE)}</div>'
-        f'<div class="brand-subtitle">{html.escape(PAGE_SUBTITLE)}</div>'
+        '<div class="brand-title">'
+        '<span class="brand-title-tick brand-title-tick-l"><i></i><i></i></span>'
+        f'{html.escape(PAGE_TITLE)}'
+        '<span class="brand-title-tick brand-title-tick-r"><i></i><i></i></span>'
         '</div>'
         '</div>'
         f'<div class="side-menu">{"".join(items_html)}</div>'
+        '<div class="side-footer">'
+        f'<div class="side-cta-row">{"".join(cta_html)}</div>'
+        '</div>'
         '</div>'
     )
 
     st.sidebar.markdown(sidebar_html, unsafe_allow_html=True)
-
-    # Botão de troca de tema desativado — painel fixado em tema claro (ver app.py:_dashboard_theme).
-    # next_theme = "light" if current_theme == "dark" else "dark"
-    # label = "Tema claro" if current_theme == "dark" else "Tema escuro"
-    # if st.sidebar.button(label, key="sidebar_theme_toggle", use_container_width=True):
-    #     st.session_state["dashboard_theme"] = next_theme
-    #     st.query_params["theme"] = next_theme
-    #     st.rerun()

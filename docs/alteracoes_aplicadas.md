@@ -455,3 +455,92 @@ Importante: essa remoção é temporária e visual. Ao limpar o filtro, o trecho
 Depois melhorei esse mesmo filtro para aceitar intervalo de km digitado.
 
 Exemplo: ao digitar `0 a 59`, o painel já seleciona os trechos que cruzam esse intervalo. A seleção manual continua existindo, então dá para usar o intervalo como atalho e depois ajustar trecho por trecho, se precisar.
+## Fundo dos diagramas lineares
+
+Padronizei o fundo dos diagramas lineares da tela de Diagnóstico.
+
+O diagrama que já aparece aberto agora usa o mesmo quadro de fundo, borda e espaçamento do visual que aparece em `Mostrar detalhes técnicos`.
+
+O ajuste vale para os diagramas de Paragon e Matriz Cadastrada. Não alterei dados, cores, filtros ou cálculos.
+## Cor dos itens selecionados nos filtros
+
+Troquei o vermelho dos itens selecionados nos filtros por azul-marinho no tema escuro.
+
+O texto e o botão de remover continuam claros para manter a leitura. A mudança vale para todas as telas e altera somente a aparência dos filtros.
+## Altura dos filtros com várias seleções
+
+Os filtros que aceitam várias opções agora mantêm a mesma altura mesmo quando mais itens são selecionados.
+
+As seleções ficam em uma única linha e podem ser percorridas horizontalmente dentro do campo. Assim, os filtros não crescem para baixo nem desalinham o restante da tela.
+## Título separado dos filtros
+
+Separei o título dos filtros nas telas `Visão geral`, `Diagnóstico`, `Soluções`, `Comparativo entre cenários` e `Cenário econômico`.
+
+O nome da tela fica na primeira linha. Os filtros começam na linha seguinte, alinhados pela esquerda. A mudança é somente visual e não altera o funcionamento das seleções.
+## Menos contornos nos visuais
+
+Retirei as bordas decorativas que contornavam mapas, gráficos e blocos de conteúdo.
+
+Os fundos e os espaços entre as seções continuam separando cada visual. As sombras ficaram mais leves e as bordas foram mantidas apenas onde ajudam a indicar interação ou atenção, como filtros, botões, avisos e cards de indicadores.
+
+No visual de extensão das rodovias, também removi a borda da caixa interna de cada rodovia.
+# Ajuste de cores no gráfico de extensão
+
+- O nome da rodovia passou a aparecer em branco no tema escuro.
+- Foi corrigida a regra do link para impedir que o Streamlit volte a pintar esse nome de azul.
+- A parte que precisa de intervenção passou a usar um laranja mais suave.
+- A parte considerada OK passou a usar cinza/azul escuro, como fundo da barra, para deixar a intervenção mais evidente.
+- As cores da legenda foram ajustadas para acompanhar as barras.
+- A caixa de cada rodovia voltou a ter uma borda discreta e o cenário fica logo acima da barra, no mesmo padrão do exemplo escolhido.
+- Nenhum cálculo ou tamanho das barras foi alterado.
+# Filtros com várias escolhas
+
+- Quando há somente uma opção marcada, o filtro continua mostrando o nome normalmente.
+- Quando há duas ou mais opções, o filtro fechado mostra a quantidade selecionada e não aumenta de altura.
+- Ao abrir ou editar o filtro, as escolhas continuam disponíveis no componente normal.
+- As opções já escolhidas recebem um destaque azul discreto na lista.
+- Clicar novamente em uma opção marcada continua removendo essa escolha.
+- Na Visão Geral, Rodovia, Cenário e Ano passaram a usar uma lista vertical com caixas de seleção.
+- A contagem continua visível mesmo enquanto essa lista está aberta.
+- As opções marcadas continuam aparecendo na lista e podem ser desmarcadas no mesmo lugar.
+- O mesmo padrão compacto foi aplicado aos demais filtros múltiplos do dashboard.
+- O fundo azul forte e a sombra grande foram removidos para manter o mesmo visual dos filtros de escolha única.
+- A aparência anterior foi recuperada: campo escuro, seleção em azul-marinho e texto branco.
+- Reforcei a regra visual para o seletor não voltar ao azul vivo do botão e ficar mais parecido com o filtro antigo.
+- Removi o detalhe azul interno dos filtros compactos para eles ficarem mais parecidos com o seletor `Tipo de Matriz`.
+- Padronizei a fonte dos filtros compactos para usar o mesmo tamanho e peso do filtro `Tipo de Matriz`.
+- Padronizei o alinhamento dos textos dos filtros compactos para começar à esquerda.
+- A nova forma de selecionar e desmarcar opções pela lista vertical foi mantida.
+- O filtro de remoção de trechos continua no formato original porque pode conter muitas opções e precisa da busca por texto.
+
+## Títulos das páginas
+
+- Os títulos principais das telas passaram a aparecer em caixa alta, como `VISÃO GERAL`.
+- O texto pequeno `RELATÓRIOS`, que aparecia acima dos títulos, foi removido para limpar o topo das telas.
+- A mudança é apenas visual e não altera navegação, filtros ou nomes usados nos cálculos.
+
+## Cenário Econômico
+
+- O filtro de `Cenários` foi movido para a mesma linha dos filtros `Rodovias` e `Tipo de Matriz`.
+- A seleção de um ou mais cenários continua funcionando igual; a mudança foi apenas na organização do topo.
+
+## Cards de indicadores
+
+- Reduzi o espaço interno dos cards para evitar áreas vazias grandes.
+- Mantive título, valor e descrição mais próximos, sem alterar nenhum cálculo.
+- Melhorei o destaque dos ícones usando a cor de cada indicador de forma mais clara.
+- O mesmo ajuste vale para tema escuro e tema claro.
+- No card `TRECHOS PRIORITÁRIOS`, mantive o total no valor principal e passei a mostrar no subtítulo quantos são `Alta` e quantos são `Crítica`.
+- A regra exibida no card ficou como `IPI ≥ 50`, que representa Alta ou Crítica.
+- Na Visão Geral, a separação entre `Alta` e `Crítica` passou a aparecer como marcadores discretos dentro do card, facilitando a leitura rápida.
+- Adicionei um cabeçalho simples antes do mapa da Visão Geral para indicar que o mapa mostra a malha filtrada e a extensão total do recorte.
+
+## Ajustes visuais na Visão Geral
+
+- Padronizei a fonte e o peso dos textos nos filtros do topo, incluindo o Tipo de Matriz.
+- Deixei os dois cards com a mesma altura e alinhei melhor seus conteúdos.
+- Aproximei o título e a descrição do mapa.
+- Retirei o azul do nome dos cenários no gráfico de extensão e usei branco.
+- Troquei o trecho OK por um cinza-azulado mais discreto. O laranja da intervenção e os cálculos das barras não mudaram.
+- Na Visão Geral, o Tipo de Matriz passou a usar o mesmo formato visual dos outros filtros. Ele continua permitindo somente uma escolha.
+- Ao abrir o Tipo de Matriz, as opções agora usam as mesmas caixas dos outros slicers. Ao marcar uma opção, a anterior é desmarcada automaticamente.

@@ -32,7 +32,7 @@ import json
 import bisect
 import math
 import os
-from functools import lru_cache
+import functools
 from typing import Any
 
 import pandas as pd
@@ -40,6 +40,35 @@ import pandas as pd
 from core.constants import AVAILABLE_ROADS, DEFAULT_ROAD
 from services.cache import cached, cache_flush_all, get_meta, set_meta
 from src.database import MySQLConnection
+
+
+def _cache_unless_empty(maxsize: int = 128):
+    """Como `lru_cache`, mas nunca memoriza um resultado vazio/`None`.
+
+    `execute_query` engole erro de conexão e devolve linha nenhuma; combinado com
+    `lru_cache` isso congelava um resultado vazio pra sempre no processo (uma
+    falha de rede de meio segundo virava "sem dados" permanente até reiniciar o
+    Streamlit). Aqui, se vier vazio, a próxima chamada tenta o banco de novo —
+    quando a consulta realmente tem dado, o cache funciona normalmente.
+    """
+    def decorator(func):
+        cache: dict[tuple, Any] = {}
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            if key in cache:
+                return cache[key]
+            result = func(*args, **kwargs)
+            if result:
+                if len(cache) >= maxsize:
+                    cache.pop(next(iter(cache)))
+                cache[key] = result
+            return result
+
+        wrapper.cache_clear = cache.clear
+        return wrapper
+    return decorator
 
 
 # ============================================================================
@@ -862,6 +891,23 @@ def _shape_paths_for_segment(
     return paths
 
 
+def get_road_segment_paths(
+    road_code: str | int | None,
+    ranges: list[tuple[float, float]],
+) -> list[list[list[list[float]]]]:
+    """Geometria (paths) de uma lista arbitrária de faixas de km da rodovia.
+
+    Carrega o eixo da rodovia (pista_shape) uma única vez e fatia pra cada
+    (km_inicial, km_final) de `ranges` — usado por telas que têm seus próprios
+    segmentos (ex.: segmentos de tráfego/VMDA), sem depender de id_segmento.
+    Devolve uma lista paralela a `ranges` (lista vazia onde não há geometria).
+    """
+    shapes = _get_road_shape_rows_from_database(road_code)
+    if not shapes:
+        return [[] for _ in ranges]
+    return [_shape_paths_for_segment(shapes, km_i, km_f) for km_i, km_f in ranges]
+
+
 def _build_shape_paths_by_segment(
     seg_rows: list[dict[str, Any]],
     road_code: str | int | None,
@@ -1618,10 +1664,10 @@ def _get_default_iap_scenario(db: MySQLConnection, road_code: str) -> dict[str, 
     return None
 
 
-@lru_cache(maxsize=128)
+@_cache_unless_empty(maxsize=128)
 def _get_first_projection_year(ciclo_id: int) -> int | None:
     """Menor ano de projeção (ano-base) do ciclo em intervencoes_iap. None se vazio.
-    Cacheado em processo (lru_cache) — limpo por _clear_local_caches."""
+    Cacheado em processo (não memoriza `None`) — limpo por _clear_local_caches."""
     db = MySQLConnection()
     rows = db.execute_query(
         "SELECT MIN(ano) AS ano FROM analise_gerencial_intervencoes_iap WHERE gerencial_ciclo_id = %s",
@@ -1632,14 +1678,14 @@ def _get_first_projection_year(ciclo_id: int) -> int | None:
     return int(rows[0]["ano"])
 
 
-@lru_cache(maxsize=64)
+@_cache_unless_empty(maxsize=64)
 def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[dict[str, Any]]:
     """Cenários (análise × ciclo) da rodovia para um tipo de matriz.
 
     Lê analise_gerencial_dados_trechos (só não deletadas) juntando os ciclos. Ordena
     priorizando SH, depois 1km, depois o resto — e, dentro disso, os mais recentes.
-    Cacheado em processo (lru_cache); invalidado por ensure_fresh_data quando os
-    cenários mudam no banco. Retorna lista de dicts com key/analise_id/ciclo_id/etc.
+    Cacheado em processo (não memoriza lista vazia); invalidado por ensure_fresh_data
+    quando os cenários mudam no banco. Retorna lista de dicts com key/analise_id/ciclo_id/etc.
     """
     db = MySQLConnection()
     # ordem_cenario (CASE) prioriza Segmento Homogêneo (SH), depois 1km, depois outros;
@@ -1689,13 +1735,15 @@ def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[d
     return scenarios
 
 
-@lru_cache(maxsize=1)
+@_cache_unless_empty(maxsize=1)
 def _get_available_roads_from_database() -> list[str]:
     """Lista de rótulos "BR-xxx/UF" das rodovias com dados no banco.
 
     Une as rodovias de analise_gerencial_dados_trechos (têm nome -> permitem extrair
     UF) com as de analise_gerencial_segmento_pistas, dedup por código; prefere o
-    rótulo que traz a UF. Cacheado em processo (lru_cache maxsize=1).
+    rótulo que traz a UF. Cacheado em processo (nunca memoriza lista vazia — uma
+    falha de conexão pontual é tentada de novo na próxima chamada, em vez de
+    ficar "sem rodovias" travado pelo resto da vida do processo).
     """
     db = MySQLConnection()
     roads_by_code: dict[str, str] = {}
@@ -1980,7 +2028,7 @@ def _dnit_matriz_zona(iri: float) -> tuple[str, str]:
     return zona, _DNIT_ZONA_COLORS[zona]
 
 
-@lru_cache(maxsize=1)
+@_cache_unless_empty(maxsize=1)
 def _load_dnit_matrix() -> dict:
     """Carrega e estrutura a matriz de decisão DNIT (linhas=Número N, colunas=IRI×IGG×Dc/Dadm)."""
     db = MySQLConnection()
@@ -2392,7 +2440,7 @@ def _scenario_ciclo_id(scenario_key: str | None) -> int | None:
         return None
 
 
-@lru_cache(maxsize=32)
+@_cache_unless_empty(maxsize=32)
 def _get_dnit_analysis_for_road(road_code: str, scenario_key: str | None = None) -> dict | None:
     """Análise 'Matriz Cadastrada' da rodovia com soluções DNIT gravadas (ano-base = 1º ano).
 
