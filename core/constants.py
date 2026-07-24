@@ -53,10 +53,10 @@ MENU_ITEMS = [
         "description": "Quanto custa e o que evita?",
         "icon": "scale",
     },
-    {
-        "key": "risco",
-        "label": "IAGON",
-        "description": "Pergunte, analise e exporte",
-        "icon": "spark",
-    },
+    # {
+    #     "key": "risco",
+    #     "label": "IAGON",
+    #     "description": "Pergunte, analise e exporte",
+    #     "icon": "spark",
+    # },
 ]
