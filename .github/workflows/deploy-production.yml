@@ -28,3 +28,32 @@ jobs:
 
       - name: Build Docker image (smoke test)
         run: docker build -t relatorio-sgp-strata:ci .
+
+  build-and-push:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login no GHCR
+        uses: docker/login-action@v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e push da imagem
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/strataengenharia/relatorio-sgp-strata:${{ github.sha }}
+            ghcr.io/strataengenharia/relatorio-sgp-strata:latest
