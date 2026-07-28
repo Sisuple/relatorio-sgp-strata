@@ -57,3 +57,42 @@ jobs:
           tags: |
             ghcr.io/strataengenharia/relatorio-sgp-strata:${{ github.sha }}
             ghcr.io/strataengenharia/relatorio-sgp-strata:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        sistema:
+          - name: "Dashboard DNIT-RO"
+            ip: "187.77.237.150"
+            pasta: "relatorio-sgp-strata"
+            key_secret: "PROD_SSH_KEY"
+    steps:
+      - name: Deploy via SSH em ${{ matrix.sistema.name }}
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ matrix.sistema.ip }}
+          username: suple
+          key: ${{ secrets[matrix.sistema.key_secret] }}
+          port: 22
+          script: |
+            set -e
+            cd /var/www/${{ matrix.sistema.pasta }}
+            ssh-keyscan -t rsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+            git fetch origin
+            git reset --hard origin/main
+            export IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}
+            docker compose -f docker-compose.yaml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yaml -f docker-compose.prod.yml up -d
+            for i in $(seq 1 10); do
+              if curl -fsS http://127.0.0.1:8501/_stcore/health; then
+                echo "Aplicação saudável."
+                exit 0
+              fi
+              echo "Tentativa $i falhou, aguardando..."
+              sleep 3
+            done
+            echo "Healthcheck falhou após 10 tentativas."
+            exit 1
