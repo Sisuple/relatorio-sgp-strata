@@ -80,7 +80,7 @@ from services.prioritization import (
     classificar_prioridade,
 )
 from services.cache import cached
-from services.work_plan_pdf import build_work_plan_pdf
+from services.work_plan_pdf import build_work_plan_pdf, first_available_year_budget_items
 from services import iagon
 from services.traffic_service import (
     VEHICLE_COLUMNS,
@@ -89,6 +89,7 @@ from services.traffic_service import (
     get_vmda_long,
     get_vmda_wide,
 )
+from utils.geo import road_local_scenario_offsets
 from services.geotecnia_service import (
     LAYER_ORDER,
     get_pavement_structure,
@@ -5697,6 +5698,13 @@ def _render_economic_page(
         segments_df,
         excluded_keys,
     )
+    # O PDF sempre usa o orçamento completo pós-exclusões; o horizonte
+    # selecionado continua afetando somente a tela interativa.
+    work_plan_budget_items = (
+        budget_items.copy()
+        if budget_items is not None
+        else None
+    )
     if removed_segments:
         st.info(f"{removed_segments} trecho(s) removido(s) temporariamente desta análise.")
     if table_df is None or table_df.empty:
@@ -5727,6 +5735,11 @@ def _render_economic_page(
         calc_horizon,
         "Balanceada",
         base_year=calc_start_year,
+    )
+    work_plan_priority_table = (
+        prioritized_table.copy()
+        if prioritized_table is not None
+        else None
     )
     if not metrics:
         st.info("Sem dados de intervenção para montar o cenário econômico.")
@@ -5893,9 +5906,9 @@ def _render_economic_page(
         attended_snv_table=attended_snv_table,
         scope_snv=scope_snv,
         attended_km=attended_km,
-        budget_items=budget_items,
+        budget_items=work_plan_budget_items,
         segments_df=segments_df,
-        priority_table=prioritized_table,
+        priority_table=work_plan_priority_table,
         attended_ids=attended_ids,
     )
 
@@ -5985,7 +5998,7 @@ def _combined_economic_data_multi(
     também a coluna `Rodovia`, para as telas conseguirem distinguir de qual
     rodovia veio cada segmento quando há mais de uma selecionada."""
     tables, budgets, segs, per_sentido = [], [], [], []
-    n = len(road_scenario_pairs)
+    offsets = road_local_scenario_offsets(road_scenario_pairs)
     multi_road = len({road for road, _ in road_scenario_pairs}) > 1
     for i, (road, k) in enumerate(road_scenario_pairs):
         d = get_solutions_data(road, scenario_key=k, year=year)
@@ -6009,7 +6022,8 @@ def _combined_economic_data_multi(
             budgets.append(b)
         if s is not None and not s.empty:
             s = s.copy()
-            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
+            # Centraliza os cenários em torno da própria rodovia.
+            s["offset_side"] = offsets[i]
             s["sentido"] = sent
             s["rodovia"] = road
             segs.append(s)
@@ -6258,7 +6272,7 @@ def _combined_dnit_economic_data_multi(
     """Generaliza `_combined_dnit_economic_data` para somar VÁRIAS RODOVIAS × cenários
     (mesmo espírito de `_combined_economic_data_multi`, mas para a Matriz Cadastrada)."""
     tables, budgets, segs, per_sentido = [], [], [], []
-    n = len(road_scenario_pairs)
+    offsets = road_local_scenario_offsets(road_scenario_pairs)
     multi_road = len({road for road, _ in road_scenario_pairs}) > 1
     zona_colors = zona_order = ano_base = None
     for i, (road, k) in enumerate(road_scenario_pairs):
@@ -6286,7 +6300,8 @@ def _combined_dnit_economic_data_multi(
             budgets.append(b)
         if s is not None and not s.empty:
             s = s.copy()
-            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
+            # Outras rodovias não influenciam o afastamento desta pista.
+            s["offset_side"] = offsets[i]
             s["sentido"] = sent
             s["rodovia"] = road
             segs.append(s)
@@ -6346,6 +6361,11 @@ def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> No
         budget_items,
         segments_df,
         excluded_keys,
+    )
+    work_plan_budget_items = (
+        budget_items.copy()
+        if budget_items is not None
+        else None
     )
     if removed_segments:
         st.info(f"{removed_segments} trecho(s) removido(s) temporariamente desta análise.")
@@ -6523,7 +6543,7 @@ def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> No
         attended_snv_table=attended_snv_table,
         scope_snv=scope_snv,
         attended_km=attended_km,
-        budget_items=budget_items,
+        budget_items=work_plan_budget_items,
         segments_df=pdf_segments_df,
         priority_table=work,
         class_colors=zona_colors,
@@ -7687,16 +7707,42 @@ def _build_service_order_detail(attended_snv_table, priority_table, attended_ids
     ):
         return pd.DataFrame()
 
-    if attended_ids and "_segment_id" in priority_table.columns:
-        priority_table = priority_table[priority_table["_segment_id"].astype(int).isin(attended_ids)]
-        if priority_table.empty:
-            return pd.DataFrame()
+    priority_table = priority_table.copy()
+    match_keys = [
+        col
+        for col in ["Rodovia", "Sentido", "_segment_id"]
+        if col in attended_snv_table.columns and col in priority_table.columns
+    ]
+    if "_segment_id" in match_keys:
+        attended_keys = attended_snv_table[match_keys].drop_duplicates()
+        priority_table = priority_table.merge(attended_keys, on=match_keys, how="inner")
+    elif attended_ids and "_segment_id" in priority_table.columns:
+        priority_table = priority_table[
+            priority_table["_segment_id"].astype(int).isin(attended_ids)
+        ]
+    else:
+        attended_snvs = set(attended_snv_table["SNV"].astype(str))
+        priority_table = priority_table[
+            priority_table["SNV"].astype(str).isin(attended_snvs)
+        ]
+    if priority_table.empty:
+        return pd.DataFrame()
 
     rows = []
-    for snv in attended_snv_table["SNV"].astype(str).tolist():
-        seg = priority_table[priority_table["SNV"].astype(str) == snv]
+    scope_cols = [
+        col
+        for col in ["Rodovia", "Sentido", "SNV"]
+        if col in priority_table.columns
+    ]
+    scopes = priority_table[scope_cols].drop_duplicates()
+    for scope in scopes.to_dict("records"):
+        mask = pd.Series(True, index=priority_table.index)
+        for col in scope_cols:
+            mask &= priority_table[col].astype(str) == str(scope[col])
+        seg = priority_table.loc[mask]
         if seg.empty:
             continue
+        snv = str(scope.get("SNV", ""))
         base = seg.groupby(
             ["Km Inicial", "Km Final", "Extensão", "Solução recomendada"], as_index=False
         )["Custo econômico"].sum()
@@ -7708,6 +7754,7 @@ def _build_service_order_detail(attended_snv_table, priority_table, attended_ids
             rows.append(
                 {
                     "SNV": snv,
+                    "Sentido": str(scope.get("Sentido", "")),
                     "Km Inicial": float(r["Km Inicial"]),
                     "Km Final": float(r["Km Final"]),
                     "Extensão": float(r["Extensão"]),
@@ -7740,32 +7787,98 @@ def _render_work_plan_button(
 ) -> None:
     """Botão no fim da tela: gera o PDF do plano de trabalho do cenário atual."""
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-    state_key = f"wp_pdf_{scenario_key}"
+    state_key = f"wp_pdf_v3_{scenario_key}"
     class_colors = class_colors or _MAP_CLASS_COLORS
     solution_color = solution_color or _solution_color
 
     if st.button("📄 Gerar plano de trabalho (PDF)", key=f"genpdf_{scenario_key}"):
+        direction_fallback = str(scenario_label or "Cenário")
+
+        def _with_direction(df):
+            if df is None:
+                return None
+            result = df.copy()
+            if "Sentido" not in result.columns:
+                result["Sentido"] = direction_fallback
+            else:
+                empty_direction = result["Sentido"].fillna("").astype(str).str.strip().eq("")
+                result.loc[empty_direction, "Sentido"] = direction_fallback
+            return result
+
+        plan_budget_source = _with_direction(budget_items)
+        plan_priority_source = _with_direction(priority_table)
+        plan_attended_table = _with_direction(attended_snv_table)
+        plan_year, first_year_budget = first_available_year_budget_items(plan_budget_source)
+        plan_horizon = 1 if plan_year is not None else horizon
+        plan_top_label = f"{top_label} · ano {plan_year}" if plan_year is not None else top_label
+        plan_metrics = dict(metrics or {})
+        plan_scope_snv = scope_snv
+        plan_attended_km = attended_km
+        plan_attended_ids = (
+            set(attended_ids)
+            if attended_ids is not None
+            else _attended_segment_ids(segments_df, plan_attended_table)
+        )
+        plan_priority_table = plan_priority_source
+        plan_budget = first_year_budget
+
+        if (
+            plan_year is not None
+            and first_year_budget is not None
+            and not first_year_budget.empty
+            and plan_priority_source is not None
+            and not plan_priority_source.empty
+        ):
+            plan_priority_table = _segment_priority_table(
+                plan_priority_source,
+                first_year_budget,
+            )
+            plan_scope_snv = int(len(plan_priority_table))
+            plan_attended_table, plan_attended_km, plan_attended_ids = _segment_attendance_seg(
+                plan_priority_table,
+                annual_budget,
+            )
+            first_year_need = float(
+                pd.to_numeric(first_year_budget["Custo"], errors="coerce").fillna(0.0).sum()
+            )
+            available_budget = float(annual_budget) * 1_000_000
+            plan_metrics["total_need"] = first_year_need
+            plan_metrics["total_budget"] = available_budget
+            annual_coverage = (
+                min(available_budget / first_year_need * 100, 100)
+                if first_year_need
+                else 0.0
+            )
+
+        if plan_budget is not None and not plan_budget.empty:
+            match_keys = [
+                col
+                for col in ["Rodovia", "Sentido", "_segment_id"]
+                if plan_attended_table is not None
+                and col in plan_attended_table.columns
+                and col in plan_budget.columns
+            ]
+            if (
+                plan_attended_table is not None
+                and not plan_attended_table.empty
+                and "_segment_id" in match_keys
+            ):
+                attended_keys = plan_attended_table[match_keys].drop_duplicates()
+                plan_budget = plan_budget.merge(attended_keys, on=match_keys, how="inner")
+            elif plan_attended_ids and "_segment_id" in plan_budget.columns:
+                plan_budget = plan_budget[
+                    plan_budget["_segment_id"].astype(int).isin(plan_attended_ids)
+                ].copy()
+            elif plan_attended_table is not None and not plan_attended_table.empty:
+                attended_snvs = set(plan_attended_table["SNV"].astype(str))
+                plan_budget = plan_budget[
+                    plan_budget["SNV"].astype(str).isin(attended_snvs)
+                ].copy()
+
         seg_records = (
             segments_df[["segment_id", "classe_iap", "paths"]].to_dict("records")
             if segments_df is not None and not segments_df.empty
             else []
-        )
-        # Gráficos do plano refletem só os trechos atendidos pelo orçamento.
-        attended_snvs = (
-            set(attended_snv_table["SNV"].astype(str))
-            if attended_snv_table is not None and not attended_snv_table.empty
-            else set()
-        )
-        plan_budget = budget_items
-        if budget_items is not None and not budget_items.empty:
-            if attended_ids:
-                # Corte por segmento: só os segmentos efetivamente financiados.
-                plan_budget = budget_items[budget_items["_segment_id"].astype(int).isin(attended_ids)].copy()
-            elif attended_snvs:
-                plan_budget = budget_items[budget_items["SNV"].astype(str).isin(attended_snvs)].copy()
-        plan_attended_ids = (
-            attended_ids if attended_ids is not None
-            else _attended_segment_ids(segments_df, attended_snv_table)
         )
         with st.spinner("Gerando plano de trabalho..."):
             st.session_state[state_key] = build_work_plan_pdf(
@@ -7773,19 +7886,23 @@ def _render_work_plan_button(
                 scenario_label=scenario_label or "Paragon",
                 generated_at=date.today().strftime("%d/%m/%Y"),
                 annual_budget_mi=annual_budget,
-                horizon=horizon,
-                top_label=top_label,
-                metrics=metrics,
+                horizon=plan_horizon,
+                top_label=plan_top_label,
+                metrics=plan_metrics,
                 annual_coverage=annual_coverage,
-                attended_snv_table=attended_snv_table,
-                scope_snv=scope_snv,
-                attended_km=attended_km,
+                attended_snv_table=plan_attended_table,
+                scope_snv=plan_scope_snv,
+                attended_km=plan_attended_km,
                 budget_items=plan_budget,
                 segments=seg_records,
                 attended_ids=plan_attended_ids,
                 class_colors=class_colors,
                 solution_color=solution_color,
-                segments_detail=_build_service_order_detail(attended_snv_table, priority_table, plan_attended_ids),
+                segments_detail=_build_service_order_detail(
+                    plan_attended_table,
+                    plan_priority_table,
+                    plan_attended_ids,
+                ),
             )
 
     if st.session_state.get(state_key):
