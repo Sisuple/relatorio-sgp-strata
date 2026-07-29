@@ -115,13 +115,11 @@ st.set_page_config(
 
 def _dashboard_theme() -> str:
     """Tema visual do painel. As cores técnicas dos dados não entram nessa troca."""
-    # Tema fixado em "light" — toggle de tema desativado (ver sidebar.py).
-    # query_theme = str(st.query_params.get("theme", "")).lower()
-    # if query_theme in {"dark", "light"}:
-    #     st.session_state["dashboard_theme"] = query_theme
-    # elif "dashboard_theme" not in st.session_state:
-    #     st.session_state["dashboard_theme"] = "dark"
-    st.session_state["dashboard_theme"] = "light"
+    query_theme = str(st.query_params.get("theme", "")).lower()
+    if query_theme in {"dark", "light"}:
+        st.session_state["dashboard_theme"] = query_theme
+    elif "dashboard_theme" not in st.session_state:
+        st.session_state["dashboard_theme"] = "dark"
     return str(st.session_state["dashboard_theme"])
 
 

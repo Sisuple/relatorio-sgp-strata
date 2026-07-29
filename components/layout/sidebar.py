@@ -93,6 +93,10 @@ def render_sidebar(active_key: str = "overview") -> None:
             '</a>'
         )
 
+    next_theme = "light" if current_theme == "dark" else "dark"
+    theme_label = "Tema claro" if current_theme == "dark" else "Tema escuro"
+    theme_href = f'?page={html.escape(active_key)}&theme={html.escape(next_theme)}'
+
     sidebar_html = (
         '<div class="sidebar-shell">'
         '<div class="brand-row">'
@@ -105,6 +109,7 @@ def render_sidebar(active_key: str = "overview") -> None:
         f'<div class="side-menu">{"".join(items_html)}</div>'
         '<div class="side-footer">'
         f'<div class="side-cta-row">{"".join(cta_html)}</div>'
+        f'<a class="side-theme-toggle" href="{theme_href}" target="_self">{html.escape(theme_label)}</a>'
         '</div>'
         '</div>'
     )
