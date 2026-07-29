@@ -42,6 +42,24 @@ _PAGE_W, _PAGE_H = A4
 _CONTENT_W = _PAGE_W - 32 * mm  # margens de 16mm
 
 
+def first_available_year_budget_items(
+    budget_items: pd.DataFrame | None,
+) -> tuple[int | None, pd.DataFrame | None]:
+    """Recorta o orçamento para o menor ano válido disponível."""
+    if budget_items is None:
+        return None, None
+    if budget_items.empty or "Ano" not in budget_items.columns:
+        return None, budget_items.copy()
+
+    years = pd.to_numeric(budget_items["Ano"], errors="coerce")
+    valid_years = years.dropna()
+    if valid_years.empty:
+        return None, budget_items.iloc[0:0].copy()
+
+    first_year = int(valid_years.min())
+    return first_year, budget_items.loc[years == first_year].copy()
+
+
 def _money(value: float) -> str:
     """Formata reais de forma compacta: 'R$ 1.2 mi', 'R$ 350 mil' ou 'R$ 42'."""
     value = float(value or 0)
@@ -216,7 +234,7 @@ def _hbar_chart(
 
 def _snv_table(attended: pd.DataFrame) -> Table:
     """Tabela dos SNV atendidos: ranking, SRE, extensão, IPI e custo."""
-    header = ["#", "SRE", "Extensão", "IPI", "Custo"]
+    header = ["#", "SRE", "Sentido", "Extensão", "IPI", "Custo"]
     rows: list[list[Any]] = [header]
     for i, r in enumerate(attended.to_dict("records"), start=1):
         ipi = r.get("IPI", r.get("IPT", 0))
@@ -224,12 +242,13 @@ def _snv_table(attended: pd.DataFrame) -> Table:
             [
                 str(i),
                 _truncate(str(r.get("SNV", "")), 16),
+                _truncate(str(r.get("Sentido", "")), 24),
                 _km(r.get("Extensão", 0)),
                 f"{float(ipi or 0):.2f}",
                 _money(r.get("Custo econômico", 0)),
             ]
         )
-    col_w = [22, 120, 70, 55, None]
+    col_w = [22, 92, 132, 62, 48, None]
     used = sum(w for w in col_w if w)
     col_w[-1] = _CONTENT_W - used
     table = Table(rows, colWidths=col_w, repeatRows=1)
@@ -241,7 +260,7 @@ def _snv_table(attended: pd.DataFrame) -> Table:
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("FONTSIZE", (0, 0), (-1, -1), 8),
                 ("TEXTCOLOR", (0, 1), (-1, -1), _INK),
-                ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+                ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
                 ("ALIGN", (0, 0), (0, -1), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _PANEL]),
@@ -257,21 +276,22 @@ def _snv_table(attended: pd.DataFrame) -> Table:
 
 def _segments_detail_table(detail: pd.DataFrame) -> Table:
     """Tabela de ordem de serviço: por segmento, km inicial/final e intervenção."""
-    header = ["SRE", "Km Inicial", "Km Final", "Extensão", "Intervenção a executar", "Custo"]
+    header = ["SRE", "Sentido", "Km Inicial", "Km Final", "Extensão", "Intervenção a executar", "Custo"]
     rows: list[list[Any]] = [header]
     for r in detail.to_dict("records"):
         rows.append(
             [
                 _truncate(str(r.get("SNV", "")), 14),
+                _truncate(str(r.get("Sentido", "")), 22),
                 f"{float(r.get('Km Inicial', 0) or 0):.2f}",
                 f"{float(r.get('Km Final', 0) or 0):.2f}",
                 _km(r.get("Extensão", 0)),
-                _truncate(str(r.get("Intervenção", "")), 44),
+                _truncate(str(r.get("Intervenção", "")), 36),
                 _money(r.get("Custo", 0)),
             ]
         )
-    col_w = [86, 58, 58, 58, None, 66]
-    col_w[4] = _CONTENT_W - sum(w for w in col_w if w)
+    col_w = [72, 112, 48, 48, 52, None, 62]
+    col_w[5] = _CONTENT_W - sum(w for w in col_w if w)
     table = Table(rows, colWidths=col_w, repeatRows=1)
     table.setStyle(
         TableStyle(
@@ -281,8 +301,8 @@ def _segments_detail_table(detail: pd.DataFrame) -> Table:
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("FONTSIZE", (0, 0), (-1, -1), 7.5),
                 ("TEXTCOLOR", (0, 1), (-1, -1), _INK),
-                ("ALIGN", (1, 0), (3, -1), "RIGHT"),
-                ("ALIGN", (5, 0), (5, -1), "RIGHT"),
+                ("ALIGN", (2, 0), (4, -1), "RIGHT"),
+                ("ALIGN", (6, 0), (6, -1), "RIGHT"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _PANEL]),
                 ("LINEBELOW", (0, 0), (-1, -1), 0.4, _LINE),
@@ -360,10 +380,11 @@ def build_work_plan_pdf(
     story: list[Any] = []
     story.append(Paragraph("Plano de Trabalho", styles["title"]))
     story.append(Paragraph(f"{road} · Cenário {scenario_label} · gerado em {generated_at}", styles["sub"]))
+    horizon_label = "1 ano" if int(horizon) == 1 else f"{int(horizon)} anos"
     story.append(
         Paragraph(
             f"Orçamento anual: <b>{_money(annual_budget_mi * 1_000_000)}</b> &nbsp;·&nbsp; "
-            f"Horizonte: <b>{horizon} anos</b> &nbsp;·&nbsp; Trechos: <b>{top_label}</b>",
+            f"Horizonte: <b>{horizon_label}</b> &nbsp;·&nbsp; Trechos: <b>{top_label}</b>",
             styles["sub"],
         )
     )
