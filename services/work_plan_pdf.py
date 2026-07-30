@@ -232,6 +232,18 @@ def _hbar_chart(
     return d
 
 
+def _direction_label(sentido: Any) -> str:
+    """Reduz o valor de `Sentido` (nome completo do cenário) a apenas
+    'Crescente' ou 'Decrescente' — o resto do nome do cenário não interessa
+    ao PDF. Ordem importa: 'decrescente' contém 'crescente' como substring."""
+    low = str(sentido or "").strip().lower()
+    if "decrescente" in low:
+        return "Decrescente"
+    if "crescente" in low:
+        return "Crescente"
+    return str(sentido or "")
+
+
 def _snv_table(attended: pd.DataFrame) -> Table:
     """Tabela dos SNV atendidos: ranking, SRE, extensão, IPI e custo."""
     header = ["#", "SRE", "Sentido", "Extensão", "IPI", "Custo"]
@@ -242,7 +254,7 @@ def _snv_table(attended: pd.DataFrame) -> Table:
             [
                 str(i),
                 _truncate(str(r.get("SNV", "")), 16),
-                _truncate(str(r.get("Sentido", "")), 24),
+                _truncate(_direction_label(r.get("Sentido", "")), 24),
                 _km(r.get("Extensão", 0)),
                 f"{float(ipi or 0):.2f}",
                 _money(r.get("Custo econômico", 0)),
@@ -282,7 +294,7 @@ def _segments_detail_table(detail: pd.DataFrame) -> Table:
         rows.append(
             [
                 _truncate(str(r.get("SNV", "")), 14),
-                _truncate(str(r.get("Sentido", "")), 22),
+                _truncate(_direction_label(r.get("Sentido", "")), 22),
                 f"{float(r.get('Km Inicial', 0) or 0):.2f}",
                 f"{float(r.get('Km Final', 0) or 0):.2f}",
                 _km(r.get("Extensão", 0)),
