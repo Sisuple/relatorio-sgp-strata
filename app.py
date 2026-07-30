@@ -878,6 +878,14 @@ def inject_css() -> None:
             .economic-scroll .economic-plot { min-width: max-content; }
             .economic-scroll .economic-bars { position: static; inset: auto; height: 210px; padding: 0 16px; }
             .economic-scroll .economic-labels { min-width: max-content; }
+            /* Custo por recorte/rodovia: barra + rótulo no mesmo item, para não desalinhar
+               quando há muitos filtros (rótulos longos deslocavam a grade de labels). */
+            .network-cost-plot { position: relative; height: 210px; margin-top: 28px; border-bottom: 2px solid rgba(148,163,184,.34); background: repeating-linear-gradient(to top, transparent 0, transparent 51px, rgba(148,163,184,.10) 52px, transparent 53px); overflow: visible; min-width: max-content; }
+            .network-cost-cols { position: absolute; inset: 0 16px; display: flex; align-items: flex-start; gap: 18px; height: auto; }
+            .network-cost-col { display: flex; flex-direction: column; align-items: center; flex: 0 0 auto; min-width: 82px; }
+            .network-cost-bar-wrap { height: 210px; width: 100%; min-width: 82px; display: flex; align-items: flex-end; justify-content: center; }
+            .network-cost-label { margin-top: 8px; color: #8f9eaa; font-size: 11px; text-align: center; line-height: 1.3; white-space: nowrap; }
+            .economic-scroll .network-cost-cols { position: static; inset: auto; padding: 0 16px; }
             .economic-legend span { display: inline-flex; align-items: center; gap: 6px; }
             .economic-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
             .segment-timeline-panel { padding-bottom: 18px; }
@@ -2809,10 +2817,10 @@ def _render_diagnosis_iap_class_filter(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _render_solution_filters(table_df):
-    """Renderiza os filtros da tela de Soluções (SRE, Conceito IAP, Tipo de solução)
+    """Renderiza os filtros da tela de Soluções (SRE, Tipo de solução)
     e devolve a tabela já filtrada pelas seleções do usuário.
 
-    Os filtros são dependentes: ao escolher SRE, os conceitos e soluções passam a
+    Os filtros são dependentes: ao escolher SRE, as soluções passam a
     mostrar somente opções existentes naquela combinação.
     """
     if table_df is None or table_df.empty:
@@ -2829,28 +2837,14 @@ def _render_solution_filters(table_df):
     selected_sre = _sync_multiselect_key("solution_filter_sre", sre_options)
     after_sre = table_df[table_df["SNV"].astype(str).isin(selected_sre)].copy() if selected_sre else table_df.copy()
 
-    # Ordem canônica dos conceitos IAP, do melhor ao pior (ver README §11 / §12.1).
-    iap_class_order = ["Excelente", "Bom", "++ Regular", "+ Regular", "- Regular", "Mau", "Péssimo"]
-    iap_options = [
-        label
-        for label in iap_class_order
-        if label in set(after_sre["_classe_iap"].dropna().astype(str))
-    ]
-    selected_iap_classes = _sync_multiselect_key("solution_filter_iap", iap_options)
-    after_iap = (
-        after_sre[after_sre["_classe_iap"].astype(str).isin(selected_iap_classes)].copy()
-        if selected_iap_classes
-        else after_sre.copy()
-    )
-
     solution_options = sorted(
         str(value)
-        for value in after_iap["Solução recomendada"].dropna().unique()
+        for value in after_sre["Solução recomendada"].dropna().unique()
         if str(value) != "Sem intervenção"
     )
     selected_solutions = _sync_multiselect_key("solution_filter_solution", solution_options)
 
-    first_row = st.columns([1, 1, 1], gap="medium")
+    first_row = st.columns([1, 1], gap="medium")
     with first_row[0]:
         _filter_caption("SRE")
         selected_sre = _compact_multiselect(
@@ -2860,14 +2854,6 @@ def _render_solution_filters(table_df):
             placeholder="Todos os SREs",
         )
     with first_row[1]:
-        _filter_caption("Conceito IAP")
-        selected_iap_classes = _compact_multiselect(
-            "Conceito IAP",
-            iap_options,
-            key="solution_filter_iap",
-            placeholder="Todos os conceitos",
-        )
-    with first_row[2]:
         _filter_caption("Tipo de solução")
         selected_solutions = _compact_multiselect(
             "Tipo de solução",
@@ -2879,8 +2865,6 @@ def _render_solution_filters(table_df):
     filtered = table_df.copy()
     if selected_sre:
         filtered = filtered[filtered["SNV"].astype(str).isin(selected_sre)]
-    if selected_iap_classes:
-        filtered = filtered[filtered["_classe_iap"].astype(str).isin(selected_iap_classes)]
     if selected_solutions:
         filtered = filtered[filtered["Solução recomendada"].astype(str).isin(selected_solutions)]
 
@@ -8325,7 +8309,9 @@ def _render_dnit_performance_chart(data: dict, metric: str) -> None:
             f'<span class="legend-item"><span class="legend-line" style="background:{color}"></span>{html.escape(_network_scenario_label({"cenario": label}) or label)}</span>'
         )
 
-        show_labels = len(sub) <= 34 and len(scenario_keys) <= 3
+        # Os valores exatos aparecem no tooltip ao passar o mouse (abaixo); rótulos
+        # fixos por ponto foram removidos porque, com várias linhas próximas, os
+        # números se sobrepunham e ficavam ilegíveis.
         for _, r in sub.iterrows():
             year = int(r["Ano"])
             value = float(r["Valor"])
@@ -8344,8 +8330,6 @@ def _render_dnit_performance_chart(data: dict, metric: str) -> None:
                     f'<circle class="proj-point" data-tip="{tip}" cx="{x:.1f}" cy="{y:.1f}" r="3.2" '
                     f'fill="{color}" stroke="{bg}" stroke-width="1"/>'
                 )
-            if show_labels:
-                lines.append(f'<text x="{x:.1f}" y="{y - 10:.1f}" fill="{muted}" font-size="9" text-anchor="middle">{value:.2f}</text>')
 
     if has_interventions:
         legend.append(
@@ -8393,6 +8377,20 @@ def _render_dnit_performance_chart(data: dict, metric: str) -> None:
     components.html(doc, height=420, scrolling=False)
 
 
+def _segment_token_bounds(token: str | None) -> tuple[float, float] | None:
+    """Extrai (km_inicial, km_final) de um `_segment_token` no formato "km_i|km_f"."""
+    if not token:
+        return None
+    parts = str(token).split("|")
+    if len(parts) != 2:
+        return None
+    try:
+        a, b = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+    return (a, b) if a <= b else (b, a)
+
+
 def _render_comparison_dnit_performance_block(road: str, side_a: dict, side_b: dict) -> None:
     """Indicadores técnicos do comparativo: usa os cenários já filtrados na tela."""
     selected: list[str] = []
@@ -8432,11 +8430,39 @@ def _render_comparison_dnit_performance_block(road: str, side_a: dict, side_b: d
     data = dict(data)
     series = data.get("series")
     if series is not None and not series.empty:
-        data["series"] = series[series["_segment_token"].astype(str) == str(selected_segment)].copy()
-    data["interventions"] = [
-        marker for marker in (data.get("interventions") or [])
-        if str(marker.get("_segment_token")) == str(selected_segment)
-    ]
+        # Paragon e Matriz Cadastrada segmentam o trecho de forma diferente (cada
+        # análise tem sua própria malha de segmentos). Casar pelo token exato só
+        # encontra o cenário que originou aquele token — os demais cenários somem
+        # do gráfico. Em vez disso, casa por SOBREPOSIÇÃO de km: para cada cenário,
+        # mantém os segmentos cujo intervalo de km cruza o do segmento escolhido e
+        # tira a média por ano, garantindo que todos os cenários em comparação apareçam.
+        sel_bounds = _segment_token_bounds(selected_segment)
+        if sel_bounds is not None:
+            sel_lo, sel_hi = sel_bounds
+            tokens = series["_segment_token"].astype(str).unique().tolist()
+            keep_tokens = set()
+            for token in tokens:
+                bounds = _segment_token_bounds(token)
+                if bounds is None:
+                    continue
+                lo, hi = bounds
+                if lo < sel_hi and hi > sel_lo:
+                    keep_tokens.add(token)
+            matched = series[series["_segment_token"].astype(str).isin(keep_tokens)].copy()
+            data["series"] = (
+                matched.groupby(["_scenario_key", "_scenario_label", "Indicador", "Ano"], as_index=False)
+                .agg(Valor=("Valor", "mean"))
+            )
+            data["interventions"] = [
+                marker for marker in (data.get("interventions") or [])
+                if str(marker.get("_segment_token")) in keep_tokens
+            ]
+        else:
+            data["series"] = series[series["_segment_token"].astype(str) == str(selected_segment)].copy()
+            data["interventions"] = [
+                marker for marker in (data.get("interventions") or [])
+                if str(marker.get("_segment_token")) == str(selected_segment)
+            ]
     if data.get("series") is None or data["series"].empty:
         st.info("Sem dados de desempenho para este segmento.")
         return
@@ -9586,16 +9612,18 @@ def _render_network_cost(df: pd.DataFrame) -> None:
         f'<span class="economic-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
         for tick in ticks
     )
-    bars, labels = [], []
+    cols = []
     for row in grouped.to_dict("records"):
         cost_mi = float(row["custo"]) / 1_000_000
         height = max(cost_mi / axis_max * 100, 2 if cost_mi > 0 else 0)
-        bars.append(
-            '<div class="economic-bar-item">'
+        cols.append(
+            '<div class="network-cost-col">'
+            '<div class="network-cost-bar-wrap">'
             f'<div class="economic-bar" style="height:{height:.2f}%;background:#00c2e8;"><span>{_format_money_chart(float(row["custo"]))}</span></div>'
             '</div>'
+            f'<div class="network-cost-label">{html.escape(str(row["Rodovia"]))}</div>'
+            '</div>'
         )
-        labels.append(f'<div>{html.escape(str(row["Rodovia"]))}</div>')
 
     st.markdown(
         '<section class="economic-panel">'
@@ -9608,8 +9636,7 @@ def _render_network_cost(df: pd.DataFrame) -> None:
         '<div class="economic-chart">'
         f'<div class="economic-y-axis">{tick_markup}</div>'
         '<div class="economic-scroll">'
-        f'<div class="economic-plot"><div class="economic-bars">{"".join(bars)}</div></div>'
-        f'<div class="economic-labels">{"".join(labels)}</div>'
+        f'<div class="network-cost-plot"><div class="network-cost-cols">{"".join(cols)}</div></div>'
         '</div>'
         '</div>'
         '</section>',
