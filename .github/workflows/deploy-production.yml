@@ -69,6 +69,12 @@ jobs:
             ip: "187.77.237.150"
             pasta: "relatorio-sgp-strata"
             key_secret: "PROD_SSH_KEY"
+          
+          - name: "Dashboard CNL"
+            ip: "187.77.237.146"
+            pasta: "relatorio-sgp-strata"
+            key_secret: "PROD_SSH_KEY_CNL"
+            
     steps:
       - name: Deploy via SSH em ${{ matrix.sistema.name }}
         uses: appleboy/ssh-action@v1.2.5
