@@ -195,6 +195,40 @@ def _normalize_road_code(value: str | int | None) -> str | None:
     return match.group(1).zfill(3)
 
 
+def _road_code_sql_variants(value: str | int | None) -> list[str]:
+    """Formas em que o código da rodovia pode estar gravado na coluna `rodovia`.
+
+    A coluna é varchar e o padrão varia por base: bases antigas gravam sem zeros
+    à esquerda ("364"), a base da CNL grava com zero-padding de 3 dígitos
+    ("055"). Para rodovias com código >= 100 as duas formas coincidem; abaixo
+    disso ("055"/"55") só uma casa. Comparar contra as duas mantém as duas bases
+    funcionando. Retorna [] se não houver código.
+    """
+    code = _normalize_road_code(value)
+    if not code:
+        return []
+
+    variants = [code]
+    if code.isdigit():
+        unpadded = str(int(code))
+        if unpadded not in variants:
+            variants.append(unpadded)
+    return variants
+
+
+def _road_code_sql_filter(column: str, value: str | int | None) -> tuple[str, list[str]]:
+    """Monta o predicado SQL de rodovia (`<column> IN (...)`) e seus parâmetros.
+
+    Devolve ("", []) quando não há código — nesse caso o chamador deve abortar a
+    consulta em vez de rodar sem filtro.
+    """
+    variants = _road_code_sql_variants(value)
+    if not variants:
+        return "", []
+    placeholders = ", ".join(["%s"] * len(variants))
+    return f"{column} IN ({placeholders})", variants
+
+
 def _format_road_label(code: str, name: str | None = None) -> str:
     """Monta o rótulo de exibição "BR-<code>/<UF>" (ou "BR-<code>" se a UF não for
     encontrada no nome). A UF é extraída do texto de `name` via _ROAD_UF_RE."""
@@ -994,17 +1028,91 @@ def get_available_roads() -> list[str]:
     return roads or AVAILABLE_ROADS
 
 
-def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") -> list[dict[str, Any]]:
-    """Lista os cenários (análises × ciclos) disponíveis para a rodovia e tipo de matriz.
+@_cache_unless_empty(maxsize=16)
+def get_available_matrix_types(selected_road: str | None = None) -> list[str]:
+    """Tipos de matriz que têm análise processada — na rodovia, se informada.
 
-    Fachada que normaliza a rodovia e delega para _get_iap_scenarios_from_database.
+    Existe para o dashboard não abrir numa metodologia que não foi rodada: uma base
+    (ou rodovia) sem análise Paragon abre direto na Matriz Cadastrada, em vez de
+    mostrar tela vazia até o usuário trocar o filtro na mão.
+
+    Devolve na ordem canônica ("Paragon" primeiro), então bases que têm as duas
+    continuam abrindo em Paragon exatamente como antes. Só considera análises com
+    ciclo gravado — o mesmo critério do seletor de Cenários.
+    """
+    db = MySQLConnection()
+    where_road, params = "", []
+    if selected_road is not None:
+        where_road, params = _road_code_sql_filter("agdt.rodovia", selected_road)
+        if not where_road:
+            return []
+        where_road = f" AND {where_road}"
+
+    rows = db.execute_query(
+        f"""
+        SELECT DISTINCT agdt.tipo_matriz AS tipo_matriz
+        FROM analise_gerencial_dados_trechos agdt
+        WHERE agdt.deleted_at IS NULL
+          AND agdt.tipo_matriz IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM analise_gerencial_ciclos agc
+              WHERE agc.analise_gerencial_id = agdt.id
+          ){where_road}
+        """,
+        tuple(params),
+    ) or []
+
+    found = {str(row["tipo_matriz"]).strip() for row in rows if row.get("tipo_matriz")}
+    return [matrix for matrix in ("Paragon", "Matriz Cadastrada") if matrix in found]
+
+
+def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") -> list[dict[str, Any]]:
+    """Lista os cenários disponíveis para a rodovia e tipo de matriz — **um por análise**.
+
+    Uma análise é o cenário; seus ciclos são apenas janelas de tempo do horizonte
+    (ver _get_ciclo_year_ranges). Listar análise × ciclo repetia o mesmo cenário
+    várias vezes no seletor, com nome idêntico e sem como distinguir. Aqui cada
+    análise rende uma única opção, ancorada no ciclo do ano-base; o ciclo efetivo
+    passa a ser resolvido pelo ANO selecionado (_resolve_ciclo_for_year).
+
+    Em bases que gravam um ciclo por análise o agrupamento é inócuo: cada grupo tem
+    um só membro, então a lista, as keys e a ordem saem idênticas à consulta bruta.
+
     `matrix_type` é "Paragon" ou "Matriz Cadastrada".
     """
     code = _normalize_road_code(selected_road)
     if not code:
         return []
 
-    return _get_iap_scenarios_from_database(code, matrix_type)
+    scenarios = _get_iap_scenarios_from_database(code, matrix_type)
+
+    # Preserva a ordem de _get_iap_scenarios_from_database (SH primeiro, mais
+    # recentes antes) mantendo a 1ª aparição de cada análise.
+    collapsed: dict[int, dict[str, Any]] = {}
+    for scenario in scenarios:
+        analise_id = int(scenario["analise_id"])
+        if analise_id in collapsed:
+            collapsed[analise_id]["ciclo_ids"].append(int(scenario["ciclo_id"]))
+            continue
+        collapsed[analise_id] = {**scenario, "ciclo_ids": [int(scenario["ciclo_id"])]}
+
+    # Análises diferentes com nome idêntico no banco não têm como ser distinguidas
+    # pelo rótulo; nesse caso (e só nesse) o id da análise entra como desempate.
+    name_counts: dict[str, int] = {}
+    for option in collapsed.values():
+        name = str(option.get("cenario") or "").strip().lower()
+        name_counts[name] = name_counts.get(name, 0) + 1
+
+    for option in collapsed.values():
+        # Ancora a opção no ciclo do ano-base: é ele que define o ano default da tela.
+        ciclo_id = _first_ciclo_id(option["analise_id"], matrix_type, option["ciclo_id"])
+        option["ciclo_id"] = ciclo_id
+        option["key"] = _scenario_key(option["analise_id"], ciclo_id)
+        option["ciclo_ids"] = sorted(set(option["ciclo_ids"]))
+        name = str(option.get("cenario") or "").strip().lower()
+        option["label_suffix"] = f"#{option['analise_id']}" if name_counts.get(name, 0) > 1 else ""
+
+    return list(collapsed.values())
 
 
 def get_available_years(
@@ -1014,44 +1122,27 @@ def get_available_years(
 ) -> list[int]:
     """Lista os anos disponíveis para a rodovia/cenário informado.
 
-    A lista é buscada no ciclo resolvido para o cenário selecionado. Se não houver
-    cenário explícito, usa o cenário default da metodologia pedida.
+    Cobre o horizonte inteiro da análise (todos os ciclos), não só a janela de um
+    ciclo: como o seletor de Cenários lista uma opção por análise, é o ANO que
+    escolhe o ciclo, e não o contrário. Se não houver cenário explícito, usa o
+    cenário default da metodologia pedida. Em bases com um ciclo por análise o
+    resultado é o mesmo de antes — o horizonte é o do único ciclo.
     """
     code = _normalize_road_code(selected_road)
     if not code:
         return []
 
-    db = MySQLConnection()
     if matrix_type == "Matriz Cadastrada":
         analysis = _get_dnit_analysis_for_road(code, scenario_key)
         if not analysis:
             return []
-        rows = db.execute_query(
-            """
-            SELECT DISTINCT ano
-            FROM analise_gerencial_intervencoes_dnit
-            WHERE gerencial_ciclo_id = %s
-              AND ano IS NOT NULL
-            ORDER BY ano
-            """,
-            (analysis["ciclo_id"],),
-        ) or []
-    else:
-        scenario = _get_iap_scenario_by_key(code, scenario_key) or _get_default_iap_scenario(db, code)
-        if not scenario:
-            return []
-        rows = db.execute_query(
-            """
-            SELECT DISTINCT ano
-            FROM analise_gerencial_intervencoes_iap
-            WHERE gerencial_ciclo_id = %s
-              AND ano IS NOT NULL
-            ORDER BY ano
-            """,
-            (scenario["ciclo_id"],),
-        ) or []
+        return _get_analysis_years(analysis["analise_id"], "Matriz Cadastrada")
 
-    return [int(row["ano"]) for row in rows if row.get("ano") is not None]
+    db = MySQLConnection()
+    scenario = _get_iap_scenario_by_key(code, scenario_key) or _get_default_iap_scenario(db, code)
+    if not scenario:
+        return []
+    return _get_analysis_years(scenario["analise_id"], "Paragon")
 
 
 def get_iap_extraction(
@@ -1093,10 +1184,16 @@ def _get_iap_extraction_from_database(
     if not scenario:
         return None
 
+    # O ano selecionado posiciona o ciclo dentro da análise (o seletor de Cenários
+    # lista uma opção por análise). Análise de ciclo único: segue o mesmo ciclo.
+    ciclo_id = _resolve_ciclo_for_year(
+        scenario["analise_id"], scenario["ciclo_id"], year, "Paragon"
+    )
+
     # Quando o ano não é informado, usa o primeiro ano de projeção disponível
     # para o ciclo. Evita amarrar o default a um ano fixo no código.
     if year is None:
-        year = _get_first_projection_year(scenario["ciclo_id"])
+        year = _get_first_projection_year(ciclo_id)
         if year is None:
             return None
 
@@ -1114,7 +1211,7 @@ def _get_iap_extraction_from_database(
           AND i.gerencial_ciclo_id = %s
           AND i.ano = %s
         """,
-        (scenario["analise_id"], scenario["ciclo_id"], year),
+        (scenario["analise_id"], ciclo_id, year),
     ) or []
 
     if not iap_rows:
@@ -1183,6 +1280,9 @@ def _get_iap_extraction_from_database(
 
     return {
         **scenario,
+        # ciclo efetivo (pode ter sido reposicionado pelo ano) — quem consome a
+        # extração usa este ciclo_id para as demais leituras.
+        "ciclo_id": ciclo_id,
         "ano": year,
         "iap_medio": round(weighted_iap / weighted_iap_km, 4) if weighted_iap_km else 0.0,
         "total_km": round(total_km, 2),
@@ -1615,6 +1715,109 @@ def _scenario_key(analise_id: Any, ciclo_id: Any) -> str:
     return f"{int(analise_id)}:{int(ciclo_id)}"
 
 
+# Tabela de intervenções de cada metodologia — define de onde saem os anos do ciclo.
+_INTERVENTION_TABLE_BY_MATRIX = {
+    "Matriz Cadastrada": "analise_gerencial_intervencoes_dnit",
+    "Paragon": "analise_gerencial_intervencoes_iap",
+}
+
+
+@cached(ttl=1800)
+def _get_ciclo_year_ranges(analise_id: int, matrix_type: str) -> list[dict[str, int]]:
+    """Janela de anos de cada ciclo da análise, em ordem cronológica.
+
+    Uma análise (= um cenário) é fatiada em ciclos, que são janelas do horizonte
+    de projeto (ex.: 2027-2028, 2029-2037, 2038-2052, 2053-2054). Os anos vêm da
+    própria tabela de intervenções — a mesma fonte do filtro de ANO — então ciclos
+    sem intervenção ficam de fora.
+
+    Bases que gravam um único ciclo por análise devolvem uma lista de 1 item, e é
+    isso que faz a resolução por ano ser inócua nelas.
+    """
+    table = _INTERVENTION_TABLE_BY_MATRIX.get(matrix_type)
+    if not table:
+        return []
+
+    db = MySQLConnection()
+    rows = db.execute_query(
+        f"""
+        SELECT i.gerencial_ciclo_id AS ciclo_id,
+               MIN(i.ano) AS ano_min,
+               MAX(i.ano) AS ano_max
+        FROM {table} i
+        JOIN analise_gerencial_ciclos agc ON agc.id = i.gerencial_ciclo_id
+        WHERE agc.analise_gerencial_id = %s
+          AND i.ano IS NOT NULL
+        GROUP BY i.gerencial_ciclo_id
+        ORDER BY ano_min, i.gerencial_ciclo_id
+        """,
+        (int(analise_id),),
+    ) or []
+
+    return [
+        {
+            "ciclo_id": int(row["ciclo_id"]),
+            "ano_min": int(row["ano_min"]),
+            "ano_max": int(row["ano_max"]),
+        }
+        for row in rows
+        if row.get("ciclo_id") is not None and row.get("ano_min") is not None
+    ]
+
+
+def _resolve_ciclo_for_year(
+    analise_id: Any, ciclo_id: Any, year: int | None, matrix_type: str
+) -> int:
+    """Ciclo da análise que cobre `year` — o ANO selecionado manda no ciclo.
+
+    O seletor de Cenários lista uma opção por análise (ver get_available_scenarios),
+    então o ciclo não é mais escolhido à mão: ele é deduzido do ano. Devolve
+    `ciclo_id` inalterado quando não há ano, quando a análise tem um único ciclo
+    (caso das bases 1 ciclo/análise) ou quando nenhum ciclo cobre o ano pedido.
+    """
+    current = int(ciclo_id)
+    if year is None:
+        return current
+
+    ranges = _get_ciclo_year_ranges(int(analise_id), matrix_type)
+    if len(ranges) <= 1:
+        return current
+
+    for window in ranges:
+        if window["ano_min"] <= int(year) <= window["ano_max"]:
+            return window["ciclo_id"]
+
+    return current
+
+
+def _first_ciclo_id(analise_id: Any, matrix_type: str, fallback: Any) -> int:
+    """Primeiro ciclo cronológico da análise (o do ano-base); `fallback` se não houver."""
+    ranges = _get_ciclo_year_ranges(int(analise_id), matrix_type)
+    return ranges[0]["ciclo_id"] if ranges else int(fallback)
+
+
+@cached(ttl=1800)
+def _get_analysis_years(analise_id: int, matrix_type: str) -> list[int]:
+    """Todos os anos da análise, somando os ciclos (horizonte completo do cenário)."""
+    table = _INTERVENTION_TABLE_BY_MATRIX.get(matrix_type)
+    if not table:
+        return []
+
+    db = MySQLConnection()
+    rows = db.execute_query(
+        f"""
+        SELECT DISTINCT i.ano AS ano
+        FROM {table} i
+        JOIN analise_gerencial_ciclos agc ON agc.id = i.gerencial_ciclo_id
+        WHERE agc.analise_gerencial_id = %s
+          AND i.ano IS NOT NULL
+        ORDER BY ano
+        """,
+        (int(analise_id),),
+    ) or []
+    return [int(row["ano"]) for row in rows if row.get("ano") is not None]
+
+
 def _scenario_segment_type(name: str | None) -> tuple[str, str, int]:
     """Deduz o tipo de segmentação do NOME do cenário -> (código, rótulo, ordem).
 
@@ -1687,12 +1890,16 @@ def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[d
     Cacheado em processo (não memoriza lista vazia); invalidado por ensure_fresh_data
     quando os cenários mudam no banco. Retorna lista de dicts com key/analise_id/ciclo_id/etc.
     """
+    road_filter, road_params = _road_code_sql_filter("agdt.rodovia", road_code)
+    if not road_filter:
+        return []
+
     db = MySQLConnection()
     # ordem_cenario (CASE) prioriza Segmento Homogêneo (SH), depois 1km, depois outros;
     # deleted_at IS NULL ignora análises com soft-delete; tipo_matriz faz o roteamento
     # Paragon vs Matriz Cadastrada.
     rows = db.execute_query(
-        """
+        f"""
         SELECT
             agdt.id AS analise_id,
             agdt.nome,
@@ -1708,11 +1915,11 @@ def _get_iap_scenarios_from_database(road_code: str, matrix_type: str) -> list[d
         JOIN analise_gerencial_ciclos agc
           ON agc.analise_gerencial_id = agdt.id
         WHERE agdt.deleted_at IS NULL
-          AND agdt.rodovia = %s
+          AND {road_filter}
           AND agdt.tipo_matriz = %s
         ORDER BY ordem_cenario, agdt.updated_at DESC, agc.id DESC
         """,
-        (str(int(road_code)), matrix_type),
+        (*road_params, matrix_type),
     ) or []
 
     scenarios = []
@@ -2145,7 +2352,8 @@ def get_dnit_overview_data(
 
     # Análise Cadastrada (pipeline DNIT) honrando o cenário escolhido; se a rodovia não
     # tiver matriz Cadastrada, cai no Paragon (intervencoes_iap) — comportamento anterior.
-    analysis = _get_dnit_analysis_for_road(code, scenario_key)
+    # O ano escolhido também posiciona o ciclo dentro da análise.
+    analysis = _get_dnit_analysis_for_road(code, scenario_key, year)
     if analysis:
         analise_id, ciclo_id = analysis["analise_id"], analysis["ciclo_id"]
         year = int(year if year is not None else analysis["ano"])
@@ -2396,16 +2604,22 @@ def get_dnit_available_roads() -> list[str]:
     return [road for road in get_available_roads() if _normalize_road_code(road) in codes]
 
 
-def get_dnit_solutions_data(selected_road: str | None = None, scenario_key: str | None = None) -> dict:
+def get_dnit_solutions_data(
+    selected_road: str | None = None,
+    scenario_key: str | None = None,
+    year: int | None = None,
+) -> dict:
     """Soluções DNIT **gravadas no banco** (análise 'Matriz Cadastrada' / Matriz Revitaliza DNIT/RO).
 
     A matriz de cores (faixa de IRI) define só a COR no mapa; a SOLUÇÃO vem de
     `analise_gerencial_intervencoes_dnit`. Só rodovias processadas com essa matriz têm dados
     (hoje, apenas a BR-429); as demais usam Paragon.
+
+    `year` (opcional) posiciona o ciclo dentro da análise; sem ele vale o ano-base.
     """
     road = selected_road or get_available_roads()[0]
     code = _normalize_road_code(road)
-    analysis = _get_dnit_analysis_for_road(code, scenario_key) if code else None
+    analysis = _get_dnit_analysis_for_road(code, scenario_key, year) if code else None
     base = {
         "road": road,
         "available": False,
@@ -2440,27 +2654,37 @@ def _scenario_ciclo_id(scenario_key: str | None) -> int | None:
         return None
 
 
-@_cache_unless_empty(maxsize=32)
-def _get_dnit_analysis_for_road(road_code: str, scenario_key: str | None = None) -> dict | None:
+@_cache_unless_empty(maxsize=64)
+def _get_dnit_analysis_for_road(
+    road_code: str, scenario_key: str | None = None, year: int | None = None
+) -> dict | None:
     """Análise 'Matriz Cadastrada' da rodovia com soluções DNIT gravadas (ano-base = 1º ano).
 
     Se `scenario_key` apontar para um ciclo Cadastrada com intervenções DNIT, usa-o
     (respeita o seletor de Cenários: CRESCENTE/DECRESCENTE etc.); caso contrário, cai
     no último ciclo Cadastrada processado da rodovia.
+
+    `year` reposiciona o ciclo dentro da MESMA análise: como o seletor lista uma
+    opção por análise, é o ANO que diz em qual janela do horizonte estamos. Sem
+    `year`, ou em análise de ciclo único, o ciclo da key é mantido.
     """
+    road_filter, road_params = _road_code_sql_filter("agdt.rodovia", road_code)
+    if not road_filter:
+        return None
+
     db = MySQLConnection()
-    base_select = """
+    base_select = f"""
         SELECT agdt.id AS analise_id, agdt.nome, agc.id AS ciclo_id,
                (SELECT MIN(d.ano) FROM analise_gerencial_intervencoes_dnit d WHERE d.gerencial_ciclo_id = agc.id) AS ano
         FROM analise_gerencial_dados_trechos agdt
         JOIN analise_gerencial_ciclos agc ON agc.analise_gerencial_id = agdt.id
         WHERE agdt.deleted_at IS NULL
-          AND agdt.rodovia = %s
+          AND {road_filter}
           AND agdt.tipo_matriz = 'Matriz Cadastrada'
           AND EXISTS (SELECT 1 FROM analise_gerencial_intervencoes_dnit d WHERE d.gerencial_ciclo_id = agc.id)
     """
     ciclo_id = _scenario_ciclo_id(scenario_key)
-    params: list[Any] = [str(int(road_code))]
+    params: list[Any] = list(road_params)
     where_extra = ""
     if ciclo_id is not None:
         where_extra = " AND agc.id = %s"
@@ -2473,15 +2697,32 @@ def _get_dnit_analysis_for_road(road_code: str, scenario_key: str | None = None)
 
     # Cenário escolhido não é Cadastrada / sem intervenção DNIT → usa o último ciclo.
     if not rows and ciclo_id is not None:
-        return _get_dnit_analysis_for_road(road_code, None)
+        return _get_dnit_analysis_for_road(road_code, None, year)
 
     if not rows:
         return None
     r = rows[0]
+    analise_id = int(r["analise_id"])
+    resolved_ciclo = _resolve_ciclo_for_year(
+        analise_id, r["ciclo_id"], year, "Matriz Cadastrada"
+    )
+    # O ano-base acompanha o ciclo resolvido (é o 1º ano daquela janela).
+    if resolved_ciclo != int(r["ciclo_id"]):
+        base_year = next(
+            (
+                w["ano_min"]
+                for w in _get_ciclo_year_ranges(analise_id, "Matriz Cadastrada")
+                if w["ciclo_id"] == resolved_ciclo
+            ),
+            int(r["ano"]),
+        )
+    else:
+        base_year = int(r["ano"])
+
     return {
-        "analise_id": int(r["analise_id"]),
-        "ciclo_id": int(r["ciclo_id"]),
-        "ano": int(r["ano"]),
+        "analise_id": analise_id,
+        "ciclo_id": resolved_ciclo,
+        "ano": base_year,
         "nome": r.get("nome"),
     }
 
@@ -3051,7 +3292,7 @@ def get_dnit_economic_data(
     """
     road = selected_road or get_available_roads()[0]
     code = _normalize_road_code(road)
-    analysis = _get_dnit_analysis_for_road(code, scenario_key) if code else None
+    analysis = _get_dnit_analysis_for_road(code, scenario_key, year) if code else None
     if not analysis:
         return {"road": road, "available": False, "table": pd.DataFrame(),
                 "budget_items": pd.DataFrame(), "segments": pd.DataFrame()}

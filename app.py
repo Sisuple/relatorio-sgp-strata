@@ -47,6 +47,7 @@ from components.maps.overview_map import render_overview_map, _CLASS_COLORS as _
 from components.maps.dnit_map import render_dnit_map
 from components.maps.traffic_map import render_traffic_vmda_map, _vmda_color_scale
 from services.overview_service import (
+    get_available_matrix_types,
     get_available_roads,
     get_available_scenarios,
     get_available_years,
@@ -170,15 +171,28 @@ def inject_css() -> None:
             [data-testid="stMain"] > .stMainBlockContainer { transition: opacity .15s ease; }
             [data-testid="stSidebar"] { background: var(--sidebar); border-right: 1px solid var(--border); width: 252px !important; }
             [data-testid="stSidebar"] > div:first-child { padding: 0; }
-            [data-testid="stSidebarContent"] { padding: 0 !important; }
-            /* Cabeçalho do drawer mobile (o "X" de fechar) reserva uma faixa
-               vazia acima do conteúdo por padrão — zera esse espaço, mantendo
-               só o botão de fechar clicável. */
-            [data-testid="stSidebarHeader"] { padding: 0 !important; min-height: 0 !important; height: auto !important; }
+            [data-testid="stSidebarContent"] { padding: 0 !important; position: relative; }
+            /* O vão no topo da sidebar é o `padding-top: 6rem` (sizes.sidebarTopSpace)
+               que o Streamlit aplica no stSidebarUserContent para reservar lugar ao
+               botão "X" de fechar. Como esse botão é `position: absolute`, ele não
+               ocupa espaço no fluxo e o padding é puro desperdício aqui: zerando,
+               a marca sobe para o topo e o X continua clicável, sobreposto à faixa
+               da marca (que reserva o canto com padding lateral). */
+            [data-testid="stSidebarUserContent"] { padding: 0 !important; }
+            /* Streamlit >= 1.36 move o botão para um cabeçalho próprio, que aí sim
+               ocupa espaço no fluxo — zera para o layout não regredir num upgrade. */
+            [data-testid="stSidebarHeader"] {
+                padding: 0 !important; min-height: 0 !important; height: auto !important;
+                position: absolute !important; top: 0; right: 0; left: auto;
+                width: auto !important; z-index: 5; background: transparent !important;
+            }
             .block-container { max-width: 1220px; padding: 1.1rem 1.55rem 3rem; }
 
             .sidebar-shell { min-height: 100vh; background: var(--sidebar); }
-            .brand-row { height: 54px; display: flex; align-items: center; justify-content: center; padding: 0 12px; border-bottom: 1px solid rgba(148,163,184,.12); }
+            /* Faixa da marca: ocupa o espaço que era o vão do topo, com o SIGMA
+               centrado nele (vertical e horizontal) e respiro em volta. O padding
+               lateral reserva o canto do botão de fechar, que fica sobreposto. */
+            .brand-row { height: 104px; display: flex; align-items: center; justify-content: center; padding: 0 34px; border-bottom: 1px solid rgba(148,163,184,.12); }
             /* Cyan fixo (não var(--text)) nos dois temas — é o nome do sistema
                (SIGMA), não texto comum; usa a mesma cor cyan de marca do
                resto do painel (itens ativos do menu etc.). Arial Black (mais
@@ -186,17 +200,19 @@ def inject_css() -> None:
                painel, pra aproximar do logo de referência. */
             .brand-title {
                 font-family: "Arial Black", "Segoe UI", sans-serif;
-                font-size: 20px; font-weight: 900; color: var(--cyan); letter-spacing: .01em;
-                display: inline-flex; align-items: center; gap: 4px; line-height: 1;
+                font-size: 27px; font-weight: 900; color: var(--cyan); letter-spacing: .01em;
+                display: inline-flex; align-items: center; gap: 5px; line-height: 1;
             }
             /* Tracinhos flanqueando o nome, igual ao logo de referência: 2
                traços sequenciais (lado a lado, mesma altura) embaixo à
                esquerda do nome, e 2 traços sequenciais em cima à direita. */
-            .brand-title-tick { align-self: stretch; display: flex; gap: 3px; }
+            .brand-title-tick { align-self: stretch; display: flex; gap: 4px; }
             .brand-title-tick-l { align-items: flex-end; }
             .brand-title-tick-r { align-items: flex-start; }
+            /* Proporcionais ao nome (27px): traços muito finos ficariam
+               desproporcionais depois do aumento da fonte. */
             .brand-title-tick i {
-                display: block; width: 8px; height: 5px; background: var(--cyan);
+                display: block; width: 11px; height: 6px; background: var(--cyan);
                 transform: skewX(-18deg); border-radius: 1px;
             }
             .side-menu { padding: 14px 8px 0; }
@@ -1559,6 +1575,22 @@ _DIAGNOSIS_TO_MATRIX = {
 _MATRIX_TO_DIAGNOSIS = {v: k for k, v in _DIAGNOSIS_TO_MATRIX.items()}
 
 
+def _default_matrix_choice(matrix_options: list[str], selected_road: str | None = None) -> str | None:
+    """Opção de "Tipo de Matriz" com que a tela deve abrir.
+
+    Pega a primeira opção da página que tem análise processada no banco (ver
+    get_available_matrix_types). A ordem da página é preservada, então uma base com
+    Paragon e Matriz Cadastrada abre em Paragon como sempre; numa base ou rodovia
+    onde uma das metodologias não foi rodada, a tela já abre na que tem dados em vez
+    de exigir a troca manual do filtro.
+    """
+    if not matrix_options:
+        return None
+
+    available = get_available_matrix_types(selected_road)
+    return next((matrix for matrix in matrix_options if matrix in available), matrix_options[0])
+
+
 def _short_scenario_label(s: dict | None) -> str:
     """Rótulo CURTO do cenário: '<sentido> · <segmentação>' (ex.: 'CR e DE · SH'),
     em vez do nome longo do banco. Robusto aos dois formatos de `cenario`."""
@@ -1589,12 +1621,30 @@ def _short_scenario_label(s: dict | None) -> str:
     return " · ".join(parts) if parts else (cen or str(s.get("key", "")))
 
 
+# Tokens que identificam o cenário quando o sentido não basta para distingui-lo.
+# Só casam em nomes que os tragam — bases cujos nomes não têm trecho/variante/faixa
+# de km seguem rendendo exatamente o mesmo rótulo de antes.
+_SCEN_NUMERO_RE = re.compile(r"\bCen[áa]rio\s+([A-Za-z0-9]+)\s*:", re.I)
+_SCEN_TRECHO_RE = re.compile(r"\b[A-Z]{2,3}-?\d+[_-](?:trecho\s+)?([IVXLC]+|\d+)\b", re.I)
+_SCEN_VARIANTE_RE = re.compile(r"\b(IRI)\s*(\d+(?:[.,]\d+)?)", re.I)
+_SCEN_FAIXA_KM_RE = re.compile(r"\(\s*(\d+(?:[.,]\d+)?\s*a\s*\d+(?:[.,]\d+)?)\s*\)")
+
+
 def _network_scenario_label(s: dict | None) -> str:
     """Rótulo do cenário na Visão geral, removendo dados já cobertos por outros filtros.
 
-    Exemplo:
+    Exemplos:
     - "BR-364 (SH) - DECRESCENTE - MATRIZ PARAGON - GATILHO IQO"
-    - vira "SH - DECRESCENTE - GATILHO IQO"
+      -> "SH - DECRESCENTE - GATILHO IQO"
+    - "SP-055_trecho V - CRESCENTE - IRI 2,3"
+      -> "trecho V - CRESCENTE - IRI 2,3"
+    - "Cenário 1: SP-055_trecho V - DECRESCENTE (368,1 a 369,4)"
+      -> "trecho V - DECRESCENTE - km 368,1 a 369,4"
+
+    Além de segmentação/sentido/gatilho, preserva o que costuma ser a única
+    diferença entre cenários de uma mesma rodovia: o trecho, a variante de
+    parametrização (gatilho de IRI) e a faixa de km. `label_suffix` (vindo do
+    serviço) desempata cenários que têm nome idêntico no banco.
     """
     if not s:
         return ""
@@ -1605,6 +1655,12 @@ def _network_scenario_label(s: dict | None) -> str:
     low = cen.lower()
     parts: list[str] = []
 
+    # Padrão de nomenclatura das análises: "Cenário X: <trecho> - <sentido>".
+    # O número do cenário vem primeiro por ser o prefixo do nome.
+    numero = _SCEN_NUMERO_RE.search(cen)
+    if numero:
+        parts.append(f"Cenário {numero.group(1).upper()}")
+
     segm = re.search(r"\((SH|Fixa|\d+\s*km)\)", cen, re.I)
     if segm:
         parts.append(segm.group(1).strip())
@@ -1612,6 +1668,10 @@ def _network_scenario_label(s: dict | None) -> str:
         parts.append("SH")
     elif re.search(r"\bfixa\b", low):
         parts.append("Fixa")
+
+    trecho = _SCEN_TRECHO_RE.search(cen)
+    if trecho:
+        parts.append(f"trecho {trecho.group(1).upper()}")
 
     if "cr e de" in low or "cr/de" in low or "ambas" in low:
         parts.append("CR e DE")
@@ -1622,9 +1682,21 @@ def _network_scenario_label(s: dict | None) -> str:
     elif "pista: todos" in low or re.search(r"\btodos\b", low):
         parts.append("TODOS")
 
+    variante = _SCEN_VARIANTE_RE.search(cen)
+    if variante:
+        parts.append(f"{variante.group(1).upper()} {variante.group(2)}")
+
+    faixa = _SCEN_FAIXA_KM_RE.search(cen)
+    if faixa:
+        parts.append(f"km {faixa.group(1)}")
+
     gatilho = re.search(r"(GATILHO\s+[A-Z0-9._/-]+)", cen, re.I)
     if gatilho:
         parts.append(gatilho.group(1).upper())
+
+    suffix = str(s.get("label_suffix") or "").strip()
+    if suffix:
+        parts.append(suffix)
 
     if parts:
         deduped: list[str] = []
@@ -1677,14 +1749,14 @@ def render_top_bar(
     scenario_key: str | None = None
     diagnosis = page_title
 
-    def _matrix_selectbox() -> str:
+    def _matrix_selectbox(road: str | None = None) -> str:
         # Popover compacto (mesmo padrão da Visão geral); trata sozinho o valor salvo
         # que não exista mais nas opções desta página (ex.: vindo de "Comparativo").
         return _compact_singleselect(
             "Tipo de Matriz",
             matrix_options,
             key="topbar_matrix_type",
-            default=matrix_options[0] if matrix_options else None,
+            default=_default_matrix_choice(matrix_options, road),
         )
 
     with filters:
@@ -1712,7 +1784,9 @@ def render_top_bar(
                 )
             with matriz_col:
                 _filter_label("Tipo de Matriz")
-                matrix_choice = _matrix_selectbox()
+                # A rodovia já foi escolhida acima: o default de matriz respeita
+                # o que existe processado para ela.
+                matrix_choice = _matrix_selectbox(selected_out)
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
             # Para listar cenários: Comparativo não tem matriz própria → usa Paragon (oculto).
             matrix_type = matrix_choice if matrix_choice in ("Paragon", "Matriz Cadastrada") else "Paragon"
@@ -1922,13 +1996,14 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
 
         with matriz_col:
             _filter_label("Tipo de Matriz")
+            _matrix_default = _default_matrix_choice(matrix_options)
             if st.session_state.get("topbar_network_matrix_type") not in matrix_options:
-                st.session_state["topbar_network_matrix_type"] = matrix_options[0]
+                st.session_state["topbar_network_matrix_type"] = _matrix_default
             matrix_choice = _compact_singleselect(
                 "Tipo de Matriz",
                 matrix_options,
                 key="topbar_network_matrix_type",
-                default=matrix_options[0],
+                default=_matrix_default,
             )
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
@@ -2067,13 +2142,14 @@ def render_economic_top_bar() -> tuple[str, list[str], list[tuple[str, str]], di
 
         with matriz_col:
             _filter_label("Tipo de Matriz")
+            _matrix_default = _default_matrix_choice(matrix_options)
             if st.session_state.get("topbar_eco_matrix_type") not in matrix_options:
-                st.session_state["topbar_eco_matrix_type"] = matrix_options[0]
+                st.session_state["topbar_eco_matrix_type"] = _matrix_default
             matrix_choice = _compact_singleselect(
                 "Tipo de Matriz",
                 matrix_options,
                 key="topbar_eco_matrix_type",
-                default=matrix_options[0],
+                default=_matrix_default,
             )
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
@@ -2214,7 +2290,7 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
                 "Tipo de Matriz",
                 matrix_options,
                 key="topbar_matrix_type",
-                default=matrix_options[0] if matrix_options else None,
+                default=_default_matrix_choice(matrix_options, selected_road),
             )
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
@@ -2315,7 +2391,7 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int
                 "Tipo de Matriz",
                 matrix_options,
                 key="topbar_solution_matrix_type",
-                default=matrix_options[0] if matrix_options else None,
+                default=_default_matrix_choice(matrix_options, selected_road),
             )
             diagnosis = _MATRIX_TO_DIAGNOSIS.get(matrix_choice, matrix_choice)
 
