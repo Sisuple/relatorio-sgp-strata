@@ -5,6 +5,19 @@ address = "0.0.0.0"
 enableCORS = false
 enableXsrfProtection = true
 
+[theme]
+# Cor de destaque dos widgets nativos (trilha/handle de slider, marcador de
+# radio e checkbox, foco). O default do Streamlit é #FF4B4B, vermelho — que
+# lia como alerta em controles neutros e, no filtro de classes do Diagnóstico,
+# colidia com o vermelho semântico de "Péssimo".
+#
+# Teal fechado em vez do cyan de marca (#00c2e8): o Streamlit 1.32 aceita UMA
+# cor só, válida para os dois temas, e o cyan puro sobre o fundo branco do tema
+# claro fica estridente. Este tom mantém contraste no tema escuro e fica calmo
+# no claro. Só primaryColor de propósito: definir `base`/`backgroundColor` aqui
+# brigaria com o alternador de tema que o app faz por CSS.
+primaryColor = "#0e7c8a"
+
 [browser]
 serverAddress = "localhost"
 gatherUsageStats = false

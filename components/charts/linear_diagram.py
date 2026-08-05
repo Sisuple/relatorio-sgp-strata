@@ -112,10 +112,14 @@ def _render_segment(
 ) -> str:
     """Gera o <span> de UM segmento numa linha do diagrama.
 
-    Recorta o segmento à janela visível [min_km, max_km], calcula a largura em %
-    (proporção da sua extensão sobre total_km) e usa a cor pronta de `color_key`.
-    O tooltip (title=) traz id, km, classe e valor. Recebe `row` como dict e as
-    chaves das colunas de classe/cor/valor.
+    Recorta o segmento à janela visível [min_km, max_km] e o posiciona pelo km:
+    `left` é a distância do início da janela e `width` a extensão, ambos em % de
+    total_km. O posicionamento absoluto é essencial — empilhando os segmentos em
+    sequência (só largura), qualquer buraco de cobertura colapsava e deslocava
+    todo o resto para a esquerda, desalinhando as trilhas do eixo de km desenhado
+    embaixo. Com `left`, cada segmento cai no seu km real e os buracos aparecem
+    onde de fato estão. Usa a cor pronta de `color_key`; o tooltip (title=) traz
+    id, km, classe e valor.
     """
     km_initial = float(row["km_inicial"])
     km_final = float(row["km_final"])
@@ -125,6 +129,7 @@ def _render_segment(
     # Piso mínimo de extensão para o segmento não sumir (largura > 0).
     extent = max(seg_end - seg_start, 0.001)
     width = extent / total_km * 100  # largura como % da faixa total visível
+    left = (seg_start - min_km) / total_km * 100  # posição pelo km, não sequencial
     color = html.escape(str(row[color_key]))
     klass = html.escape(str(row[class_key]))
     value = float(row[value_key])
@@ -134,7 +139,7 @@ def _render_segment(
     )
     return (
         f'<span class="linear-segment" title="{html.escape(title)}" '
-        f'style="width:{width:.4f}%;background:{color};"></span>'
+        f'style="left:{left:.4f}%;width:{width:.4f}%;background:{color};"></span>'
     )
 
 
