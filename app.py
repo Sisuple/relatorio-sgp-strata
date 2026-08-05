@@ -186,7 +186,10 @@ def inject_css() -> None:
                 position: absolute !important; top: 0; right: 0; left: auto;
                 width: auto !important; z-index: 5; background: transparent !important;
             }
-            .block-container { max-width: 1220px; padding: 1.1rem 1.55rem 3rem; }
+            /* Em telas grandes (1900px+) sobravam ~240px de gutter de cada lado
+               com o limite de 1220px. 1400px aproveita melhor o espaço sem que a
+               linha de leitura das tabelas fique longa demais. */
+            .block-container { max-width: 1400px; padding: 1.1rem 1.55rem 3rem; }
 
             .sidebar-shell { min-height: 100vh; background: var(--sidebar); }
             /* Faixa da marca: ocupa o espaço que era o vão do topo, com o SIGMA
@@ -280,10 +283,19 @@ def inject_css() -> None:
             }
 
             .top-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin: 4px 0 12px; }
-            .eyebrow { margin: 0 0 2px; color: #8c9ba7; font-size: 10px; font-weight: 800; letter-spacing: .06em; }
+            /* Eyebrow (kicker): a linha de categoria acima do título da página,
+               dizendo em que grupo do menu ela está. Existia só nas telas
+               técnicas; agora vale para todas. Tracking maior e cor mais apagada
+               que o título de card, para ler como marcador de seção. */
+            .eyebrow { margin: 0 0 3px; color: #7d8c98; font-size: 10px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
             .page-title { margin: 0; color: var(--text); font-size: 17px; font-weight: 850; letter-spacing: 0; text-transform: uppercase; }
             .top-actions { display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
-            .filter-label { min-height: 14px; margin: 0 0 5px; color: #8c9ba7; font-size: 10px; font-weight: 850; letter-spacing: .05em; text-transform: uppercase; }
+            /* Label de filtro = "cromo" de controle: menor, mais apagado e com
+               tracking maior que título de card (.metric-title), para os dois
+               não competirem no mesmo nível de hierarquia. O min-height reserva
+               a mesma altura para labels de 1 linha, mantendo os controles de
+               filas diferentes alinhados na mesma grade. */
+            .filter-label { min-height: 14px; margin: 0 0 5px; color: #7d8c98; font-size: 10px; font-weight: 850; letter-spacing: .10em; text-transform: uppercase; }
             .status-pill { display: inline-flex; align-items: center; gap: 9px; min-height: 30px; padding: 0 13px; border-radius: 14px; border: 1px solid #244257; background: #0b1a23; color: #a4b2bd; font-size: 12px; white-space: nowrap; }
             .status-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--green); }
             .status-pill strong { color: var(--text); font-weight: 700; }
@@ -328,7 +340,10 @@ def inject_css() -> None:
             .metric-card:before { content: ""; position: absolute; inset: 0; opacity: .07; background: radial-gradient(circle at 100% 0%, currentColor, transparent 42%); pointer-events: none; }
             .metric-card * { position: relative; }
             .metric-card-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-            .metric-title { color: #a7b4bf; font-size: 12px; letter-spacing: .06em; font-weight: 800; text-transform: uppercase; line-height: 1.35; }
+            /* Título de card = conteúdo, um nível ACIMA do label de filtro:
+               mais claro e com tracking menor (o label de filtro é 10px/.10em
+               em #7d8c98). Antes os dois ficavam praticamente idênticos. */
+            .metric-title { color: #b8c6d1; font-size: 12px; letter-spacing: .05em; font-weight: 800; text-transform: uppercase; line-height: 1.35; }
             .metric-icon { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; background: color-mix(in srgb, currentColor 18%, transparent); color: currentColor; font-size: 17px; font-weight: 900; box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 28%, transparent), 0 4px 10px color-mix(in srgb, currentColor 20%, transparent); }
             .metric-value { color: var(--text); font-size: 30px; line-height: 1.05; font-weight: 850; margin-top: 9px; letter-spacing: 0; }
             .metric-subtitle { color: #9aa8b3; font-size: 12px; line-height: 1.35; margin-top: 6px; max-width: 220px; }
@@ -337,11 +352,18 @@ def inject_css() -> None:
             .metric-detail-pill strong { color: #eef6fb; font-size: 11px; font-weight: 900; }
             .metric-detail-high { border-color: rgba(237,150,23,.34); background: rgba(237,150,23,.11); color: #e8b46f; }
             .metric-detail-critical { border-color: rgba(255,49,74,.34); background: rgba(255,49,74,.10); color: #ff8c9b; }
-            .tone-green { color: var(--green); border-color: rgba(34,197,94,.55); }
-            .tone-red { color: var(--red); border-color: rgba(255,49,74,.58); }
-            .tone-cyan { color: var(--cyan); border-color: rgba(0,194,232,.28); }
-            .tone-orange { color: var(--orange); border-color: rgba(255,138,0,.58); }
-            .tone-yellow { color: var(--yellow); border-color: rgba(250,204,21,.22); }
+            /* O tone define o ACENTO do card (cor do ícone e do brilho do canto,
+               ambos via currentColor). A BORDA é uniforme: as bordas coloridas
+               variavam de card para card sem significar severidade — o mesmo tipo
+               de card aparecia com moldura laranja numa tela e verde noutra —, e
+               com opacidades muito diferentes entre si (.22 a .58), o que fazia
+               alguns cards parecerem em alerta sem motivo. A informação de tom
+               continua legível pelo ícone. */
+            .tone-green { color: var(--green); }
+            .tone-red { color: var(--red); }
+            .tone-cyan { color: var(--cyan); }
+            .tone-orange { color: var(--orange); }
+            .tone-yellow { color: var(--yellow); }
             .metric-card-overview { height: 148px; min-height: 148px; box-sizing: border-box; padding: 14px 18px; }
             .metric-card-overview .metric-value { margin-top: 7px; }
             .metric-card-overview .metric-subtitle { margin-top: 4px; max-width: none; }
@@ -352,11 +374,24 @@ def inject_css() -> None:
             .need-breakdown-pill { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 6px 10px; border-radius: 999px; border: 1px solid rgba(34,211,238,.20); background: rgba(8,26,36,.62); color: #9fb0bd; font-size: 11px; font-weight: 800; }
             .need-breakdown-pill strong { color: #e8f1f8; font-size: 12px; font-weight: 900; }
             .need-breakdown-pill span { color: #00c2e8; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 900; }
-            .overview-map-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 10px 0 -4px; }
-            .overview-map-head h3 { margin: 0; color: var(--text); font-size: 14px; font-weight: 850; }
+            .overview-map-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 0 0 10px; }
+            .overview-map-head h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .overview-map-head p { margin: 2px 0 0; color: #8f9eaa; font-size: 12px; line-height: 1.35; }
             .overview-map-meta { color: #9fb0bd; font-size: 11px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
             .overview-map-meta strong { color: #e8f6fb; font-weight: 900; }
+            /* Containers com borda que devem virar CARD do painel (fundo cheio +
+               sombra, sem contorno), em vez de ficarem com o quadro contornado e
+               translúcido que o Streamlit dá por padrão:
+                 .overview-map-marker      -> mapa da Visão geral
+                 .segment-timeline-marker  -> Cronograma por segmento
+               O :not(...) escolhe o container mais próximo do marcador, porque o
+               Streamlit pode inserir wrappers extras. */
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.overview-map-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .overview-map-marker)),
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.segment-timeline-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .segment-timeline-marker)) {
+                margin-top: 14px; border-radius: var(--radius-md); border: 0;
+                background: #0b1d28; box-shadow: var(--shadow-card); padding: 18px 20px 16px;
+            }
+            .overview-map-marker, .segment-timeline-marker { display: none; }
             iframe { border-radius: 14px; }
 
             .chart-card { margin-top: 14px; min-height: 436px; border-radius: var(--radius-md); border: 0; background: #0b1d28; box-shadow: var(--shadow-card); padding: 20px 20px 18px; }
@@ -365,10 +400,7 @@ def inject_css() -> None:
             div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iap-zoom-marker)) { margin-top: 14px; border-radius: var(--radius-md); border: 0; background: #0b1d28; box-shadow: var(--shadow-card); padding: 18px 20px 16px; }
             .iap-zoom-marker { display: none; }
             /* Layout do componente de rosca, só nos 3 cards de composição da
-               Pavimentação: donut no tamanho padrão (190px — os rótulos de %
-               ao redor do anel são posicionados em px fixos assumindo esse
-               tamanho, ver _donut_percent_labels; mudar o tamanho do donut
-               sem mudar essa conta desalinha os rótulos), legenda embaixo
+               Pavimentação: donut no tamanho padrão (190px) e legenda embaixo
                numa única linha (em vez das 2 colunas laterais padrão, que
                sobram/estouram numa coluna de ~1/3 da largura da tela). */
             div[data-testid="stVerticalBlock"]:has(> div .pavimentacao-donut-marker) .iap-body {
@@ -378,6 +410,7 @@ def inject_css() -> None:
             /* Donut sozinho na 1ª linha (flex-basis 100%). */
             div[data-testid="stVerticalBlock"]:has(> div .pavimentacao-donut-marker) .iap-donut-wrap {
                 flex: 1 0 100%; display: flex; justify-content: center;
+                padding: 6px 0 10px;
             }
             /* .iap-legend-left/.iap-legend-right viram invisíveis como caixa
                (display:contents): os itens de legenda passam a ser filhos
@@ -506,15 +539,20 @@ def inject_css() -> None:
             .chart-heading:not(.linear-heading) { display: grid; gap: 6px; margin-bottom: 18px; }
             .chart-heading h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .chart-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
-            .iap-body { height: 345px; display: grid; grid-template-columns: 1fr 260px 1fr; gap: 28px; align-items: end; padding-top: 10px; }
+            /* Altura MÍNIMA em vez de fixa, e legendas centradas na vertical: com
+               `align-items: end` + 345px cravados, o card cujo donut tem 1 classe
+               (ex.: IGG 100% Ótimo) ficava com a legenda colada embaixo e um vão
+               grande sob a rosca, enquanto o vizinho com 5 classes preenchia. Os
+               cards continuam com a mesma altura entre si (min-height), mas o
+               conteúdo agora se distribui centrado. */
+            .iap-body { min-height: 320px; display: grid; grid-template-columns: 1fr 260px 1fr; gap: 28px; align-items: center; padding-top: 10px; }
             .iap-donut-wrap { grid-column: 2; align-self: center; display: grid; place-items: center; overflow: visible; }
             .iap-donut { width: 190px; height: 190px; border-radius: 50%; position: relative; overflow: visible; box-shadow: var(--shadow-card); }
             .iap-donut:after { content: ""; position: absolute; inset: 36px; background: #0b1d28; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05); }
-            .iap-slice-label { position: absolute; z-index: 4; transform: translate(-50%, -50%); color: #e5edf3; font-size: 11px; line-height: 1; font-weight: 850; text-align: center; white-space: nowrap; pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,.65); }
             .iap-donut-center { position: absolute; inset: 48px; z-index: 2; display: grid; place-items: center; align-content: center; color: var(--text); }
             .iap-donut-center strong { display: block; font-size: 25px; line-height: 1; font-weight: 850; }
             .iap-donut-center span { display: block; margin-top: 7px; color: #9aa8b3; font-size: 10px; letter-spacing: .08em; font-weight: 800; }
-            .iap-legend { align-self: end; display: grid; gap: 10px; padding-bottom: 4px; width: max-content; max-width: 100%; }
+            .iap-legend { align-self: center; display: grid; gap: 10px; width: max-content; max-width: 100%; }
             .iap-legend-left { grid-column: 1; justify-self: start; }
             .iap-legend-right { grid-column: 3; justify-self: end; }
             .iap-legend-item { display: inline-grid; grid-template-columns: 10px auto auto; align-items: center; justify-content: start; gap: 8px; min-height: 15px; color: var(--text); font-size: 12px; }
@@ -529,8 +567,26 @@ def inject_css() -> None:
             .linear-scenario-label { margin-top: 12px; font-weight: 850; color: var(--text); font-size: 13px; }
             .linear-row { display: grid; grid-template-columns: 48px 1fr; align-items: center; gap: 12px; }
             .linear-row-label { color: var(--text); font-size: 12px; font-weight: 850; text-align: right; }
-            .linear-track { height: 17px; display: flex; overflow: hidden; border-radius: 2px; background: rgba(148,163,184,.16); box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }
-            .linear-segment { display: block; min-width: 1px; height: 100%; border-right: 1px solid rgba(6,16,24,.42); }
+            /* O fundo da trilha aparece onde a faixa de zoom não tem segmento
+               levantado. Com preenchimento chapado, esse trecho parecia um erro
+               de renderização (uma "faixa cinza vazia" no fim do diagrama); com
+               hachura diagonal ele lê como ausência de dado, que é o que é.
+               As cores das classes ficam intactas — isto é só o fundo. */
+            /* A trilha é o sistema de coordenadas do km: os segmentos são
+               posicionados por `left` (ver _render_segment), então ela precisa ser
+               `position: relative`. O fundo hachurado aparece exatamente onde não
+               há segmento — inclusive em buracos no meio do trecho, que antes
+               colapsavam para o fim da faixa. */
+            .linear-track {
+                position: relative; height: 17px; overflow: hidden; border-radius: 2px;
+                background: repeating-linear-gradient(
+                    -45deg,
+                    rgba(148,163,184,.20) 0 4px,
+                    rgba(148,163,184,.07) 4px 8px
+                );
+                box-shadow: inset 0 0 0 1px rgba(255,255,255,.04);
+            }
+            .linear-segment { position: absolute; top: 0; display: block; min-width: 1px; height: 100%; border-right: 1px solid rgba(6,16,24,.42); }
             .linear-segment:hover { filter: brightness(1.12); }
             .linear-axis { position: relative; height: 38px; margin-left: 60px; border-top: 1px solid rgba(148,163,184,.2); }
             .linear-axis-title { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); color: var(--text); font-size: 11px; font-weight: 850; }
@@ -555,7 +611,12 @@ def inject_css() -> None:
             .solution-table { width: 100%; border-collapse: collapse; min-width: 920px; }
             .solution-table th { padding: 11px 14px; color: #8f9eaa; background: rgba(18,39,52,.72); font-size: 10px; letter-spacing: .11em; text-transform: uppercase; text-align: left; white-space: nowrap; }
             .solution-table td { padding: 12px 14px; border-top: 1px solid rgba(148,163,184,.08); color: #dce6ed; font-size: 13px; white-space: nowrap; }
-            .solution-table tr:hover td { background: rgba(0,194,232,.04); }
+            /* Zebra + hover reforçado: com 25 linhas por página e todas as
+               células separadas só por uma linha de 8% de opacidade, era fácil
+               perder a linha ao ler da esquerda para a direita. O hover existia
+               mas a 4% de opacidade era praticamente invisível. */
+            .solution-table tbody tr:nth-child(even) td { background: rgba(148,163,184,.045); }
+            .solution-table tbody tr:hover td { background: rgba(0,194,232,.10); }
             .solution-table .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; }
             .solution-table .muted { color: #9aa8b3; }
             .net-road-link { color: #e8f1f8; font-weight: 750; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
@@ -568,7 +629,11 @@ def inject_css() -> None:
             .net-rank-legend-sw { width: 12px; height: 12px; border-radius: 999px; display: inline-block; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
             .net-rank-legend-sw.interv { background: #ed9617; }
             .net-rank-legend-sw.ok { background: #465468; }
+            /* Amostra da 3ª camada (fundo da trilha = escala). */
+            .net-rank-legend-sw.scale { background: rgba(148,163,184,.14); box-shadow: inset 0 0 0 1px rgba(148,163,184,.30); }
             .net-rank-legend-note { color: #7f909c; }
+            /* Dica de interação: linha própria, abaixo da legenda de cores. */
+            .net-rank-hint { margin-top: 6px; color: #7f909c; font-size: 11px; line-height: 1.45; font-style: italic; }
             .net-rank-row { display: grid; grid-template-columns: 190px 1fr 64px; grid-template-rows: auto auto; align-items: center; column-gap: 16px; row-gap: 6px; margin: 0; padding: 12px 0 14px; border-bottom: 1px solid rgba(148,163,184,.08); transition: background .15s ease, border-color .15s ease, box-shadow .15s ease; border-radius: 12px; }
             .net-rank-row:last-child { border-bottom: none; padding-bottom: 4px; }
             .net-rank-row:hover { background: rgba(9,30,42,.42); }
@@ -576,7 +641,12 @@ def inject_css() -> None:
             .net-rank-name { grid-row: 1 / span 2; align-self: start; color: #f2f7fb !important; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-top: 3px; }
             .net-rank-name:hover { color: #ffffff !important; }
             .net-rank-row.active .net-rank-name { color: #f2f7fb !important; }
-            .net-rank-track { height: 26px; border-radius: 7px; background: #141d29; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); position: relative; }
+            /* Fundo da trilha = ESCALA (a largura cheia é a maior extensão da
+               lista). Era um bloco quase preto (#141d29), visualmente tão pesado
+               quanto a barra de "trecho OK" (#465468) — as duas competiam e
+               ninguém sabia qual era qual. Agora é um leito neutro e discreto:
+               fica claro que a informação é o comprimento da barra, não o resto. */
+            .net-rank-track { height: 26px; border-radius: 7px; background: rgba(148,163,184,.12); overflow: hidden; box-shadow: inset 0 0 0 1px rgba(148,163,184,.16); position: relative; }
             .net-rank-bar { height: 100%; border-radius: 7px; background: #465468; position: relative; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }   /* extensão total / parte OK */
             .net-rank-interv { position: absolute; left: 0; top: 0; height: 100%; background: #ed9617; border-radius: 7px 0 0 7px; display: flex; align-items: center; justify-content: flex-start; min-width: 2px; }
             .net-rank-interv-label { padding: 0 8px; color: #08202b; font-size: 10px; font-weight: 900; letter-spacing: .02em; white-space: nowrap; text-shadow: none; }
@@ -592,6 +662,16 @@ def inject_css() -> None:
             .net-rank-group-meta { color: #8f9eaa; font-size: 11px; font-weight: 750; white-space: nowrap; }
             .net-rank-slice { display: grid; grid-template-columns: minmax(0, 1fr) 64px; grid-template-rows: auto auto auto; align-items: center; column-gap: 14px; row-gap: 6px; padding: 4px 0 0; border-top: 1px solid rgba(148,163,184,.08); }
             .net-rank-slice:first-of-type { border-top: 0; }
+            /* Subgrupo por cenário dentro da rodovia: o nome do cenário aparece
+               uma vez no topo do bloco e cada barra abaixo é identificada apenas
+               pelo ano, em ordem crescente. Antes o nome completo se repetia em
+               todas as barras e a ordem seguia a extensão, misturando os anos. */
+            .net-rank-scenario { margin-top: 10px; padding-left: 10px; border-left: 2px solid rgba(148,163,184,.18); }
+            .net-rank-scenario:first-of-type { margin-top: 2px; }
+            .net-rank-scenario-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+            .net-rank-scenario-name { color: #cddbe6; font-size: 12px; font-weight: 850; }
+            .net-rank-scenario-meta { color: #7f909c; font-size: 10px; font-weight: 750; white-space: nowrap; }
+            .net-rank-scenario .net-rank-slice-name { color: #9fb0bd; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
             .net-rank-slice-name { grid-column: 1 / span 2; grid-row: 1; color: #f2f7fb; font-size: 12px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .net-rank-slice .net-rank-track { grid-column: 1; grid-row: 2; }
             .net-rank-slice .net-rank-val { grid-column: 2; grid-row: 2; }
@@ -681,22 +761,51 @@ def inject_css() -> None:
             .dnit-priority-mode-inline { position: relative; z-index: 5; margin: 0 28px -78px 0; }
             .dnit-priority-mode-inline div[data-testid="stSelectbox"] { min-width: 280px; }
             .dnit-priority-mode-inline + div { position: relative; z-index: 4; }
-            .solution-bars { height: 270px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
-            .solution-y-axis { position: relative; height: 188px; margin-top: 18px; border-right: 1px solid rgba(148,163,184,.14); }
+            /* A folga acima do plot (padding-top do .solution-chart-area, espelhada
+               no margin-top do eixo Y) precisa caber o rótulo flutuante da barra,
+               que fica em `top: -30px` + ~22px de altura. Com 18px, a barra mais
+               alta tinha o rótulo cortado no topo do card. 34px cobre o pior caso
+               (barra colada no topo do eixo) sem alterar a escala do eixo — a
+               altura total do bloco acompanha para não comer os rótulos do X. */
+            .solution-bars { height: 286px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
+            .solution-y-axis { position: relative; height: 188px; margin-top: 34px; border-right: 1px solid rgba(148,163,184,.14); }
             .solution-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; white-space: nowrap; }
-            .solution-chart-area { position: relative; padding-top: 18px; overflow-x: auto; overflow-y: visible; scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.5) rgba(148,163,184,.12); }
+            /* Unidade do eixo Y, acima do primeiro tick (o eixo era só números,
+               sem dizer em que unidade — cm, no caso da estrutura do pavimento). */
+            .solution-y-unit { position: absolute; right: 10px; top: -18px; color: #6b7f8d; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+            .solution-chart-area { position: relative; padding-top: 34px; overflow-x: auto; overflow-y: visible; scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.5) rgba(148,163,184,.12); }
             /* Barra de rolagem SEMPRE visível (no macOS o overlay fica oculto e o gráfico parece estourar). */
             .solution-chart-area::-webkit-scrollbar { height: 10px; }
             .solution-chart-area::-webkit-scrollbar-track { background: rgba(148,163,184,.10); border-radius: 6px; }
             .solution-chart-area::-webkit-scrollbar-thumb { background: rgba(148,163,184,.45); border-radius: 6px; }
             .solution-chart-area::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,.72); }
             .solution-chart-plot { height: 188px; border-bottom: 2px solid rgba(148,163,184,.34); background: repeating-linear-gradient(to top, transparent 0, transparent 48px, rgba(148,163,184,.10) 49px, transparent 50px); }
-            .solution-bar-grid { height: 188px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); align-items: end; gap: 26px; padding: 0 16px; min-width: 100%; }
+            /* padding-right maior que o esquerdo: em gráfico com rolagem
+               horizontal, a última barra encostava na borda do recorte e parecia
+               cortada. Agora sempre sobra respiro no fim da faixa. */
+            .solution-bar-grid { height: 188px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); align-items: end; gap: 26px; padding: 0 24px 0 16px; min-width: 100%; }
             .solution-bar-item { height: 188px; display: grid; align-items: end; justify-items: center; min-width: 156px; }
             .solution-bar { width: min(100%, 118px); min-height: 3px; border-radius: 5px 5px 0 0; position: relative; }
             .solution-bar-value { position: absolute; top: -30px; left: 50%; transform: translateX(-50%); color: #f4f7fb; font-size: 11px; font-weight: 850; white-space: nowrap; text-align: center; line-height: 1.15; }
             .solution-bar-value span { display: block; color: #9aa8b3; font-size: 10px; font-weight: 750; margin-top: 2px; }
-            .solution-label-grid { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); gap: 26px; padding: 9px 16px 0; min-width: 100%; justify-items: center; }
+            .solution-label-grid { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(156px, 1fr); gap: 26px; padding: 9px 24px 0 16px; min-width: 100%; justify-items: center; }
+            /* Variante de barras HORIZONTAIS (ver _render_solution_distribution_h):
+               usada onde as categorias são nomes compostos de solução, que no eixo
+               X quebravam em 3 linhas. Grade: nome | trilha | valor. */
+            .solution-h-chart { display: grid; gap: 10px; padding: 6px 0 0; }
+            .solution-h-row { display: grid; grid-template-columns: minmax(120px, 300px) minmax(0, 1fr) 92px; align-items: center; gap: 14px; }
+            .solution-h-label { color: #dce6ed; font-size: 12px; line-height: 1.35; text-align: right; }
+            .solution-h-track { position: relative; height: 26px; border-radius: 4px; background: rgba(148,163,184,.10); overflow: hidden; }
+            .solution-h-gridline { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(148,163,184,.12); }
+            .solution-h-bar { position: relative; height: 100%; min-width: 3px; border-radius: 0 4px 4px 0; }
+            .solution-h-value { color: #f4f7fb; font-size: 12px; font-weight: 850; line-height: 1.2; white-space: nowrap; }
+            .solution-h-value span { display: block; color: #9aa8b3; font-size: 10px; font-weight: 750; margin-top: 2px; }
+            .solution-h-axis { position: relative; height: 20px; margin: 2px 106px 0 314px; border-top: 1px solid rgba(148,163,184,.20); }
+            .solution-h-tick { position: absolute; top: 5px; transform: translateX(-50%); color: #8f9eaa; font-size: 10px; white-space: nowrap; }
+            @media (max-width: 1100px) {
+                .solution-h-row { grid-template-columns: minmax(90px, 180px) minmax(0, 1fr) 78px; gap: 10px; }
+                .solution-h-axis { margin: 2px 88px 0 190px; }
+            }
             .solution-bar-label { color: #9aa8b3; font-size: 11px; text-align: center; white-space: normal; line-height: 1.25; min-width: 156px; max-width: 156px; }
             /* Barra empilhada por camada (Geotecnia · Estrutura do pavimento):
                reaproveita o grid .solution-bar-grid/.solution-bar-item, só troca
@@ -731,9 +840,28 @@ def inject_css() -> None:
             .solution-panel-title { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .solution-panel-subtitle { margin: 6px 0 20px; color: var(--muted); font-size: 12px; line-height: 1.45; }
             .solution-panel-spacer { height: 12px; }
-            .solution-filter-label { margin: 0 0 6px; color: #8f9eaa; font-size: 10px; letter-spacing: .11em; text-transform: uppercase; font-weight: 850; }
+            /* Mesmo tratamento do .filter-label (eram dois estilos ligeiramente
+               diferentes de label de filtro: cor, tracking e margem distintos,
+               o que desalinhava a 2ª fila de filtros da Soluções em relação à 1ª). */
+            .solution-filter-label { min-height: 14px; margin: 0 0 5px; color: #7d8c98; font-size: 10px; letter-spacing: .10em; text-transform: uppercase; font-weight: 850; }
             div[data-testid="stMultiSelect"] label,
             div[data-testid="stSlider"] label { display: none; }
+            /* Slider: os valores dos handles (stThumbValue) e o min/max da escala
+               (stTickBar) vinham no MESMO tamanho e peso, o que fazia os dois
+               parecerem repetição — sobretudo no estado default, em que o range
+               selecionado é o range inteiro e os quatro números coincidem. O
+               min/max passa a ser informação de fundo: menor e mais apagado. A
+               cor deixou de ser o vermelho default via primaryColor (config.toml). */
+            div[data-testid="stSlider"] [data-testid="stThumbValue"] {
+                font-size: 12px; font-weight: 850; color: var(--cyan);
+            }
+            div[data-testid="stSlider"] [data-testid="stTickBar"] {
+                padding-top: 2px;
+            }
+            div[data-testid="stSlider"] [data-testid="stTickBarMin"],
+            div[data-testid="stSlider"] [data-testid="stTickBarMax"] {
+                font-size: 10px; font-weight: 700; color: #6b7f8d;
+            }
             div[data-testid="stMultiSelect"] [data-baseweb="select"] > div {
                 height: 40px !important;
                 min-height: 40px !important;
@@ -825,10 +953,52 @@ def inject_css() -> None:
                 background: transparent !important;
                 border: none !important;
             }
-            .pagination-summary { color: #9aa8b3; font-size: 12px; padding-top: 28px; text-align: right; }
+            /* Expander FECHADO é ferramenta secundária, não seção de conteúdo:
+               com fundo de card + sombra (o estilo acima), a caixa "Remover
+               trechos da análise" dominava a tela como se fosse um bloco
+               principal. Fechado vira uma linha discreta; ao abrir, recupera o
+               painel para acomodar os controles. */
+            div[data-testid="stExpander"]:not(:has(details[open])) {
+                background: transparent !important;
+                box-shadow: none !important;
+                border: 1px solid rgba(148,163,184,.30) !important;
+            }
+            div[data-testid="stExpander"]:not(:has(details[open])) summary {
+                color: #9fb0bd !important;
+                font-weight: 750 !important;
+                font-size: 12.5px !important;
+            }
+            /* Alinhado à esquerda: à direita, o resumo ficava no extremo oposto
+               da linha, longe dos controles de paginação a que se refere. */
+            .pagination-summary { color: #9aa8b3; font-size: 12px; padding-top: 28px; text-align: left; }
             div[data-testid="stNumberInput"] label { display: none; }
             div[data-testid="stNumberInput"] input,
             div[data-testid="stSelectbox"] input { color: var(--text); }
+            /* O number_input (paginação) só tinha a cor do texto definida, então
+               o wrapper e os botões -/+ ficavam com o fundo branco default do
+               BaseWeb, destoando de todo o resto. Alinha aos mesmos tokens do
+               select (fundo #0b1a23, borda #244257, raio 14px). */
+            div[data-testid="stNumberInput"] [data-baseweb="input"],
+            div[data-testid="stNumberInput"] [data-baseweb="base-input"] {
+                background: #0b1a23 !important;
+                border-color: #244257 !important;
+                border-radius: 14px !important;
+                box-shadow: none !important;
+            }
+            div[data-testid="stNumberInput"] input {
+                background: transparent !important;
+                -webkit-text-fill-color: var(--text);
+            }
+            div[data-testid="stNumberInput"] button {
+                background: #0b1a23 !important;
+                border-color: #244257 !important;
+                color: #9aa8b3 !important;
+            }
+            div[data-testid="stNumberInput"] button:hover {
+                background: #123b5d !important;
+                color: #eef8ff !important;
+            }
+            div[data-testid="stNumberInput"] button svg { fill: currentColor !important; }
             div[data-testid="stDownloadButton"] button {
                 min-height: 40px;
                 border-radius: 10px;
@@ -867,13 +1037,44 @@ def inject_css() -> None:
                 font-size: inherit !important;
             }
             div[data-testid="stRadio"] [role="radiogroup"] label { opacity:1 !important; }
+            /* Segmented control: os grupos de radio horizontais eram uma fileira
+               de bolinhas soltas, sem área de clique nem agrupamento visível.
+               Viram pílulas — o mesmo tratamento que já existia em
+               .segment-control-caption + stRadio, mas que se aplicava a um único
+               caso. A bolinha nativa continua visível (agora no cyan de marca,
+               via primaryColor no config.toml) porque é ela que comunica o
+               estado; a pílula dá área de clique, agrupamento e destaque do
+               item selecionado. A regra do .segment-control-caption tem
+               especificidade maior e segue vencendo onde já estava aplicada. */
+            div[data-testid="stRadio"] [role="radiogroup"] { gap: 6px; flex-wrap: wrap; }
+            div[data-testid="stRadio"] [role="radiogroup"] > label {
+                margin: 0;
+                padding: 4px 11px 4px 7px;
+                border: 1px solid rgba(34,211,238,.16);
+                border-radius: 999px;
+                background: rgba(8,26,36,.58);
+                transition: background .15s ease, border-color .15s ease;
+            }
+            div[data-testid="stRadio"] [role="radiogroup"] > label:hover {
+                border-color: rgba(34,211,238,.40);
+                background: rgba(18,59,93,.28);
+            }
+            div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) {
+                border-color: rgba(34,211,238,.55);
+                background: rgba(18,59,93,.34);
+            }
             .economic-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
             .economic-title { display: flex; align-items: center; gap: 10px; }
             .economic-icon { width: 32px; height: 32px; border-radius: 12px; display: grid; place-items: center; background: #00c2e8; color: #031019; font-weight: 900; }
             .economic-head h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .economic-head p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
             .economic-note { color: #9aa8b3; font-size: 11px; line-height: 1.45; border: 1px solid rgba(148,163,184,.14); background: rgba(6,16,24,.36); border-radius: 10px; padding: 10px 12px; margin-top: 16px; }
-            .economic-control-value { color: var(--cyan); text-align: right; font-size: 12px; font-weight: 850; margin-top: -20px; margin-bottom: 6px; }
+            /* Linha de valor dos controles do Cenário econômico (R$ do orçamento,
+               período do horizonte, escopo do cálculo). O min-height faz as três
+               colunas terminarem na mesma altura mesmo quando o controle acima é
+               um radio (sem a régua de min/max do slider), que era a causa dos
+               blocos ficarem escalonados. */
+            .economic-control-value { color: var(--cyan); text-align: right; font-size: 12px; font-weight: 850; margin-top: -20px; margin-bottom: 6px; min-height: 16px; }
             .economic-chart { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 10px; min-height: 276px; }
             .economic-y-axis { position: relative; height: 210px; margin-top: 28px; border-right: 1px solid rgba(148,163,184,.14); }
             .economic-y-tick { position: absolute; right: 10px; transform: translateY(50%); color: #8f9eaa; font-size: 11px; }
@@ -897,7 +1098,11 @@ def inject_css() -> None:
             /* Custo por recorte/rodovia: barra + rótulo no mesmo item, para não desalinhar
                quando há muitos filtros (rótulos longos deslocavam a grade de labels). */
             .network-cost-plot { position: relative; height: 210px; margin-top: 28px; border-bottom: 2px solid rgba(148,163,184,.34); background: repeating-linear-gradient(to top, transparent 0, transparent 51px, rgba(148,163,184,.10) 52px, transparent 53px); overflow: visible; min-width: max-content; }
-            .network-cost-cols { position: absolute; inset: 0 16px; display: flex; align-items: flex-start; gap: 18px; height: auto; }
+            /* justify-content: center — com 1 ou 2 recortes filtrados, as barras
+               ficavam encostadas na esquerda de um plot larguíssimo. Quando o
+               conteúdo é mais largo que a área, o flex volta a alinhar do início
+               e a rolagem continua funcionando. */
+            .network-cost-cols { position: absolute; inset: 0 16px; display: flex; align-items: flex-start; justify-content: center; gap: 18px; height: auto; }
             .network-cost-col { display: flex; flex-direction: column; align-items: center; flex: 0 0 auto; min-width: 82px; }
             .network-cost-bar-wrap { height: 210px; width: 100%; min-width: 82px; display: flex; align-items: flex-end; justify-content: center; }
             .network-cost-label { margin-top: 8px; color: #8f9eaa; font-size: 11px; text-align: center; line-height: 1.3; white-space: nowrap; }
@@ -1087,10 +1292,6 @@ def inject_css() -> None:
                 .iap-card .iap-donut-center span {
                     color: #5f7280 !important;
                 }
-                .iap-card .iap-slice-label {
-                    color: #506576 !important;
-                    text-shadow: none !important;
-                }
                 .solution-distribution .solution-bar-value {
                     color: #13232e !important;
                     text-shadow: none !important;
@@ -1099,7 +1300,29 @@ def inject_css() -> None:
                     color: #506576 !important;
                 }
                 .solution-y-tick,
+                .solution-y-unit,
+                .solution-h-tick,
                 .solution-bar-label {
+                    color: #6b7f8f !important;
+                }
+                /* Variante de barras horizontais no tema claro. */
+                .solution-h-label,
+                .solution-h-value {
+                    color: #13232e !important;
+                }
+                .solution-h-value span {
+                    color: #506576 !important;
+                }
+                .solution-h-track {
+                    background: rgba(18,43,58,.07) !important;
+                }
+                .solution-h-gridline {
+                    background: rgba(18,43,58,.12) !important;
+                }
+                .solution-h-axis {
+                    border-top-color: rgba(95,114,128,.28) !important;
+                }
+                .net-rank-hint {
                     color: #6b7f8f !important;
                 }
                 .comparison-pill {
@@ -1144,6 +1367,37 @@ def inject_css() -> None:
                     border-color: #bfd2dc !important;
                 }
                 .segment-control-caption + div[data-testid="stRadio"] label p {
+                    color: #13232e !important;
+                }
+                /* Pílulas dos grupos de radio (ex.: filtro CÁLCULO do Cenário
+                   econômico): o estilo base usa fundo escuro, pensado para o tema
+                   escuro. Sem esta regra, no tema claro sobravam pílulas cinza-
+                   escuras sobre a página branca. */
+                div[data-testid="stRadio"] [role="radiogroup"] > label {
+                    background: #ffffff !important;
+                    border-color: #bfd2dc !important;
+                }
+                div[data-testid="stRadio"] [role="radiogroup"] > label:hover {
+                    background: #f3f8fb !important;
+                    border-color: #8fb4c6 !important;
+                }
+                div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) {
+                    background: #eaf4f8 !important;
+                    border-color: #7fb2c4 !important;
+                }
+                /* Valor sob a alça do slider: o cyan de marca fica estridente no
+                   fundo branco — usa o azul-marinho da marca no tema claro. */
+                div[data-testid="stSlider"] [data-testid="stThumbValue"] {
+                    color: #14304f !important;
+                }
+                /* Expander fechado: transparente com borda de 16% ficava quase
+                   invisível na página clara (caixa "Remover trechos da análise").
+                   Ganha fundo branco e a mesma borda dos outros controles. */
+                div[data-testid="stExpander"]:not(:has(details[open])) {
+                    background: #ffffff !important;
+                    border-color: #bfd2dc !important;
+                }
+                div[data-testid="stExpander"]:not(:has(details[open])) summary {
                     color: #13232e !important;
                 }
 
@@ -1219,6 +1473,8 @@ def inject_css() -> None:
                 .metric-card,
                 .chart-card,
                 div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iap-zoom-marker)),
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.overview-map-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .overview-map-marker)),
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.segment-timeline-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .segment-timeline-marker)),
                 .solution-card,
                 .solution-distribution,
                 .solution-panel,
@@ -1226,8 +1482,7 @@ def inject_css() -> None:
                 .alert-item,
                 .iagon-hero,
                 .comparison-summary-row,
-                .scenario-summary-card,
-                .segment-timeline-card {
+                .scenario-summary-card {
                     background: #ffffff !important;
                     border-color: var(--border) !important;
                     box-shadow: 0 1px 2px rgba(18,43,58,.10) !important;
@@ -1237,13 +1492,14 @@ def inject_css() -> None:
                 }
                 .chart-card,
                 div[data-testid="stVerticalBlockBorderWrapper"]:has(.iap-zoom-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .iap-zoom-marker)),
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.overview-map-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .overview-map-marker)),
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.segment-timeline-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .segment-timeline-marker)),
                 .solution-card,
                 .solution-distribution,
                 .solution-panel,
                 .economic-panel,
                 .comparison-summary-row,
-                .scenario-summary-card,
-                .segment-timeline-card {
+                .scenario-summary-card {
                     border-color: transparent !important;
                     box-shadow: 0 1px 2px rgba(18,43,58,.08) !important;
                 }
@@ -1263,6 +1519,35 @@ def inject_css() -> None:
                 .net-rank-group.active {
                     background: #f8fbfc !important;
                     box-shadow: inset 0 0 0 1px rgba(0,127,155,.08) !important;
+                }
+                /* As 3 camadas da barra no tema claro. O fundo da trilha (escala) e
+                   a barra de "trecho OK" não tinham override nenhum: ficavam quase
+                   pretas e slate escuro sobre a página branca — dois tons pesados e
+                   parecidos, exatamente o que confundia a leitura. */
+                .net-rank-track {
+                    background: rgba(18,43,58,.07) !important;
+                    box-shadow: inset 0 0 0 1px rgba(18,43,58,.10) !important;
+                }
+                .net-rank-bar {
+                    background: #8ea3b5 !important;
+                    box-shadow: inset 0 0 0 1px rgba(18,43,58,.06) !important;
+                }
+                .net-rank-legend-sw.ok {
+                    background: #8ea3b5 !important;
+                }
+                .net-rank-legend-sw.scale {
+                    background: rgba(18,43,58,.07) !important;
+                    box-shadow: inset 0 0 0 1px rgba(18,43,58,.18) !important;
+                }
+                .net-rank-scenario {
+                    border-left-color: rgba(18,43,58,.14) !important;
+                }
+                .net-rank-scenario-name {
+                    color: #13232e !important;
+                }
+                .net-rank-scenario-meta,
+                .net-rank-scenario .net-rank-slice-name {
+                    color: #6b7f8f !important;
                 }
 
                 .side-item {
@@ -1835,6 +2120,7 @@ def render_top_bar(
     header_slot.markdown(
         f"""
         <div class="top-copy">
+            <p class="eyebrow">ANÁLISE GERENCIAL</p>
             <h1 class="page-title">{page_title if (keep_title or not show_diagnosis) else diagnosis}</h1>
         </div>
         """,
@@ -2111,6 +2397,7 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
     header_slot.markdown(
         """
         <div class="top-copy">
+            <p class="eyebrow">ANÁLISE GERENCIAL</p>
             <h1 class="page-title">Visão geral</h1>
         </div>
         """,
@@ -2238,6 +2525,7 @@ def render_economic_top_bar() -> tuple[str, list[str], list[tuple[str, str]], di
     header_slot.markdown(
         """
         <div class="top-copy">
+            <p class="eyebrow">ANÁLISE GERENCIAL</p>
             <h1 class="page-title">Cenário econômico</h1>
         </div>
         """,
@@ -2337,6 +2625,7 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
     header_slot.markdown(
         """
         <div class="top-copy">
+            <p class="eyebrow">ANÁLISE GERENCIAL</p>
             <h1 class="page-title">Diagnóstico</h1>
         </div>
         """,
@@ -2444,6 +2733,7 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int
     header_slot.markdown(
         """
         <div class="top-copy">
+            <p class="eyebrow">ANÁLISE GERENCIAL</p>
             <h1 class="page-title">Soluções</h1>
         </div>
         """,
@@ -2512,11 +2802,14 @@ def _render_comparison_summary(side_a: dict, side_b: dict) -> None:
         side_name = html.escape(str(side.get("side") or ""))
         matrix = html.escape(_comparison_matrix_label(str(side.get("matrix_type") or "")))
         scenario = html.escape(_comparison_scenario_summary(side))
+        # O destaque é o CENÁRIO, não a metodologia: os dois lados costumam ser
+        # da mesma matriz, então "Matriz" como valor grande não distinguia nada
+        # (era a mesma palavra nos dois cards). A metodologia vira parte da
+        # legenda superior, junto do lado da comparação.
         return (
             '<div class="comparison-pill">'
-            f'<small>Comparação {side_name}</small>'
-            f'<strong>{matrix}</strong>'
-            f'<span>{scenario}</span>'
+            f'<small>Comparação {side_name} · {matrix}</small>'
+            f'<strong>{scenario}</strong>'
             '</div>'
         )
 
@@ -2537,9 +2830,11 @@ def _render_comparison_side_filter(road: str, side: str, default_matrix: str) ->
     current_matrix = st.session_state.get(matrix_key, default_matrix)
     if current_matrix not in matrix_options:
         current_matrix = default_matrix
+    # Sem a caption "tipo + cenários": os dois campos logo abaixo já se chamam
+    # "Tipo" e "Cenários", então ela só repetia os rótulos em linguagem cifrada.
     st.markdown(
         '<div class="comparison-side-title">'
-        f'<b>Comparação {side.upper()}</b><span>tipo + cenários</span>'
+        f'<b>Comparação {side.upper()}</b>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -2584,12 +2879,13 @@ def _render_comparison_side_filter(road: str, side: str, default_matrix: str) ->
 
 
 def _render_comparison_master_filters(road: str) -> tuple[dict, dict]:
+    # O "×" entre as colunas saiu daqui: ele aparecia duas vezes na tela (aqui e
+    # no resumo abaixo) e, num painel de edição, um ✕ isolado lê como "fechar".
+    # O × permanece só no resumo, onde comunica "A versus B" sem ambiguidade.
     with st.expander("Editar comparação", expanded=False):
-        col_a, col_x, col_b = st.columns([1, 0.08, 1], gap="medium")
+        col_a, col_b = st.columns([1, 1], gap="large")
         with col_a:
             side_a = _render_comparison_side_filter(road, "a", "Paragon")
-        with col_x:
-            st.markdown('<div class="comparison-x">×</div>', unsafe_allow_html=True)
         with col_b:
             side_b = _render_comparison_side_filter(road, "b", "Matriz Cadastrada")
     _render_comparison_summary(side_a, side_b)
@@ -2633,6 +2929,7 @@ def render_comparison_top_bar(default_road: str) -> tuple[str, str]:
     header_slot.markdown(
         """
         <div class="top-copy">
+            <p class="eyebrow">ANÁLISE GERENCIAL</p>
             <h1 class="page-title">Comparativo entre cenários</h1>
         </div>
         """,
@@ -3040,8 +3337,15 @@ def _render_solution_distribution(
     group_col: str = "Solução recomendada",
     subtitle: str = "Distribuição por solução",
     color_fn=None,
+    horizontal: bool = False,
 ) -> None:
-    """Gráfico de barras (HTML) com a distribuição de km por tipo de solução na rede."""
+    """Gráfico de barras (HTML) com a distribuição de km por tipo de solução na rede.
+
+    `horizontal=True` desenha as barras deitadas, com o nome da solução numa
+    coluna à esquerda. É o modo indicado quando as categorias são nomes compostos
+    (ex.: "RL (Remendo - trincas) + RL (Tapa-buraco) + RL (Remendo - desgaste)"),
+    que no eixo X vertical quebravam em 3 linhas e ficavam ilegíveis.
+    """
     if table_df is None or table_df.empty:
         return
 
@@ -3058,6 +3362,19 @@ def _render_solution_distribution(
     max_percent = max(float(grouped["Extensão"].max()) / total_extension * 100, 1)
     axis_max = _axis_max_10(max_percent)
     ticks = _axis_ticks_10(axis_max)
+
+    if horizontal:
+        _render_solution_distribution_h(
+            grouped,
+            group_col=group_col,
+            total_extension=total_extension,
+            axis_max=axis_max,
+            ticks=ticks,
+            color_fn=color_fn,
+            subtitle=subtitle,
+            plan_cost_mi=plan_cost_mi,
+        )
+        return
 
     tick_markup = "".join(
         f'<span class="solution-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
@@ -3111,6 +3428,77 @@ def _render_solution_distribution(
         '</div>'
     )
     st.markdown(markup, unsafe_allow_html=True)
+
+
+def _render_solution_distribution_h(
+    grouped,
+    *,
+    group_col: str,
+    total_extension: float,
+    axis_max: int,
+    ticks: list[int],
+    color_fn,
+    subtitle: str,
+    plan_cost_mi: float | None,
+) -> None:
+    """Versão de barras HORIZONTAIS do gráfico de distribuição de soluções.
+
+    Mesmos dados, mesma escala e mesmas cores da versão vertical — muda só a
+    orientação: o nome da solução ocupa uma coluna própria à esquerda, lida da
+    esquerda para a direita, em vez de ficar comprimido sob a barra em 3 linhas.
+    """
+    grid_lines = "".join(
+        f'<span class="solution-h-gridline" style="left:{tick / axis_max * 100:.2f}%;"></span>'
+        for tick in ticks
+    )
+    axis_ticks = "".join(
+        f'<span class="solution-h-tick" style="left:{tick / axis_max * 100:.2f}%;">{tick:.0f}%</span>'
+        for tick in ticks
+    )
+
+    rows = []
+    for row in grouped.to_dict("records"):
+        label = str(row[group_col])
+        km = float(row["Extensão"])
+        percent = km / total_extension * 100
+        width = max(percent / axis_max * 100, 0.8)
+        color = color_fn(label)
+        escaped = html.escape(label)
+        rows.append(
+            '<div class="solution-h-row">'
+            f'<div class="solution-h-label" title="{escaped}">{escaped}</div>'
+            '<div class="solution-h-track">'
+            f'{grid_lines}'
+            f'<div class="solution-h-bar" style="width:{width:.2f}%;background:{color};"></div>'
+            '</div>'
+            f'<div class="solution-h-value">{percent:.1f}%<span>{km:.1f} km</span></div>'
+            '</div>'
+        )
+
+    cost_markup = (
+        f'<span>Custo <strong class="accent">R$ {plan_cost_mi:.1f} mi</strong></span>'
+        if plan_cost_mi is not None
+        else ""
+    )
+    st.markdown(
+        '<div class="solution-distribution">'
+        '<div class="solution-distribution-head">'
+        '<div class="solution-distribution-title">'
+        '<div class="solution-distribution-icon">≋</div>'
+        '<div><h3>Distribuição de soluções na rede</h3>'
+        f'<p>{html.escape(subtitle)}</p></div>'
+        '</div>'
+        '<div class="solution-distribution-meta">'
+        f'<span>Total · <strong>{total_extension:.1f} km</strong></span>'
+        f'{cost_markup}'
+        '</div>'
+        '</div>'
+        f'<div class="solution-h-chart">{"".join(rows)}'
+        f'<div class="solution-h-axis">{axis_ticks}</div>'
+        '</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type="Paragon"):
@@ -3211,7 +3599,7 @@ def _render_solution_distribution_by_sentido(table_df) -> None:
     """Distribuição de soluções com BARRAS POR SENTIDO (um gráfico só: para cada
     solução, uma barra por sentido)."""
     if table_df is None or table_df.empty or "Sentido" not in table_df.columns:
-        _render_solution_distribution(table_df)
+        _render_solution_distribution(table_df, horizontal=True)
         return
     g = table_df.groupby(["Solução recomendada", "Sentido"], as_index=False)["Extensão"].sum()
     solucoes = list(
@@ -3383,16 +3771,21 @@ def _render_solution_table_controls(filtered_table, *, export_fn=None):
         return filtered_table, filtered_table.reset_index(drop=True)
 
     total_pages = max(1, (total_rows + int(page_size) - 1) // int(page_size))
-    with page_col:
-        _filter_caption("Página")
-        page_number = st.number_input(
-            "Página",
-            min_value=1,
-            max_value=total_pages,
-            value=1,
-            step=1,
-            label_visibility="collapsed",
-        )
+    # Com uma única página, o seletor de página não tem para onde navegar: era um
+    # controle inerte na tela (o caso comum, ex.: 12 registros com página de 25).
+    if total_pages == 1:
+        page_number = 1
+    else:
+        with page_col:
+            _filter_caption("Página")
+            page_number = st.number_input(
+                "Página",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                step=1,
+                label_visibility="collapsed",
+            )
 
     start = (int(page_number) - 1) * int(page_size)
     end = min(start + int(page_size), total_rows)
@@ -3624,6 +4017,7 @@ def _render_dnit_solutions_page(road, scenario_keys) -> None:
         group_col="Solução núcleo",
         subtitle="Soluções aplicadas · Matriz Revitaliza DNIT/RO (gravadas no banco)",
         color_fn=lambda label: nucleo_iri_color.get(str(label), "#9fb9d9"),
+        horizontal=True,
     )
     _, paginated_table = _render_solution_table_controls(filtered_table, export_fn=_render_dnit_export_button)
     _render_dnit_solutions_table(paginated_table)
@@ -4486,6 +4880,10 @@ def _render_segment_intervention_timeline(
         scenario_options = [str(value) for value in dict.fromkeys(source["Sentido"].dropna().astype(str).tolist()) if str(value).strip()]
 
     with st.container(border=True):
+        # Marcador que transforma o container com borda em card do painel (fundo
+        # cheio + sombra). Sem ele, este era o único bloco com o quadro contornado
+        # e translúcido do Streamlit, destoando de todos os outros cards.
+        st.markdown('<span class="segment-timeline-marker"></span>', unsafe_allow_html=True)
         header_cols = st.columns([1.15, 0.55, 0.95] if len(scenario_options) > 1 else [1.15, 0.55, 0.12])
         with header_cols[0]:
             st.markdown(
@@ -5911,6 +6309,8 @@ def _render_economic_page(
                 "tone": "orange",
                 "icon": "ruler",
             },
+            # Faltante zero é o MELHOR resultado (necessidade toda coberta), então
+            # o card não deve usar o tom/ícone de alerta nesse caso.
             {
                 "title": "ORÇAMENTO FALTANTE",
                 "value": _format_money(max(total_need - available_budget, 0.0)),
@@ -5919,8 +6319,8 @@ def _render_economic_page(
                     if available_budget >= total_need
                     else "Adicional para cobrir 100% da necessidade"
                 ),
-                "tone": "yellow",
-                "icon": "alert-triangle",
+                "tone": "green" if available_budget >= total_need else "yellow",
+                "icon": "check-circle" if available_budget >= total_need else "alert-triangle",
             },
         ]
     )
@@ -6505,10 +6905,12 @@ def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> No
          "subtitle": f"{_format_money(available_budget)} disponível no escopo", "tone": "green", "icon": "trend-up"},
         {"title": "TRECHOS ATENDIDOS", "value": f"{attended_km:.1f} / {scope_km:.1f} km",
          "subtitle": "Km de segmentos cobertos pelo orçamento", "tone": "orange", "icon": "ruler"},
+        # Faltante zero = necessidade coberta: tom positivo, não de alerta.
         {"title": "ORÇAMENTO FALTANTE", "value": _format_money(faltante),
          "subtitle": ("Necessidade já coberta pelo orçamento" if faltante == 0
                       else "Adicional para cobrir 100% da necessidade"),
-         "tone": "yellow", "icon": "alert-triangle"},
+         "tone": "green" if faltante == 0 else "yellow",
+         "icon": "check-circle" if faltante == 0 else "alert-triangle"},
     ])
     _render_economic_need_breakdown(snv_budget_table, budget_items)
 
@@ -7126,10 +7528,15 @@ def _render_comparison_condition_map(
         if is_financial else
         ("Classe do IRI" if matrix_type == "Matriz Cadastrada" else "Conceito IAP")
     )
+    # O cabeçalho traz o cenário do lado, não só "A · Matriz": os dois lados
+    # costumam ser da mesma matriz, então o título genérico não dizia qual mapa
+    # é qual e obrigava a subir os olhos até o resumo para descobrir.
+    scenario_label = _comparison_scenario_summary(side)
     st.markdown(
         '<div style="margin:0 0 8px;padding:0 2px">'
         f'<div style="font-size:13px;font-weight:850;color:#e8f1f8">{html.escape(side_label)}</div>'
-        f'<div style="font-size:11px;color:#8f9eaa;margin-top:3px">Mapa colorido por {html.escape(criterion)}</div>'
+        f'<div style="font-size:11px;color:#8f9eaa;margin-top:3px">'
+        f'{html.escape(scenario_label)} · colorido por {html.escape(criterion)}</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -9064,13 +9471,19 @@ def _render_dnit_linear(segments_df, *, key: str = "dnit_linear_zoom"):
                 seg_end = min(float(r["km_final"]), max_km)
                 ext = max(seg_end - seg_start, 0.001)
                 width = ext / total * 100
+                # Posição pelo km real (ver _render_segment em linear_diagram.py):
+                # empilhados em sequência, os buracos de cobertura colapsavam e
+                # deslocavam as trilhas em relação ao eixo de km.
+                left = (seg_start - min_km) / total * 100
                 color, tip = color_fn(r)
                 spans.append(
-                    f'<span class="linear-segment" style="width:{width:.4f}%;background:{color};" title="{html.escape(tip)}"></span>'
+                    f'<span class="linear-segment" style="left:{left:.4f}%;width:{width:.4f}%;'
+                    f'background:{color};" title="{html.escape(tip)}"></span>'
                 )
             return (
                 '<div class="linear-row">'
-                f'<div class="linear-row-label">{label}<br><span style="font-size:9px;color:#7f909c">{sub}</span></div>'
+                # Unidade da trilha em 10px (era 9px, no limite do legível).
+                f'<div class="linear-row-label">{label}<br><span style="font-size:10px;color:#8f9eaa">{sub}</span></div>'
                 f'<div class="linear-track">{"".join(spans)}</div>'
                 '</div>'
             )
@@ -9303,6 +9716,42 @@ def _filter_map_segments(segments_df, filtered_table):
 
     selected_ids = set(filtered_table["_segment_id"].astype(int).tolist())
     return segments_df[segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
+
+
+def _with_context_segments(main_segments, segments_df, intervention_table):
+    """Soma aos segmentos do mapa os que NÃO têm intervenção prevista.
+
+    Eles ficavam fora do desenho, o que abria vãos na rodovia e fazia parecer que
+    faltava geometria — na BR-319, por exemplo, isso é metade da extensão. Entram
+    com a MESMA espessura dos demais: a cor da solução (cinza "Sem intervenção" /
+    ciano "OK") já os distingue, e a legenda do mapa se monta a partir dos códigos
+    presentes, então passa a listá-los automaticamente.
+    """
+    context = _context_map_segments(segments_df, intervention_table)
+    frames = [
+        frame for frame in (main_segments, context)
+        if frame is not None and not frame.empty
+    ]
+    if not frames:
+        return main_segments
+    return pd.concat(frames, ignore_index=True)
+
+
+def _context_map_segments(segments_df, intervention_table):
+    """Complemento de `_filter_map_segments`: os segmentos que NÃO estão na tabela."""
+    if segments_df is None or segments_df.empty:
+        return segments_df
+    if intervention_table is None or intervention_table.empty or "_segment_id" not in intervention_table:
+        return segments_df.copy()
+
+    if "sentido" in segments_df.columns and "Sentido" in intervention_table.columns:
+        segment_keys = _economic_segment_key_series(segments_df, "segment_id", "sentido")
+        selected_keys = _economic_segment_key_set(intervention_table, "_segment_id", "Sentido")
+        if selected_keys:
+            return segments_df[~segment_keys.isin(selected_keys)].copy()
+
+    selected_ids = set(intervention_table["_segment_id"].astype(int).tolist())
+    return segments_df[~segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -9575,9 +10024,13 @@ def _build_network_overview(
 
 
 def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
-    """Rodovias por EXTENSÃO TOTAL. A barra (comprimento ∝ km) mostra, dentro do total,
-    quanto precisa de intervenção (laranja) vs OK (verde). Maior extensão primeiro;
-    clique na rodovia abre o diagnóstico."""
+    """Rodovias por EXTENSÃO TOTAL, maior primeiro; clique na rodovia abre o diagnóstico.
+
+    Cada barra tem 3 camadas: laranja = precisa de intervenção, slate = trecho OK
+    (as duas somam a extensão do recorte) e o leito da trilha = escala, cuja largura
+    cheia equivale à maior extensão da lista. Quando há filtro de cenário/ano, os
+    recortes de cada rodovia são subagrupados por cenário e ordenados por ano.
+    """
     ordered = df.sort_values("ext_km", ascending=False)
     max_ext = max(float(ordered["ext_km"].max()), 1.0)
     selected_filter = set(st.session_state.get("topbar_network_road") or [])
@@ -9598,6 +10051,28 @@ def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
         if label.startswith(prefix):
             label = label[len(prefix):]
         return label if label and label != road else "Cenário selecionado"
+
+    def _slice_year(row: dict) -> int | None:
+        """Ano do recorte, quando o filtro de ano está em uso."""
+        year = row.get("_year")
+        try:
+            return int(year) if year is not None and not pd.isna(year) else None
+        except (TypeError, ValueError):
+            return None
+
+    def _slice_scenario_label(row: dict) -> str:
+        """Rótulo do recorte SEM o ano — é a chave de agrupamento por cenário.
+
+        O rótulo vem montado como "<cenário> - <ano>"; tira-se o sufixo do ano
+        usando o valor da própria coluna `_year`, em vez de adivinhar por texto.
+        """
+        label = _slice_label(row)
+        year = _slice_year(row)
+        if year is not None:
+            suffix = f" - {year}"
+            if label.endswith(suffix):
+                label = label[: -len(suffix)]
+        return label or "Cenário selecionado"
 
     def _bar_markup(row: dict, *, label: str | None, active_class: str = "") -> str:
         total = float(row["ext_km"])
@@ -9627,7 +10102,9 @@ def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
             f'<div class="net-rank-track" title="{tooltip}"><div class="net-rank-bar" style="width:{ext_pct:.1f}%">'
             f'<div class="net-rank-interv" style="width:{interv_frac:.1f}%">{inline_label}</div></div></div>'
             f'<div class="net-rank-val">{total:.0f} km</div>'
-            f'<div class="net-rank-extra">{interv:.0f} km precisam de intervenção ({pct:.0f}%)</div>'
+            # O percentual já aparece dentro da própria barra (inline_label); aqui
+            # fica só o valor absoluto, que é a informação que a barra não dá.
+            f'<div class="net-rank-extra">{interv:.0f} km precisam de intervenção</div>'
             '</div>'
         )
 
@@ -9638,10 +10115,47 @@ def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
             group_records = group.to_dict("records")
             active_class = " active" if selected_filter and str(road_label) in selected_filter else ""
             group_total = float(group["ext_km"].max()) if not group.empty else 0.0
-            group_html = "".join(
-                _bar_markup(row, label=_slice_label(row))
-                for row in group_records
-            )
+
+            # Dentro da rodovia: agrupa por CENÁRIO e ordena por ANO. Antes a ordem
+            # vinha da extensão (herdada do sort geral), o que intercalava anos de
+            # cenários diferentes quando os recortes tinham km distintos. E o nome
+            # completo do cenário se repetia em cada barra; agora ele aparece uma
+            # vez como subtítulo e cada barra é identificada só pelo ano.
+            by_scenario: dict[str, list[dict]] = {}
+            for record in group_records:
+                by_scenario.setdefault(_slice_scenario_label(record), []).append(record)
+
+            scenario_blocks = []
+            for scenario_label in sorted(by_scenario):
+                records = sorted(
+                    by_scenario[scenario_label],
+                    key=lambda r: (_slice_year(r) is None, _slice_year(r) or 0),
+                )
+                years = [_slice_year(r) for r in records]
+                has_years = any(year is not None for year in years)
+                # Sem ano (filtro de ano não usado), mantém o rótulo completo do
+                # recorte: passar label=None cairia no layout de linha sem nome.
+                bars = "".join(
+                    _bar_markup(
+                        record,
+                        label=(
+                            str(_slice_year(record))
+                            if _slice_year(record) is not None
+                            else _slice_label(record)
+                        ),
+                    )
+                    for record in records
+                )
+                meta = f"{len(records)} ano(s)" if has_years else f"{len(records)} recorte(s)"
+                scenario_blocks.append(
+                    '<div class="net-rank-scenario">'
+                    '<div class="net-rank-scenario-head">'
+                    f'<span class="net-rank-scenario-name">{html.escape(scenario_label)}</span>'
+                    f'<span class="net-rank-scenario-meta">{meta}</span>'
+                    '</div>'
+                    f'{bars}</div>'
+                )
+            group_html = "".join(scenario_blocks)
             rows.append(
                 f'<div class="net-rank-group{active_class}">'
                 f'<div class="net-rank-group-head">'
@@ -9666,11 +10180,17 @@ def _render_network_ranking(df: pd.DataFrame, is_dnit: bool) -> None:
         '<section class="solution-card"><div class="solution-card-head">'
         f'<h3>{title}</h3>'
         f'<p>{subtitle}</p>'
+        # A barra tem TRÊS camadas e a legenda só explicava duas — a terceira (o
+        # fundo da trilha) é a escala: a trilha cheia equivale à maior extensão da
+        # lista, então o vazio à direita mede o quanto aquele recorte é menor.
         '<div class="net-rank-legend">'
         '<span class="net-rank-legend-item"><span class="net-rank-legend-sw interv"></span>Precisa de intervenção</span>'
         '<span class="net-rank-legend-item"><span class="net-rank-legend-sw ok"></span>Trecho OK</span>'
-        '<span class="net-rank-legend-note">Clique na rodovia para abrir o diagnóstico.</span>'
+        '<span class="net-rank-legend-item"><span class="net-rank-legend-sw scale"></span>Escala · maior extensão da lista</span>'
         '</div>'
+        # Fora do .net-rank-legend: dentro dele, a dica entrava no mesmo flex dos
+        # itens de cor e era lida como se fosse uma terceira categoria da legenda.
+        '<div class="net-rank-hint">Clique na rodovia para abrir o diagnóstico.</div>'
         '</div>'
         f'<div class="net-rank-body">{"".join(rows)}</div></section>',
         unsafe_allow_html=True,
@@ -9682,8 +10202,13 @@ def _render_network_cost(df: pd.DataFrame) -> None:
     total_cost = float(grouped["custo"].sum())
     has_filtered_slices = grouped["_scenario_key"].notna().any() or grouped["_year"].notna().any()
     max_cost = max(float(grouped["custo"].max()), 1)
-    axis_max = _axis_max_10(max_cost / 1_000_000)
-    ticks = _axis_ticks_10(axis_max)
+    # Passo do eixo proporcional à grandeza: arredondar sempre para a dezena
+    # seguinte deixava a barra na metade do plot (ex.: R$ 11,7 mi num eixo até
+    # 20). Com passo de 5 em valores pequenos, a barra ocupa a altura útil.
+    max_mi = max_cost / 1_000_000
+    step = 10 if max_mi > 40 else (5 if max_mi > 8 else 1)
+    axis_max = max(step, int(-(-max_mi // step)) * step)
+    ticks = list(range(axis_max, -1, -step))
     tick_markup = "".join(
         f'<span class="economic-y-tick" style="bottom:{tick / axis_max * 100:.2f}%;">{tick:.0f}</span>'
         for tick in ticks
@@ -9789,18 +10314,25 @@ def _render_network_overview(
         if is_dnit else
         "Trechos coloridos por conceito IAP no recorte selecionado."
     )
-    st.markdown(
-        '<div class="overview-map-head">'
-        f'<div><h3>Mapa da malha filtrada</h3><p>{map_subtitle}</p></div>'
-        f'<div class="overview-map-meta">Extensão <strong>{data["total_km"]:.0f} km</strong></div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    # Cabeçalho + mapa dentro de um card, como os demais blocos da página
+    # ("Extensão das rodovias", "Custo por recorte"): antes o mapa era o único
+    # solto na página, e o total de extensão flutuava fora de qualquer container.
+    # Mesmo padrão do Diagrama linear: container com borda + marcador para o CSS.
+    map_box = st.container(border=True)
+    with map_box:
+        st.markdown('<span class="overview-map-marker"></span>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="overview-map-head">'
+            f'<div><h3>Mapa da malha filtrada</h3><p>{map_subtitle}</p></div>'
+            f'<div class="overview-map-meta">Extensão <strong>{data["total_km"]:.0f} km</strong></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
-    if is_dnit:
-        render_dnit_map(data["dnit_map"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
-    else:
-        render_overview_map(data["paragon_map"], data["total_km"], gap_px=18)
+        if is_dnit:
+            render_dnit_map(data["dnit_map"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
+        else:
+            render_overview_map(data["paragon_map"], data["total_km"], gap_px=18)
 
     st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
     _render_network_ranking(df, is_dnit)
@@ -12508,9 +13040,16 @@ def _render_trafego_page() -> None:
         """,
         unsafe_allow_html=True,
     )
-    view_mode = _compact_singleselect(
-        "Visualização", ["Volume diário", "Projeção"], key="trafego_view_mode", default="Volume diário",
-    )
+    # Mesmo tratamento dos outros filtros do sistema: label acima e largura de
+    # uma coluna (era o único controle sem label e ocupando a linha inteira,
+    # o que o fazia parecer cabeçalho em vez de filtro). A coluna de 1/2 espelha
+    # a grade dos filtros de baixo (Rodovia | Segmento de tráfego).
+    view_col, _view_spacer = st.columns([1, 1], gap="small")
+    with view_col:
+        _filter_label("Visualização")
+        view_mode = _compact_singleselect(
+            "Visualização", ["Volume diário", "Projeção"], key="trafego_view_mode", default="Volume diário",
+        )
     st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
     if view_mode == "Projeção":
         _render_trafego_projecao()
@@ -12595,9 +13134,15 @@ def _render_pavement_structure_panel(title: str, df_dir: pd.DataFrame) -> None:
         st.info("Sem dados para este sentido.")
         return
 
-    axis_max = _axis_max_10(float(df_dir[LAYER_ORDER].sum(axis=1).max()))
-    ticks = _axis_ticks_n(axis_max)
-    tick_markup = "".join(
+    # Eixo em passos redondos: _axis_ticks_n divide o topo em 5 partes iguais, o
+    # que gerava escala de 18 em 18 (0/18/36/54/72/90) — difícil de ler. Aqui o
+    # topo é arredondado para múltiplo do passo, então os ticks caem em números
+    # redondos (0/20/40/…). A unidade (cm) vai no rótulo do eixo.
+    raw_max = float(df_dir[LAYER_ORDER].sum(axis=1).max() or 0)
+    step = 20 if raw_max > 40 else 10
+    axis_max = max(step, int(-(-raw_max // step)) * step)
+    ticks = list(range(axis_max, -1, -step))
+    tick_markup = '<span class="solution-y-unit">cm</span>' + "".join(
         f'<span class="solution-y-tick" style="bottom:{t / axis_max * 100:.2f}%;">{int(t)}</span>'
         for t in ticks
     )
@@ -12773,7 +13318,9 @@ def _render_condition_composition_donut(title: str, df_comp: pd.DataFrame) -> No
     )
 
 
-def _pavimentacao_km_slider(rodovia_sel: str, km_min: float, km_max: float, instance: str) -> tuple[float, float]:
+def _pavimentacao_km_slider(
+    rodovia_sel: str, km_min: float, km_max: float, instance: str, *, show_label: bool = False
+) -> tuple[float, float]:
     """Slider de km sincronizado entre várias instâncias na mesma página (uma
     acima das roscas, uma abaixo de cada par Crescente/Decrescente): mexer em
     qualquer uma atualiza todas as outras.
@@ -12799,6 +13346,12 @@ def _pavimentacao_km_slider(rodovia_sel: str, km_min: float, km_max: float, inst
     def _sync():
         st.session_state[shared_key] = st.session_state[widget_key]
 
+    # O label nativo do slider é escondido por CSS em todo o app; a instância do
+    # topo ganha o mesmo label de filtro das outras telas (era o único controle
+    # da página sem identificação). As instâncias intercaladas entre os gráficos
+    # seguem sem label — ali o contexto é o gráfico logo acima.
+    if show_label:
+        _filter_label("Faixa de km")
     st.slider(
         "Filtrar trecho (km)", min_value=slider_min, max_value=slider_max, step=1.0,
         key=widget_key, on_change=_sync,
@@ -12848,7 +13401,7 @@ def _render_pavimentacao_page() -> None:
     km_max = max(b[1] for b in bounds) if bounds else 1.0
 
     st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
-    km_range = _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "top")
+    km_range = _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "top", show_label=True)
 
     st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
     # 3 na mesma linha: precisa de uma marcação (.pavimentacao-donut-marker)
@@ -12965,6 +13518,9 @@ def _render_geotecnia_page() -> None:
     # o rótulo exibido no gráfico continua "Xkm - km" (sem o valor final).
     km_final_efetivo = df["km_final"].fillna(df["km_inicial"] + 1.0)
     df_para_zoom = df.assign(km_final=km_final_efetivo)
+    # Label de filtro igual ao das outras telas (o label nativo do slider é
+    # escondido por CSS no app inteiro, então o controle ficava anônimo).
+    _filter_label("Faixa de km")
     _, km_range = apply_km_zoom(df_para_zoom, key=f"geotecnia_km_zoom_{rodovia_sel}", label="Filtrar trecho (km)")
     if km_range is not None:
         df = df[(km_final_efetivo >= km_range[0]) & (df["km_inicial"] <= km_range[1])]
@@ -13064,8 +13620,16 @@ def main() -> None:
                 if filtered_table is not None and not filtered_table.empty
                 else 0
             )
-            render_overview_map(filtered_segments, filtered_extension, color_by="solucao")
-            _render_solution_distribution(filtered_table)
+            # Trechos sem intervenção entram no mapa para a rodovia não aparecer
+            # partida em pedaços — e porque a legenda prometia uma cor ("OK / sem
+            # intervenção") que nunca era desenhada. Não entram no
+            # `filtered_extension`: o total continua sendo só o que tem obra.
+            render_overview_map(
+                _with_context_segments(filtered_segments, _base_segments, intervention_table),
+                filtered_extension,
+                color_by="solucao",
+            )
+            _render_solution_distribution(filtered_table, horizontal=True)
             _, paginated_table = _render_solution_table_controls(filtered_table)
             _render_solutions_table(paginated_table)
 
