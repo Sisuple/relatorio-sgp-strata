@@ -12,17 +12,20 @@ geometria real dos trechos (sem depender de tiles/imagens externas).
 from __future__ import annotations
 
 import math
+import re
 from io import BytesIO
 from typing import Any, Callable
 
 import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
+from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.graphics.shapes import Drawing, Line, PolyLine, Rect, String
 from reportlab.platypus import (
+    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -40,6 +43,9 @@ _GREY_LINE = HexColor("#9aa8b3")
 
 _PAGE_W, _PAGE_H = A4
 _CONTENT_W = _PAGE_W - 32 * mm  # margens de 16mm
+# Até esta quantidade de linhas, a tabela cabe numa página e é mantida inteira
+# (KeepTogether) em vez de quebrar deixando poucas linhas órfãs na página seguinte.
+_MAX_KEEP_ROWS = 22
 
 
 def first_available_year_budget_items(
@@ -82,14 +88,42 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _styles() -> dict[str, ParagraphStyle]:
-    """Estilos de parágrafo do relatório: título, subtítulo, H2 e texto pequeno."""
+    """Estilos de parágrafo do relatório: título, subtítulo, seção e texto pequeno.
+
+    Duas decisões tipográficas que endereçam o título "destoando do layout":
+
+    1) O estilo `Title` do reportlab vem com `alignment=TA_CENTER`. O título ficava
+       CENTRALIZADO enquanto todo o resto do relatório (subtítulo, KPIs, seções,
+       tabelas) é alinhado à esquerda. Aqui ele é forçado à esquerda.
+    2) As seções eram Heading2 12pt em quase-preto — do mesmo peso do título da
+       capa, competindo com ele. Passam a caixa alta 9pt no tom de acento, que é a
+       mesma linguagem dos rótulos dos KPIs ("NECESSIDADE TOTAL"), um degrau
+       abaixo do título. Ver também `_section`.
+    """
     base = getSampleStyleSheet()
     return {
-        "title": ParagraphStyle("wp_title", parent=base["Title"], fontSize=18, textColor=_INK, spaceAfter=2),
-        "sub": ParagraphStyle("wp_sub", parent=base["Normal"], fontSize=9.5, textColor=_MUTED, spaceAfter=2),
-        "h2": ParagraphStyle("wp_h2", parent=base["Heading2"], fontSize=12, textColor=_INK, spaceBefore=14, spaceAfter=6),
-        "small": ParagraphStyle("wp_small", parent=base["Normal"], fontSize=8, textColor=_MUTED),
+        "title": ParagraphStyle(
+            "wp_title", parent=base["Title"], fontSize=19, leading=22,
+            alignment=TA_LEFT, textColor=_INK, spaceAfter=3,
+        ),
+        "sub": ParagraphStyle("wp_sub", parent=base["Normal"], fontSize=9.5, leading=13, textColor=_MUTED, spaceAfter=2),
+        "h2": ParagraphStyle(
+            "wp_h2", parent=base["Normal"], fontName="Helvetica-Bold", fontSize=9,
+            leading=11, textColor=_ACCENT, spaceBefore=12, spaceAfter=3,
+        ),
+        "small": ParagraphStyle("wp_small", parent=base["Normal"], fontSize=8, leading=10, textColor=_MUTED),
     }
+
+
+def _section(title: str, styles: dict[str, ParagraphStyle]) -> list[Any]:
+    """Marcador de seção: título em caixa alta + fio fino, como bloco de 2 peças.
+
+    O fio separa as seções, que antes só flutuavam no branco. Devolve uma lista
+    para ser espalhada (`*_section(...)`) na story ou dentro de um KeepTogether.
+    """
+    rule = Drawing(_CONTENT_W, 3)
+    rule.add(Rect(0, 1, _CONTENT_W, 0.5, fillColor=_LINE, strokeColor=None))
+    return [Paragraph(title.upper(), styles["h2"]), rule, Spacer(1, 5)]
 
 
 def _kpi_table(kpis: list[tuple[str, str]]) -> Table:
@@ -136,13 +170,12 @@ def _map_drawing(
     ``attended_ids`` é o conjunto de ``segment_id`` atendidos; ``class_colors``
     mapeia classe IAP -> cor hex.
     """
-    d = Drawing(width, height)
-    d.add(Rect(0, 0, width, height, fillColor=HexColor("#fbfdfe"), strokeColor=_LINE, strokeWidth=0.8))
-
     # Junta todos os pontos (lat, lon) de todos os caminhos para achar a bbox.
     coords = [(la, lo) for seg in segments for path in seg.get("paths", []) for (la, lo) in path]
     if not coords:
-        d.add(String(width / 2, height / 2, "Sem geometria para o mapa", fontSize=9, textAnchor="middle", fillColor=_MUTED))
+        d = Drawing(width, 60)
+        d.add(Rect(0, 0, width, 60, fillColor=HexColor("#fbfdfe"), strokeColor=_LINE, strokeWidth=0.8))
+        d.add(String(width / 2, 27, "Sem geometria para o mapa", fontSize=9, textAnchor="middle", fillColor=_MUTED))
         return d
 
     lats = [c[0] for c in coords]
@@ -159,7 +192,20 @@ def _map_drawing(
     # Escala única (mantém proporção) que faz a bbox caber na área útil c/ padding.
     scale = min((width - 2 * pad) / dlon, (height - 2 * pad) / dlat)
     map_w, map_h = dlon * scale, dlat * scale
-    ox, oy = (width - map_w) / 2, (height - map_h) / 2  # offsets p/ centralizar
+
+    # O QUADRO acompanha o traçado, em vez de ser sempre 504x250: um trecho
+    # estreito (quase vertical, como a BR-174) desenhava uma linha fininha no meio
+    # de uma moldura larga e vazia — a maior fonte de "espaço jogado" do relatório.
+    # A largura encolhe até o traçado + padding; a altura nunca passa do teto
+    # recebido, e há um piso para o quadro não virar uma tira.
+    frame_w = min(width, max(map_w + 2 * pad, 200.0))
+    frame_h = min(height, max(map_h + 2 * pad, 120.0))
+    d = Drawing(frame_w, frame_h)
+    # Drawing nasce com hAlign='LEFT': sem isto, um quadro estreito (traçado quase
+    # vertical) ficaria encostado na margem esquerda da página.
+    d.hAlign = "CENTER"
+    d.add(Rect(0, 0, frame_w, frame_h, fillColor=HexColor("#fbfdfe"), strokeColor=_LINE, strokeWidth=0.8))
+    ox, oy = (frame_w - map_w) / 2, (frame_h - map_h) / 2  # offsets p/ centralizar
 
     def to_xy(la: float, lo: float) -> tuple[float, float]:
         """Projeta (lat, lon) para coordenadas de tela (x, y) do Drawing."""
@@ -196,6 +242,8 @@ def _legend_drawing(items: list[tuple[str, str]], width: float = _CONTENT_W) -> 
     return d
 
 
+
+
 def _hbar_chart(
     data: list[tuple[str, float, str]],
     value_fmt: Callable[[float], str],
@@ -215,21 +263,73 @@ def _hbar_chart(
         return d
 
     # Barras proporcionais ao maior valor; larguras fixas p/ rótulo e valor.
+    # Rótulos alinhados à ESQUERDA (eram alinhados à direita numa coluna de 150pt,
+    # o que deixava ~110pt de vazio antes de rótulos curtos como "Reforço") e
+    # coluna do valor mais justa — sobra tudo para a trilha da barra.
     max_val = max((v for _, v, _ in data), default=1.0) or 1.0
-    label_w = 150.0
-    val_w = 110.0
+    label_w = 132.0
+    val_w = 74.0
     track_x = label_w
     track_w = max(width - label_w - val_w, 40)
 
     y = height - 18
     for label, value, color in data:
-        d.add(String(label_w - 8, y + 3, _truncate(label, 30), fontSize=8, textAnchor="end", fillColor=_INK))
+        d.add(String(0, y + 3, _truncate(label, 28), fontSize=8, fillColor=_INK))
         d.add(Rect(track_x, y, track_w, 12, fillColor=_PANEL, strokeColor=None))  # trilha de fundo
         # Barra preenchida: mínimo de 1px para valores ~0 ainda ficarem visíveis.
         d.add(Rect(track_x, y, max(track_w * float(value) / max_val, 1.0), 12, fillColor=HexColor(color), strokeColor=None))
         d.add(String(track_x + track_w + 8, y + 3, value_fmt(value), fontSize=8, fillColor=_MUTED))
         y -= row_h  # desce uma linha
     return d
+
+
+def _short_scenario(scenario_label: Any, road: str) -> str:
+    """Encurta o nome do cenário para o cabeçalho do PDF.
+
+    O nome vem cru do banco — "Rodovia: BR-174 - Análise dos Segmentos Homogêneos:
+    BR-174 (SH) - Pista: CRESCENTE - Método de Análise: Paragon" — o que repetia a
+    rodovia 3x, estourava para duas linhas e enterrava o que interessa. Guarda só
+    o que identifica o cenário: segmentação, sentido e gatilho.
+    """
+    text = str(scenario_label or "").strip()
+    if not text:
+        return ""
+    low = text.lower()
+    parts: list[str] = []
+
+    segmentacao = re.search(r"\((SH|Fixa|\d+\s*km)\)", text, re.I)
+    if segmentacao:
+        parts.append(segmentacao.group(1).strip())
+    elif "segmentos homog" in low:
+        parts.append("SH")
+    elif re.search(r"\bfixa\b", low):
+        parts.append("Fixa")
+
+    trecho = re.search(r"\b[A-Z]{2,3}-?\d+[_-](?:trecho\s+)?([IVXLC]+|\d+)\b", text, re.I)
+    if trecho:
+        parts.append(f"trecho {trecho.group(1).upper()}")
+
+    if "decrescente" in low:
+        parts.append("DECRESCENTE")
+    elif "crescente" in low:
+        parts.append("CRESCENTE")
+    elif re.search(r"\btodos\b", low):
+        parts.append("TODOS")
+
+    variante = re.search(r"\b(IRI)\s*(\d+(?:[.,]\d+)?)", text, re.I)
+    if variante:
+        parts.append(f"{variante.group(1).upper()} {variante.group(2)}")
+
+    gatilho = re.search(r"(GATILHO\s+[A-Z0-9._/-]+)", text, re.I)
+    if gatilho:
+        parts.append(gatilho.group(1).upper())
+
+    if parts:
+        return " · ".join(dict.fromkeys(parts))
+    # Sem nenhum token reconhecido: tira ao menos os prefixos e a rodovia repetida.
+    limpo = re.sub(r"^Rodovia:\s*", "", text, flags=re.I)
+    limpo = re.sub(rf"\b{re.escape(str(road))}\b\s*-?\s*", "", limpo).strip(" -·")
+    return _truncate(limpo or text, 70)
 
 
 def _direction_label(sentido: Any) -> str:
@@ -245,22 +345,29 @@ def _direction_label(sentido: Any) -> str:
 
 
 def _snv_table(attended: pd.DataFrame) -> Table:
-    """Tabela dos SNV atendidos: ranking, SRE, extensão, IPI e custo."""
-    header = ["#", "SRE", "Sentido", "Extensão", "IPI", "Custo"]
+    """Tabela dos trechos atendidos: ranking, SRE, km inicial/final, extensão, IPI e custo.
+
+    O km inicial/final é obrigatório para identificar a linha: cada linha é UM
+    segmento, e o mesmo SRE aparece várias vezes (a tabela é por segmento, não por
+    SRE). Sem o km, duas linhas do mesmo SRE ficavam indistinguíveis.
+    """
+    header = ["#", "SRE", "Sentido", "Km Inicial", "Km Final", "Extensão", "IPI", "Custo"]
     rows: list[list[Any]] = [header]
     for i, r in enumerate(attended.to_dict("records"), start=1):
         ipi = r.get("IPI", r.get("IPT", 0))
         rows.append(
             [
                 str(i),
-                _truncate(str(r.get("SNV", "")), 16),
-                _truncate(_direction_label(r.get("Sentido", "")), 24),
+                _truncate(str(r.get("SNV", "")), 14),
+                _truncate(_direction_label(r.get("Sentido", "")), 18),
+                f"{float(r.get('Km Inicial', 0) or 0):.2f}",
+                f"{float(r.get('Km Final', 0) or 0):.2f}",
                 _km(r.get("Extensão", 0)),
                 f"{float(ipi or 0):.2f}",
                 _money(r.get("Custo econômico", 0)),
             ]
         )
-    col_w = [22, 92, 132, 62, 48, None]
+    col_w = [22, 78, 96, 48, 48, 54, 42, None]
     used = sum(w for w in col_w if w)
     col_w[-1] = _CONTENT_W - used
     table = Table(rows, colWidths=col_w, repeatRows=1)
@@ -280,6 +387,7 @@ def _snv_table(attended: pd.DataFrame) -> Table:
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
             ]
         )
     )
@@ -302,7 +410,11 @@ def _segments_detail_table(detail: pd.DataFrame) -> Table:
                 _money(r.get("Custo", 0)),
             ]
         )
-    col_w = [72, 112, 48, 48, 52, None, 62]
+    # Mesmas larguras da tabela de trechos atendidos nas colunas equivalentes
+    # (SRE, Sentido, km, extensão), para as duas tabelas ficarem alinhadas em vez
+    # de cada uma ter a sua medida. A folga vai para "Intervenção a executar",
+    # que é a única coluna de texto livre.
+    col_w = [78, 96, 48, 48, 54, None, 74]
     col_w[5] = _CONTENT_W - sum(w for w in col_w if w)
     table = Table(rows, colWidths=col_w, repeatRows=1)
     table.setStyle(
@@ -321,6 +433,9 @@ def _segments_detail_table(detail: pd.DataFrame) -> Table:
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                # Sem RIGHTPADDING, o valor de custo (alinhado à direita) encostava
+                # na borda e colava no texto da coluna anterior.
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
             ]
         )
     )
@@ -334,7 +449,7 @@ def _page_footer(canvas, doc) -> None:
     canvas.line(16 * mm, 12 * mm, _PAGE_W - 16 * mm, 12 * mm)
     canvas.setFont("Helvetica", 7.5)
     canvas.setFillColor(_MUTED)
-    canvas.drawString(16 * mm, 8 * mm, "DNIT · Painel de Pavimentos Paragon — Plano de Trabalho")
+    canvas.drawString(16 * mm, 8 * mm, "SIGMA · Plano de trabalho")
     canvas.drawRightString(_PAGE_W - 16 * mm, 8 * mm, f"Página {doc.page}")
     canvas.restoreState()
 
@@ -390,17 +505,32 @@ def build_work_plan_pdf(
     )
 
     story: list[Any] = []
+    # Cabeçalho: rodovia + cenário curto na 1ª linha; premissas na 2ª. O orçamento
+    # anual saiu daqui porque já é um dos KPIs logo abaixo — repetido em duas
+    # linhas seguidas, era ruído.
     story.append(Paragraph("Plano de Trabalho", styles["title"]))
-    story.append(Paragraph(f"{road} · Cenário {scenario_label} · gerado em {generated_at}", styles["sub"]))
     horizon_label = "1 ano" if int(horizon) == 1 else f"{int(horizon)} anos"
+    cenario_curto = _short_scenario(scenario_label, road)
     story.append(
         Paragraph(
-            f"Orçamento anual: <b>{_money(annual_budget_mi * 1_000_000)}</b> &nbsp;·&nbsp; "
-            f"Horizonte: <b>{horizon_label}</b> &nbsp;·&nbsp; Trechos: <b>{top_label}</b>",
+            f"<b>{road}</b>" + (f" &nbsp;·&nbsp; {cenario_curto}" if cenario_curto else ""),
             styles["sub"],
         )
     )
-    story.append(Spacer(1, 10))
+    story.append(
+        Paragraph(
+            f"Horizonte: <b>{horizon_label}</b> &nbsp;·&nbsp; Trechos: <b>{top_label}</b>"
+            f" &nbsp;·&nbsp; gerado em {generated_at}",
+            styles["sub"],
+        )
+    )
+    # Régua de acento fechando o cabeçalho: separa a identificação do conteúdo
+    # sem custar altura (2pt) nem depender de mais um título.
+    regua = Drawing(_CONTENT_W, 3)
+    regua.add(Rect(0, 1, _CONTENT_W, 1.6, fillColor=_ACCENT, strokeColor=None))
+    story.append(Spacer(1, 6))
+    story.append(regua)
+    story.append(Spacer(1, 8))
 
     attended_count = int(len(attended_snv_table)) if attended_snv_table is not None else 0
     story.append(
@@ -416,8 +546,6 @@ def build_work_plan_pdf(
     )
 
     # --- Mapa dos trechos atendidos ---
-    story.append(Paragraph("Mapa dos trechos atendidos", styles["h2"]))
-    story.append(_map_drawing(segments, attended_ids, class_colors))
     classes_presentes = list(
         dict.fromkeys(
             s.get("classe_iap")
@@ -427,8 +555,16 @@ def build_work_plan_pdf(
     )
     legenda = [(c, class_colors.get(c, "#fff200")) for c in classes_presentes]
     legenda.append(("Não atendido", "#c2ccd3"))
-    story.append(Spacer(1, 6))
-    story.append(_legend_drawing(legenda))
+    # KeepTogether: título, mapa e legenda formam um bloco só — sem isso a legenda
+    # podia cair sozinha na página seguinte, longe do mapa que ela explica.
+    story.append(
+        KeepTogether([
+            *_section("Mapa dos trechos atendidos", styles),
+            _map_drawing(segments, attended_ids, class_colors),
+            Spacer(1, 6),
+            _legend_drawing(legenda),
+        ])
+    )
 
     # --- Gráficos de custo (a partir do orçamento detalhado) ---
     if budget_items is not None and not budget_items.empty:
@@ -437,31 +573,51 @@ def build_work_plan_pdf(
         )
         sol_data = [(str(r["Solução"]), float(r["Custo"]), solution_color(str(r["Solução"]))) for r in by_sol.to_dict("records")]
         if sol_data:
-            story.append(Paragraph("Custos por solução", styles["h2"]))
-            story.append(_hbar_chart(sol_data, _money))
+            story.append(
+                KeepTogether([
+                    *_section("Custos por solução", styles),
+                    _hbar_chart(sol_data, _money),
+                ])
+            )
 
         by_year = budget_items.groupby("Ano", as_index=False)["Custo"].sum().sort_values("Ano")
         year_data = [(str(int(r["Ano"])), float(r["Custo"]), "#0e7c8a") for r in by_year.to_dict("records")]
         if year_data:
-            story.append(Paragraph("Custo por ano", styles["h2"]))
-            story.append(_hbar_chart(year_data, _money))
+            story.append(
+                KeepTogether([
+                    *_section("Custo por ano", styles),
+                    _hbar_chart(year_data, _money),
+                ])
+            )
 
     # --- Tabela dos trechos atendidos ---
+    # Tabelas curtas viajam inteiras para a página seguinte em vez de deixar duas
+    # linhas órfãs com o cabeçalho repetido (era o caso do print: 3 linhas na
+    # página 1 e 2 na página 2). Acima de _MAX_KEEP_ROWS a tabela é longa demais
+    # para caber numa página só e aí a divisão natural do reportlab é o certo.
     if attended_snv_table is not None and not attended_snv_table.empty:
-        story.append(Paragraph("Trechos atendidos (ordem de prioridade)", styles["h2"]))
-        story.append(_snv_table(attended_snv_table))
+        bloco = [
+            *_section("Trechos atendidos (ordem de prioridade)", styles),
+            _snv_table(attended_snv_table),
+        ]
+        story.extend(
+            [KeepTogether(bloco)] if len(attended_snv_table) <= _MAX_KEEP_ROWS else bloco
+        )
 
     # --- Detalhamento por segmento (ordem de serviço) ---
     if segments_detail is not None and not segments_detail.empty:
-        story.append(Paragraph("Detalhamento por segmento — ordem de serviço", styles["h2"]))
-        story.append(
+        bloco = [
+            *_section("Detalhamento por segmento — ordem de serviço", styles),
             Paragraph(
                 "Trechos que precisam de intervenção, com km inicial/final e a solução a executar.",
                 styles["small"],
-            )
+            ),
+            Spacer(1, 4),
+            _segments_detail_table(segments_detail),
+        ]
+        story.extend(
+            [KeepTogether(bloco)] if len(segments_detail) <= _MAX_KEEP_ROWS else bloco
         )
-        story.append(Spacer(1, 4))
-        story.append(_segments_detail_table(segments_detail))
 
     doc.build(story, onFirstPage=_page_footer, onLaterPages=_page_footer)
     return buffer.getvalue()

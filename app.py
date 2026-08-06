@@ -191,55 +191,46 @@ def inject_css() -> None:
                linha de leitura das tabelas fique longa demais. */
             .block-container { max-width: 1400px; padding: 1.1rem 1.55rem 3rem; }
 
-            .sidebar-shell { min-height: 100vh; background: var(--sidebar); }
-            /* Faixa da marca: ocupa o espaço que era o vão do topo, com o SIGMA
-               centrado nele (vertical e horizontal) e respiro em volta. O padding
-               lateral reserva o canto do botão de fechar, que fica sobreposto. */
-            .brand-row { height: 104px; display: flex; align-items: center; justify-content: center; padding: 0 34px; border-bottom: 1px solid rgba(148,163,184,.12); }
-            /* Cyan fixo (não var(--text)) nos dois temas — é o nome do sistema
-               (SIGMA), não texto comum; usa a mesma cor cyan de marca do
-               resto do painel (itens ativos do menu etc.). Arial Black (mais
-               "quadrada"/geométrica) no lugar da fonte padrão arredondada do
-               painel, pra aproximar do logo de referência. */
-            .brand-title {
-                font-family: "Arial Black", "Segoe UI", sans-serif;
-                font-size: 27px; font-weight: 900; color: var(--cyan); letter-spacing: .01em;
-                display: inline-flex; align-items: center; gap: 5px; line-height: 1;
-            }
-            /* Tracinhos flanqueando o nome, igual ao logo de referência: 2
-               traços sequenciais (lado a lado, mesma altura) embaixo à
-               esquerda do nome, e 2 traços sequenciais em cima à direita. */
-            .brand-title-tick { align-self: stretch; display: flex; gap: 4px; }
-            .brand-title-tick-l { align-items: flex-end; }
-            .brand-title-tick-r { align-items: flex-start; }
-            /* Proporcionais ao nome (27px): traços muito finos ficariam
-               desproporcionais depois do aumento da fonte. */
-            .brand-title-tick i {
-                display: block; width: 11px; height: 6px; background: var(--cyan);
-                transform: skewX(-18deg); border-radius: 1px;
-            }
+            /* Coluna flex para o rodapé poder ir para o fim (margin-top: auto). */
+            .sidebar-shell { min-height: 100vh; background: var(--sidebar); display: flex; flex-direction: column; }
+            /* Sem faixa de marca: o painel roda embutido no SGP, que já mostra a
+               logo SIGMA no cabeçalho. O padding-top é pequeno de propósito — o
+               botão "X" de recolher fica absoluto no canto DIREITO, e o primeiro
+               rótulo de grupo é curto e mora à esquerda, então dividem a linha sem
+               colidir (reservar 34px só para o X deixava um vão vazio no topo). */
             .side-menu { padding: 14px 8px 0; }
             .side-group-label { margin: 14px 10px 6px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,.12); color: #6b7f8d; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
             .side-group-label:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+            /* Grupo da página aberta: indica em que seção do menu você está. */
+            .side-group-label.is-active { color: #4fb6cc; }
             /* !important nas cores dos itens: o markup do menu é uma lista de
                <a>, e o CSS base do Streamlit estiliza links dentro da sidebar
                com uma regra mais específica que a nossa classe simples,
                deixando o texto azul-padrão de link em vez da cor definida
                aqui. !important garante que a nossa cor sempre vença. */
-            .side-item { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; min-height: 48px; padding: 7px 10px; margin-bottom: 8px; border-radius: 8px; color: #e7edf2 !important; text-decoration: none; }
-            .side-item.active { background: #063f4c; color: #00c2e8 !important; }
+            .side-item { position: relative; display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; min-height: 42px; padding: 7px 10px; margin-bottom: 4px; border-radius: 8px; color: #e7edf2 !important; text-decoration: none; transition: background .14s ease, color .14s ease; }
+            /* Hover: não existia nenhum — passar o mouse num item de navegação não
+               dava retorno visual, o que fazia o item não parecer clicável. */
+            .side-item:hover { background: rgba(0,194,232,.10); color: #ffffff !important; }
+            /* Ativo: fundo mais suave que antes + barra de acento à esquerda, que é
+               o que marca a posição sem precisar de um bloco de cor forte. */
+            .side-item.active { background: rgba(0,194,232,.13); color: #00c2e8 !important; }
+            .side-item.active:before {
+                content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
+                width: 3px; border-radius: 0 3px 3px 0; background: var(--cyan);
+            }
             .side-icon { display: grid; place-items: center; }
             .menu-svg { width: 16px; height: 16px; }
             .side-label { font-size: 13px; line-height: 1.1; color: inherit !important; font-weight: 800; }
             .side-description { font-size: 10px; line-height: 1.2; color: #83929e !important; margin-top: 3px; }
             .side-item.active .side-description { color: #75b8c5 !important; }
 
-            /* Rodapé da sidebar: card de destaque do IAGON (fora da lista de
-               navegação Gerencial/Técnica) + toggle de tema. Fica logo abaixo
-               do último item do menu (fluxo normal) em vez de fixado no fim
-               da tela — assim não força scroll para ver os dois. */
+            /* Rodapé da sidebar: card de destaque do IAGON (quando ativo) + toggle
+               de tema. `margin-top: auto` o ancora no FIM da coluna — antes ficava
+               logo após o último item do menu, deixando o divisor e o toggle
+               soltos no meio da barra com um grande vazio embaixo. */
             .side-footer {
-                margin-top: 14px; padding: 14px 8px 18px;
+                margin-top: auto; padding: 14px 8px 18px;
                 border-top: 1px solid rgba(148,163,184,.12);
                 display: flex; flex-direction: column; gap: 10px;
             }
@@ -253,16 +244,22 @@ def inject_css() -> None:
             .side-cta-label { font-size: 13px; line-height: 1.1; color: #001018 !important; font-weight: 900; }
             .side-cta-description { font-size: 10px; line-height: 1.2; color: #0a2b33 !important; margin-top: 3px; }
 
+            /* Toggle de tema como PÍLULA com ícone: era um link de 10px,
+               transparente e centralizado, que não parecia clicável. O ícone
+               (sol/lua) indica o destino e reforça que é uma ação. */
             .side-theme-toggle {
-                display: block; text-align: center; min-height: 30px; line-height: 30px;
-                border: 1px solid transparent; border-radius: 999px;
-                background: transparent; color: #5f7280 !important;
-                font-size: 10px; font-weight: 600; text-decoration: none;
+                display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+                align-self: center; min-height: 30px; padding: 0 14px;
+                border: 1px solid #244257; border-radius: 999px;
+                background: rgba(11,26,35,.72); color: #9fb0bd !important;
+                font-size: 11px; font-weight: 800; text-decoration: none;
+                transition: background .14s ease, border-color .14s ease, color .14s ease;
             }
+            .side-theme-icon { display: grid; place-items: center; }
             .side-theme-toggle:hover {
                 color: #f4f7fb !important;
-                border-color: #244257;
-                background: #0b1a23;
+                border-color: #2d6f9f;
+                background: #123b5d;
             }
 
             [data-testid="collapsedControl"] {
@@ -548,6 +545,18 @@ def inject_css() -> None:
             .iap-body { min-height: 320px; display: grid; grid-template-columns: 1fr 260px 1fr; gap: 28px; align-items: center; padding-top: 10px; }
             .iap-donut-wrap { grid-column: 2; align-self: center; display: grid; place-items: center; overflow: visible; }
             .iap-donut { width: 190px; height: 190px; border-radius: 50%; position: relative; overflow: visible; box-shadow: var(--shadow-card); }
+            /* Rótulo de % logo fora do anel, na posição angular da fatia (left/top
+               calculados em _donut_percent_labels). A ancoragem acompanha o lado:
+               à direita o texto cresce para fora, à esquerda para dentro, e no
+               topo/base fica centrado — assim ele nunca invade o anel. */
+            .iap-slice-label {
+                position: absolute; z-index: 4; color: #cfdae3;
+                font-size: 11px; line-height: 1; font-weight: 850;
+                white-space: nowrap; pointer-events: none;
+            }
+            .iap-slice-label.is-right { transform: translate(3px, -50%); }
+            .iap-slice-label.is-left { transform: translate(calc(-100% - 3px), -50%); }
+            .iap-slice-label.is-center { transform: translate(-50%, -50%); }
             .iap-donut:after { content: ""; position: absolute; inset: 36px; background: #0b1d28; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05); }
             .iap-donut-center { position: absolute; inset: 48px; z-index: 2; display: grid; place-items: center; align-content: center; color: var(--text); }
             .iap-donut-center strong { display: block; font-size: 25px; line-height: 1; font-weight: 850; }
@@ -999,7 +1008,12 @@ def inject_css() -> None:
                 color: #eef8ff !important;
             }
             div[data-testid="stNumberInput"] button svg { fill: currentColor !important; }
-            div[data-testid="stDownloadButton"] button {
+            /* stButton não tinha NENHUMA regra: ficava com o cromo claro default
+               do Streamlit (fundo branco) enquanto o texto herdava a cor clara do
+               tema escuro — branco no branco, ilegível (ex.: "Gerar plano de
+               trabalho (PDF)"). Mesmo tratamento do botão de download. */
+            div[data-testid="stDownloadButton"] button,
+            div[data-testid="stButton"] button {
                 min-height: 40px;
                 border-radius: 10px;
                 border: 1px solid #244257;
@@ -1007,6 +1021,17 @@ def inject_css() -> None:
                 color: var(--text);
                 font-size: 12px;
                 font-weight: 800;
+            }
+            div[data-testid="stDownloadButton"] button:hover,
+            div[data-testid="stButton"] button:hover {
+                border-color: #2d6f9f;
+                background: #123b5d;
+            }
+            div[data-testid="stButton"] button p,
+            div[data-testid="stButton"] button span,
+            div[data-testid="stDownloadButton"] button p,
+            div[data-testid="stDownloadButton"] button span {
+                color: var(--text) !important;
             }
             .economic-panel { margin-top: 16px; border-radius: var(--radius-md); border: 0; background: #0b1d28; padding: 20px; box-shadow: var(--shadow-card); }
             .comparison-x { height: 100%; min-height: 88px; display: grid; place-items: center; color: #00c2e8; font-size: 28px; line-height: 1; font-weight: 900; opacity: .82; padding-top: 18px; }
@@ -1113,6 +1138,28 @@ def inject_css() -> None:
             .segment-timeline-titlebar { display: flex; align-items: center; gap: 10px; padding: 4px 0 10px; }
             .segment-timeline-titlebar h3 { margin: 0; color: var(--text); font-size: 15px; font-weight: 850; }
             .segment-control-caption { color: #8f9eaa; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 900; text-align: right; margin: 4px 0 2px; }
+            /* Barra de ferramentas do bloco de gráficos da Pavimentação (título +
+               escala do eixo Y). É um card com o MESMO fundo dos cards de gráfico,
+               cantos arredondados só no topo e margem inferior negativa que anula
+               o `margin-top: 14px` do primeiro .chart-card — os dois se encostam e
+               leem como um bloco único. Como cabeçalho solto sobre o fundo da
+               página, não parecia pertencer aos gráficos. */
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.pav-charts-head-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .pav-charts-head-marker)) {
+                border: 0; border-radius: var(--radius-md) var(--radius-md) 0 0;
+                background: #0b1d28; box-shadow: none;
+                padding: 14px 20px 10px; margin-bottom: -14px;
+            }
+            .pav-charts-head-marker { display: none; }
+            .pav-charts-title { color: var(--text); font-size: 15px; font-weight: 850; margin: 2px 0 0; }
+            .pav-charts-sub { color: var(--muted); font-size: 12px; line-height: 1.45; margin: 2px 0 0; }
+            /* O card do 1º gráfico encosta na barra: cantos retos no topo e sem a
+               margem que criava o vão. A classe é aplicada pelo próprio render
+               (parâmetro `attached`), em vez de depender da estrutura de DOM que o
+               Streamlit gera entre um elemento e o seguinte. */
+            .chart-card.chart-card-attached {
+                border-radius: 0 0 var(--radius-md) var(--radius-md);
+                margin-top: 0;
+            }
             .segment-control-caption + div[data-testid="stRadio"] [role="radiogroup"] { justify-content: flex-end; gap: 6px; }
             .segment-control-caption + div[data-testid="stRadio"] label { border: 1px solid rgba(34,211,238,.18); border-radius: 999px; background: rgba(8,26,36,.58); padding: 4px 8px; }
             .segment-control-caption + div[data-testid="stRadio"] label p { font-size: 10px !important; line-height: 1 !important; font-weight: 900 !important; color: #d8eef5 !important; text-transform: uppercase; }
@@ -1292,6 +1339,9 @@ def inject_css() -> None:
                 .iap-card .iap-donut-center span {
                     color: #5f7280 !important;
                 }
+                .iap-slice-label {
+                    color: #46596a !important;
+                }
                 .solution-distribution .solution-bar-value {
                     color: #13232e !important;
                     text-shadow: none !important;
@@ -1403,6 +1453,11 @@ def inject_css() -> None:
 
                 div[data-baseweb="select"] > div,
                 div[data-testid="stPopover"] button,
+                /* O botão "Exportar Excel" tinha fundo fixo #0b1a23 e texto em
+                   var(--text) — como o tema claro redefine --text para escuro, o
+                   resultado era texto escuro sobre fundo escuro, ilegível. */
+                div[data-testid="stDownloadButton"] button,
+                div[data-testid="stButton"] button,
                 div[data-testid="stTextInput"] input,
                 .filter-placeholder,
                 .status-pill,
@@ -1411,6 +1466,17 @@ def inject_css() -> None:
                 .economic-note {
                     background: #ffffff !important;
                     border-color: #bfd2dc !important;
+                    color: var(--text) !important;
+                }
+                div[data-testid="stDownloadButton"] button:hover,
+                div[data-testid="stButton"] button:hover {
+                    background: #f3f8fb !important;
+                    border-color: #8fb4c6 !important;
+                }
+                div[data-testid="stDownloadButton"] button p,
+                div[data-testid="stDownloadButton"] button span,
+                div[data-testid="stButton"] button p,
+                div[data-testid="stButton"] button span {
                     color: var(--text) !important;
                 }
                 div[data-testid="stTextInput"] input::placeholder {
@@ -1503,6 +1569,14 @@ def inject_css() -> None:
                     border-color: transparent !important;
                     box-shadow: 0 1px 2px rgba(18,43,58,.08) !important;
                 }
+                /* Barra de ferramentas dos gráficos de condição: mesmo branco dos
+                   cards, para continuar encostada e sem sombra própria (a sombra
+                   viria como uma linha entre a barra e o card). */
+                div[data-testid="stVerticalBlockBorderWrapper"]:has(.pav-charts-head-marker):not(:has(div[data-testid="stVerticalBlockBorderWrapper"] .pav-charts-head-marker)) {
+                    background: #ffffff !important;
+                    border-color: transparent !important;
+                    box-shadow: none !important;
+                }
                 .metric-card {
                     background: #ffffff !important;
                 }
@@ -1553,6 +1627,10 @@ def inject_css() -> None:
                 .side-item {
                     color: #22323e !important;
                 }
+                .side-item:hover {
+                    background: #eef3f7 !important;
+                    color: #14304f !important;
+                }
                 .side-item.active {
                     background: #e7ecf3 !important;
                     color: #14304f !important;
@@ -1562,14 +1640,6 @@ def inject_css() -> None:
                 }
                 .side-item.active .side-description {
                     color: #3a5a78 !important;
-                }
-                /* Azul-marinho escuro (não cyan) no tema claro — cyan sobre
-                   fundo claro fica com pouco contraste/aparência "lavada". */
-                .brand-title, .brand-title-tick i {
-                    color: #14304f !important;
-                }
-                .brand-title-tick i {
-                    background: #14304f !important;
                 }
                 .side-group-label {
                     color: #7f909c !important;
@@ -1590,14 +1660,16 @@ def inject_css() -> None:
                 .side-cta-description {
                     color: #0a2b33 !important;
                 }
-                /* Segundo ponto de accent: um traço cyan no item de menu
-                   ativo, pra não ficar 100% monocromático marinho. */
-                .side-item.active {
-                    border-left: 3px solid #00c2e8 !important;
-                    padding-left: 7px !important;
+                /* O traço cyan do item ativo agora vem do `:before` da regra base
+                   (--cyan não é redefinido no tema claro), então o border-left que
+                   existia aqui saiu: os dois juntos davam accent duplicado. */
+                .side-group-label.is-active {
+                    color: #007f9b !important;
                 }
                 .side-theme-toggle {
-                    color: #7f909c !important;
+                    color: #5f7280 !important;
+                    border-color: #bfd2dc !important;
+                    background: #ffffff !important;
                 }
                 .side-theme-toggle:hover {
                     color: #007f9b !important;
@@ -3250,17 +3322,19 @@ def _render_solution_filter_panel(table_df):
 
 
 def _solution_table_to_excel(table_df) -> bytes:
-    """Serializa a matriz de priorização Paragon num .xlsx estilizado (bytes)."""
-    export_columns = [
-        "SNV",
-        "Km Inicial",
-        "Km Final",
-        "Extensão",
-        "IAP",
-        "IRI",
-        "IGG",
-        "Solução recomendada",
-    ]
+    """Serializa a matriz de priorização Paragon num .xlsx estilizado (bytes).
+
+    Sai na MESMA ordem da tabela da tela (por IPI, mais crítico primeiro, quando a
+    coluna existe) e com as mesmas colunas + IPI. O "Sentido" entra quando há mais
+    de um cenário selecionado, senão a planilha misturaria trechos sem dizer de qual.
+    """
+    export_columns = ["SNV"]
+    if "Sentido" in table_df.columns:
+        export_columns.append("Sentido")
+    export_columns += ["Km Inicial", "Km Final", "Extensão"]
+    if "IPI" in table_df.columns:
+        export_columns.append("IPI")
+    export_columns += ["IAP", "IRI", "IGG", "Solução recomendada"]
     output = BytesIO()
     export_df = table_df[export_columns].copy()
     with st.spinner("Preparando Excel..."):
@@ -3276,7 +3350,10 @@ def _solution_table_to_excel(table_df) -> bytes:
                 worksheet.write(0, col_index, column, header_format)
                 width = max(12, min(42, int(export_df[column].astype(str).str.len().max() or 12) + 2))
                 worksheet.set_column(col_index, col_index, width)
-            for column in ["Km Inicial", "Km Final", "Extensão", "IAP", "IRI", "IGG"]:
+            # Só as colunas que existem nesta exportação (IPI é opcional).
+            for column in ["Km Inicial", "Km Final", "Extensão", "IPI", "IAP", "IRI", "IGG"]:
+                if column not in export_df.columns:
+                    continue
                 col_index = export_df.columns.get_loc(column)
                 worksheet.set_column(col_index, col_index, 12, number_format)
     return output.getvalue()
@@ -3673,13 +3750,18 @@ def _render_solutions_table(table_df) -> None:
         return
 
     has_sentido = "Sentido" in table_df.columns
-    # Ordena por sentido e, dentro de cada sentido, por km crescente (início, fim).
-    table_df = table_df.assign(
-        _ki=table_df["Km Inicial"].astype(float),
-        _kf=table_df["Km Final"].astype(float),
-    ).sort_values(
-        (["Sentido"] if has_sentido else []) + ["_ki", "_kf"], kind="stable"
-    )
+    # Com IPI, a ordem é a da priorização (mais crítico primeiro), já definida em
+    # _attach_ipi — reordenar por km aqui desfaria isso e a paginação mostraria a
+    # 1ª página fora de ordem. Sem IPI, mantém o comportamento antigo: por sentido
+    # e, dentro dele, km crescente.
+    has_ipi = "IPI" in table_df.columns
+    if not has_ipi:
+        table_df = table_df.assign(
+            _ki=table_df["Km Inicial"].astype(float),
+            _kf=table_df["Km Final"].astype(float),
+        ).sort_values(
+            (["Sentido"] if has_sentido else []) + ["_ki", "_kf"], kind="stable"
+        )
     rows_markup = []
     for index, row in enumerate(table_df.to_dict("records"), start=1):
         iap_color = html.escape(str(row.get("_cor_iap", "#fff200")))
@@ -3687,6 +3769,13 @@ def _render_solutions_table(table_df) -> None:
         sentido_td = (
             f"<td>{html.escape(str(row.get('Sentido', '')))}</td>" if has_sentido else ""
         )
+        # Trechos fora do cálculo do IPI (classe Excelente ou sem ICDS/ICDP/VMD
+        # válidos) aparecem com "—" em vez de 0, que seria lido como IPI baixo.
+        ipi_value = row.get("IPI")
+        ipi_td = ""
+        if has_ipi:
+            ipi_txt = "—" if ipi_value is None or pd.isna(ipi_value) else f"{float(ipi_value):.1f}"
+            ipi_td = f"<td class='ipi-cell'>{ipi_txt}</td>"
         rows_markup.append(
             "<tr>"
             f"<td class='muted'>{index}</td>"
@@ -3695,6 +3784,7 @@ def _render_solutions_table(table_df) -> None:
             f"<td>{_format_km(float(row['Km Inicial']))}</td>"
             f"<td>{_format_km(float(row['Km Final']))}</td>"
             f"<td>{_format_km(float(row['Extensão']))} km</td>"
+            + ipi_td +
             f"<td><span class='iap-pill'><span class='iap-pill-dot' style='background:{iap_color}'></span>{float(row['IAP']):.2f} <span class='muted'>{iap_class}</span></span></td>"
             f"<td>{html.escape(str(row['Solução recomendada']))}</td>"
             "</tr>"
@@ -3705,7 +3795,8 @@ def _render_solutions_table(table_df) -> None:
         <section class="solution-card">
           <div class="solution-card-head">
             <h3>Matriz de Paragon</h3>
-            <p>""" + str(len(table_df)) + """ trechos encontrados conforme filtros aplicados</p>
+            <p>""" + str(len(table_df)) + """ trechos encontrados conforme filtros aplicados"""
+        + (" · ordenados por IPI (maior = mais crítico)" if has_ipi else "") + """</p>
           </div>
           <div class="solution-table-wrap">
             <table class="solution-table">
@@ -3715,7 +3806,7 @@ def _render_solutions_table(table_df) -> None:
                   <th>SRE</th>""" + ("<th>Sentido</th>" if has_sentido else "") + """
                   <th>Km Inicial</th>
                   <th>Km Final</th>
-                  <th>Extensão</th>
+                  <th>Extensão</th>""" + ("<th>IPI</th>" if has_ipi else "") + """
                   <th>IAP</th>
                   <th>Solução recomendada</th>
                 </tr>
@@ -4290,6 +4381,59 @@ def _prioridade_por_segmento(df: pd.DataFrame) -> dict:
         for _, row in work.iterrows()
     ]
     return {item["id"]: item for item in calcular_indice_priorizacao_segmento(segmentos)}
+
+
+def _ipi_by_segment(base_table: pd.DataFrame | None) -> dict:
+    """IPI por segmento, com o MESMO valor das telas de priorização/econômico.
+
+    O IPI não é uma função só do segmento: a referência de tráfego é o percentil 95
+    do VMDeq do lote (ver services/ipi.py, `calcular_ipi_lote`). Então o valor só
+    bate com as outras telas se for calculado sobre o MESMO conjunto que elas usam:
+    `_economic_work_table(tabela COMPLETA do cenário)` — tabela inteira, antes de
+    qualquer filtro de tela, e um lote por cenário.
+
+    Por isso este helper recebe a tabela completa e, quando há vários cenários na
+    mesma tabela (coluna "Sentido"), calcula um lote por cenário. Devolve
+    {(sentido, segment_id): ipi} — sentido vazio quando a tabela é de um cenário só.
+    """
+    if base_table is None or base_table.empty or "_segment_id" not in base_table.columns:
+        return {}
+
+    def _lote(df: pd.DataFrame, sentido: str) -> dict:
+        prio = _prioridade_por_segmento(_economic_work_table(df))
+        return {
+            (sentido, int(segment_id)): float(item.get("ipi", item.get("ip_tecnico", 0.0)))
+            for segment_id, item in prio.items()
+        }
+
+    if "Sentido" in base_table.columns:
+        resultado: dict = {}
+        for sentido, grupo in base_table.groupby(base_table["Sentido"].astype(str)):
+            resultado.update(_lote(grupo, str(sentido)))
+        return resultado
+    return _lote(base_table, "")
+
+
+def _attach_ipi(table_df: pd.DataFrame | None, ipi_map: dict) -> pd.DataFrame | None:
+    """Anexa a coluna IPI (do `_ipi_by_segment`) e ordena do mais crítico ao menos.
+
+    Segmentos fora do cálculo ficam com IPI vazio e vão para o fim: são os que a
+    priorização exclui de propósito (classe Excelente) ou que não têm ICDS/ICDP/
+    VMDL/VMDP válidos — ver `_prioridade_por_segmento` e prioritization.py.
+    """
+    if table_df is None or table_df.empty or not ipi_map or "_segment_id" not in table_df.columns:
+        return table_df
+
+    df = table_df.copy()
+    sentidos = df["Sentido"].astype(str) if "Sentido" in df.columns else pd.Series([""] * len(df), index=df.index)
+    df["IPI"] = [
+        ipi_map.get((sentido, int(segment_id))) if pd.notna(segment_id) else None
+        for sentido, segment_id in zip(sentidos, df["_segment_id"])
+    ]
+    df["IPI"] = pd.to_numeric(df["IPI"], errors="coerce")
+    return df.sort_values(
+        ["IPI", "Km Inicial"], ascending=[False, True], na_position="last", kind="stable"
+    ).reset_index(drop=True)
 
 
 def _aplicar_indice_priorizacao(df: pd.DataFrame) -> pd.DataFrame:
@@ -13190,22 +13334,183 @@ _CONDITION_CLASS_COLORS = {"Bom": "#00a651", "Regular": "#fff200", "Ruim": "#d71
 # ordem categórica já validada (blue/orange/água) usada no comparativo de
 # segmentos do Tráfego. Cicla se aparecer uma 4ª faixa.
 _FAIXA_LINE_COLORS = ["#3987e5", "#d95926", "#199e70", "#8f5820"]
+# Rótulo da série quando o levantamento não traz a faixa. Existe porque o d0 vem
+# do arquivo FWD, e em algumas importações (ex.: BR-174_FWD 2026) a coluna de
+# faixa veio vazia: descartando esses pontos, o gráfico ficava só com as bandas
+# de fundo, sem nenhuma linha.
+_FAIXA_SEM_ROTULO = "sem faixa"
+
+
+def _condition_faixa_series(
+    df: pd.DataFrame, km_col: str, value_col: str, faixa_col: str
+) -> tuple[pd.DataFrame, list[str]]:
+    """Dados plotáveis + faixas na ordem de desenho, com a faixa nula preservada.
+
+    Devolve o dataframe já restrito às linhas que têm km E valor (as únicas que
+    geram linha) com a coluna auxiliar `_faixa_label`, e a lista ordenada de
+    rótulos. A faixa nula/vazia vira `_FAIXA_SEM_ROTULO` e vai para o fim, em vez
+    de ser eliminada por `dropna()`.
+
+    Usar a MESMA fonte no gráfico e na legenda evita o outro sintoma que existia:
+    a legenda era montada do dataframe inteiro do sentido (que inclui as linhas do
+    LVC, com faixa 1 e 2) e anunciava "Faixa 1 / Faixa 2" mesmo quando a linha
+    desenhada vinha de pontos sem faixa nenhuma.
+    """
+    data = df.dropna(subset=[km_col, value_col])
+    if data.empty:
+        return data.assign(_faixa_label=pd.Series(dtype="object")), []
+
+    label = data[faixa_col].astype("object")
+    label = label.where(label.notna(), _FAIXA_SEM_ROTULO).astype(str).str.strip()
+    label = label.mask(label.isin(["", "None", "nan", "<NA>"]), _FAIXA_SEM_ROTULO)
+    data = data.assign(_faixa_label=label)
+    ordered = sorted(
+        data["_faixa_label"].unique(),
+        # Sem faixa por último; o resto na ordem natural (1, 2, ... e depois texto).
+        key=lambda f: (f == _FAIXA_SEM_ROTULO, len(f), f),
+    )
+    return data, ordered
+
+
+def _condition_faixa_legend_label(faixa: str) -> str:
+    """"1" -> "Faixa 1"; a série sem faixa mantém o próprio rótulo."""
+    return faixa if faixa == _FAIXA_SEM_ROTULO else f"Faixa {faixa}"
+
+
+def _nice_axis_top(target: float, divisions: int = 5) -> float:
+    """Topo de eixo arredondado para cima, com `divisions` marcas redondas.
+
+    Sem isso, um topo cru (ex.: 185,2) geraria rótulos como 37 / 74 / 111. Escolhe
+    o menor passo "bonito" (1, 1,5, 2, 2,5, 3, 4, 5, 6, 8, 10 × potência de 10)
+    que cubra o alvo, e devolve passo × divisões.
+    """
+    if not target or target <= 0 or not math.isfinite(target):
+        return float(divisions)
+    raw = target / divisions
+    magnitude = 10 ** math.floor(math.log10(raw))
+    for multiplier in (1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10):
+        step = multiplier * magnitude
+        if step >= raw - 1e-9:
+            return step * divisions
+    return 10 * magnitude * divisions
+
+
+_ESCALA_Y_MODOS = {
+    "Automática": "auto",
+    "Comparável": "par",
+}
+
+
+def _render_escala_y_mode(key: str = "pavimentacao_escala_y") -> str:
+    """Seletor da escala do eixo Y dos gráficos de condição.
+
+    - Automática: cada gráfico ajusta o topo ao próprio dado (melhor resolução).
+    - Comparável: os dois sentidos do indicador dividem o mesmo topo (permite
+      comparar severidade pela altura da curva).
+
+    Não há slider de zoom do Y porque o slider de km já cumpre esse papel no modo
+    Automática: ao restringir o trecho, o topo é recalculado sobre o dado visível.
+
+    Renderiza como BARRA DE FERRAMENTAS do bloco: um card com o mesmo fundo dos
+    cards de gráfico, encostado no primeiro deles (margem inferior negativa), com
+    os cantos arredondados só no topo. Como cabeçalho solto sobre o fundo da
+    página, não se lia como parte dos gráficos abaixo.
+    """
+    opcoes = list(_ESCALA_Y_MODOS.keys())
+    # Valor salvo de uma versão anterior (ex.: "Classificação", modo removido)
+    # quebraria o radio; reseta para a 1ª opção antes de renderizar.
+    if st.session_state.get(key) not in opcoes:
+        st.session_state[key] = opcoes[0]
+
+    with st.container(border=True):
+        st.markdown('<span class="pav-charts-head-marker"></span>', unsafe_allow_html=True)
+        head_col, ctrl_col = st.columns([1.85, 1], gap="small")
+        with head_col:
+            st.markdown(
+                '<div class="pav-charts-title">Condição ao longo do km</div>'
+                '<div class="pav-charts-sub">Três indicadores, por sentido — eixo de km comum a todos</div>',
+                unsafe_allow_html=True,
+            )
+        with ctrl_col:
+            st.markdown('<div class="segment-control-caption">ESCALA DO EIXO Y</div>', unsafe_allow_html=True)
+            escolhido = st.radio(
+                "Escala do eixo Y", opcoes, horizontal=True, key=key,
+                label_visibility="collapsed",
+            )
+    return _ESCALA_Y_MODOS.get(escolhido, "auto")
+
+
+def _condition_y_max(
+    frames: list[pd.DataFrame], value_col: str,
+    thresholds: list[tuple[float, float, str]], fallback: float,
+) -> float:
+    """Topo do eixo Y ajustado ao DADO dos `frames` recebidos.
+
+    Os tetos eram fixos (IRI 30, ATR 15, d0 300) e muito acima do que as rodovias
+    apresentam: o d0 da BR-425 chega a ~175 num eixo até 300, então quase metade
+    do gráfico era faixa vermelha vazia. Aqui o topo vem do maior valor observado
+    + 6% de folga, arredondado para marcas redondas.
+
+    Quem chama decide o escopo: um frame só (topo por sentido, melhor resolução) ou
+    os dois sentidos juntos (topo comum, comparável pela altura) — ver
+    `_render_escala_y_mode`.
+
+    Piso: o topo da 1ª faixa de classificação (ex.: "Bom" até 2,7 no IRI), para a
+    classe de referência nunca desaparecer. Deliberadamente baixo — com o piso na
+    2ª faixa, o eixo do d0 travava em 100 e o zoom por km não surtia efeito. O
+    fallback nunca limita o dado: se algum valor passar dele, o eixo cresce.
+    """
+    valores = [
+        pd.to_numeric(frame[value_col], errors="coerce").dropna()
+        for frame in frames
+        if frame is not None and not frame.empty and value_col in frame.columns
+    ]
+    valores = [serie for serie in valores if not serie.empty]
+    if not valores:
+        return fallback
+
+    data_max = float(max(serie.max() for serie in valores))
+    piso = float(thresholds[0][1]) if thresholds else 0.0
+    return _nice_axis_top(max(data_max * 1.06, piso))
+
+
+def _condition_pair_y_max(
+    modo: str, frame: pd.DataFrame, par: list[pd.DataFrame], value_col: str,
+    thresholds: list[tuple[float, float, str]], fallback: float,
+) -> float:
+    """Aplica o modo de escala escolhido ao topo do eixo Y de UM gráfico."""
+    if modo == "fixa":
+        return fallback
+    escopo = [frame] if modo == "auto" else par
+    return _condition_y_max(escopo, value_col, thresholds, fallback)
 
 
 def _condition_line_chart_svg(
     df: pd.DataFrame, km_col: str, value_col: str, faixa_col: str,
     thresholds: list[tuple[float, float, str]], y_max: float,
+    km_domain: tuple[float, float] | None = None,
 ) -> str:
     """SVG de linha (valor × extensão) com faixas de fundo por classe
     (Bom/Regular/Ruim) e 1 linha por faixa/pista — quebrada onde há lacuna
     > 0,5km entre amostras consecutivas (não liga trechos sem levantamento),
-    mesmo padrão estrutural de _traffic_line_chart."""
-    data = df.dropna(subset=[km_col, value_col])
+    mesmo padrão estrutural de _traffic_line_chart.
+
+    `km_domain` fixa a faixa do eixo X (normalmente a do slider de km da tela).
+    Sem ele, cada gráfico usava o próprio mínimo/máximo: o d0 decrescente da
+    BR-425, que só tem medição entre os km 118 e 130, esticava esses 12 km por
+    toda a largura e parecia ter a mesma cobertura do crescente (0-130). Com o
+    domínio fixo, o trecho sem levantamento aparece como espaço vazio, que é a
+    informação correta.
+    """
+    data, faixas_ordenadas = _condition_faixa_series(df, km_col, value_col, faixa_col)
     if data.empty:
         return '<p style="color:#8f9eaa;font-size:12px">Sem dados para o gráfico.</p>'
 
-    km_min = float(data[km_col].min())
-    km_max = float(data[km_col].max())
+    if km_domain and float(km_domain[1]) > float(km_domain[0]):
+        km_min, km_max = float(km_domain[0]), float(km_domain[1])
+    else:
+        km_min = float(data[km_col].min())
+        km_max = float(data[km_col].max())
     span_km = (km_max - km_min) or 1.0
 
     W, H = 1080, 240
@@ -13213,15 +13518,26 @@ def _condition_line_chart_svg(
     pw, ph = W - L - R, H - T - B
 
     def X(km: float) -> float:
-        return L + (km - km_min) / span_km * pw
+        # Clamp: o filtro de km da tela mantém trechos que apenas cruzam a borda,
+        # então um km_inicial pode cair fora do domínio — sem limitar, a linha
+        # sairia da área do gráfico.
+        fraction = min(max((km - km_min) / span_km, 0.0), 1.0)
+        return L + fraction * pw
 
     def Y(v: float) -> float:
         v = min(max(v, 0.0), y_max)
         return T + (1 - v / y_max) * ph
 
     parts: list[str] = []
-    for y1, y2, classe in thresholds:
-        y_top, y_bot = Y(y2), Y(y1)
+    ultima = len(thresholds) - 1
+    for idx, (y1, y2, classe) in enumerate(thresholds):
+        # A última faixa vai até o TOPO do eixo, não até o seu limite nominal.
+        # Com o eixo automático, o topo pode passar do limite da classificação
+        # (ex.: IRI com pico de 44 num eixo de 50, faixa "Ruim" terminando em 30):
+        # sobrava uma tira sem cor no topo, com as linhas atravessando fora de
+        # qualquer classe. Agora todo o dado fica sobre uma faixa colorida.
+        topo = max(float(y2), y_max) if idx == ultima else float(y2)
+        y_top, y_bot = Y(topo), Y(y1)
         parts.append(
             f'<rect x="{L}" y="{y_top:.1f}" width="{pw:.1f}" height="{(y_bot - y_top):.1f}" '
             f'fill="{_CONDITION_CLASS_COLORS.get(classe, "#8f9eaa")}" opacity=".32"/>'
@@ -13232,10 +13548,9 @@ def _condition_line_chart_svg(
         parts.append(f'<line x1="{L}" y1="{gy:.1f}" x2="{L + pw}" y2="{gy:.1f}" stroke="rgba(148,163,184,.14)" stroke-width="1"/>')
         parts.append(f'<text x="{L - 8}" y="{gy + 3:.1f}" fill="#8f9eaa" font-size="10" text-anchor="end">{val:.0f}</text>')
 
-    faixas = sorted(data[faixa_col].dropna().astype(str).unique(), key=lambda f: (len(f), f))
-    for idx, faixa in enumerate(faixas):
+    for idx, faixa in enumerate(faixas_ordenadas):
         color = _FAIXA_LINE_COLORS[idx % len(_FAIXA_LINE_COLORS)]
-        sub = data[data[faixa_col].astype(str) == faixa].sort_values(km_col)
+        sub = data[data["_faixa_label"] == faixa].sort_values(km_col)
         runs: list[list[tuple[float, float]]] = []
         run: list[tuple[float, float]] = []
         prev_km = None
@@ -13267,13 +13582,20 @@ def _render_condition_line_section(
     titulo: str, subtitulo: str, df_sentido: pd.DataFrame,
     km_col: str, value_col: str, faixa_col: str,
     thresholds: list[tuple[float, float, str]], y_max: float,
+    km_domain: tuple[float, float] | None = None,
+    attached: bool = False,
 ) -> None:
     """Card com o gráfico de linha (valor × extensão) de um sentido, mais a
     legenda (classe + faixa) — usado pros 6 gráficos (IRI/ATR/d0 ×
-    Crescente/Decrescente)."""
+    Crescente/Decrescente).
+
+    `attached=True` no PRIMEIRO gráfico do bloco: o card encosta na barra de
+    ferramentas acima (cantos retos no topo, sem margem).
+    """
+    card_class = "chart-card chart-card-attached" if attached else "chart-card"
     if df_sentido.empty:
         st.markdown(
-            f'<section class="chart-card"><div class="chart-heading"><h3>{html.escape(titulo)}</h3>'
+            f'<section class="{card_class}"><div class="chart-heading"><h3>{html.escape(titulo)}</h3>'
             f'<p>{html.escape(subtitulo)}</p></div>'
             '<p style="color:#8f9eaa;font-size:12px">Sem dados para este sentido.</p></section>',
             unsafe_allow_html=True,
@@ -13284,18 +13606,38 @@ def _render_condition_line_section(
     for _, _, classe in thresholds:
         if classe not in classes_vistas:
             classes_vistas.append(classe)
-    faixas = sorted(df_sentido[faixa_col].dropna().astype(str).unique(), key=lambda f: (len(f), f))
+    # Legenda montada da MESMA fonte do gráfico (só as séries realmente
+    # desenhadas): antes vinha do dataframe inteiro do sentido e anunciava faixas
+    # que não existiam na linha traçada.
+    dados_plot, faixas = _condition_faixa_series(df_sentido, km_col, value_col, faixa_col)
+
+    # Severidade em número, no subtítulo. Com o eixo Y compartilhado pelos dois
+    # sentidos, a comparação visual funciona, mas a diferença fica sutil quando as
+    # amplitudes são próximas — o máximo e a média explicitam qual é o pior.
+    resumo = ""
+    if not dados_plot.empty:
+        serie = pd.to_numeric(dados_plot[value_col], errors="coerce").dropna()
+        if not serie.empty:
+            resumo = (
+                f" · máx <b>{float(serie.max()):.2f}</b>"
+                f" · média {float(serie.mean()):.2f}"
+                f" · {len(serie)} pontos"
+            )
     legend = "".join(
         f'<span class="proj-leg"><span class="sw" style="background:{_CONDITION_CLASS_COLORS.get(c, "#8f9eaa")}"></span>{html.escape(c)}</span>'
         for c in classes_vistas
     ) + "".join(
-        f'<span class="proj-leg"><span class="sw" style="background:{_FAIXA_LINE_COLORS[i % len(_FAIXA_LINE_COLORS)]}"></span>Faixa {html.escape(f)}</span>'
+        f'<span class="proj-leg"><span class="sw" style="background:{_FAIXA_LINE_COLORS[i % len(_FAIXA_LINE_COLORS)]}"></span>'
+        f'{html.escape(_condition_faixa_legend_label(f))}</span>'
         for i, f in enumerate(faixas)
     )
-    svg = _condition_line_chart_svg(df_sentido, km_col, value_col, faixa_col, thresholds, y_max)
+    svg = _condition_line_chart_svg(
+        df_sentido, km_col, value_col, faixa_col, thresholds, y_max, km_domain=km_domain
+    )
     st.markdown(
-        '<section class="chart-card">'
-        f'<div class="chart-heading"><h3>{html.escape(titulo)}</h3><p>{html.escape(subtitulo)}</p></div>'
+        f'<section class="{card_class}">'
+        f'<div class="chart-heading"><h3>{html.escape(titulo)}</h3>'
+        f'<p>{html.escape(subtitulo)}{resumo}</p></div>'
         f'<div class="proj-chart">{svg}</div>'
         f'<div class="proj-legend">{legend}</div>'
         '</section>',
@@ -13422,19 +13764,29 @@ def _render_pavimentacao_page() -> None:
     df_iri_f = df_iri[(df_iri["km_final"].fillna(df_iri["km_inicial"]) >= km_range[0]) & (df_iri["km_inicial"] <= km_range[1])]
     sentido_iri = df_iri_f["sentido_trafego"].astype(str).str.strip().str.lower()
     _IRI_THRESHOLDS = [(0.0, 2.7, "Bom"), (2.7, 3.5, "Regular"), (3.5, 30.0, "Ruim")]
-    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    # Eixo X sempre igual nos dois sentidos (faixa do slider); o eixo Y segue o
+    # modo escolhido no cabeçalho do bloco de gráficos, logo abaixo.
+    st.markdown("<div style='height: 18px'></div>", unsafe_allow_html=True)
+    escala_y = _render_escala_y_mode()
+    _iri_cres = df_iri_f[~sentido_iri.str.contains("decr")]
+    _iri_decr = df_iri_f[sentido_iri.str.contains("decr")]
+    _iri_par = [_iri_cres, _iri_decr]
+    # Sem spacer aqui: o 1º card encosta na barra de ferramentas (attached=True).
     _render_condition_line_section(
         "IRI - Crescente", "IRI por extensão (km) — sentido crescente",
-        df_iri_f[~sentido_iri.str.contains("decr")],
+        _iri_cres,
         km_col="km_inicial", value_col="iri_medio", faixa_col="faixa",
-        thresholds=_IRI_THRESHOLDS, y_max=30.0,
+        thresholds=_IRI_THRESHOLDS, km_domain=km_range,
+        y_max=_condition_pair_y_max(escala_y, _iri_cres, _iri_par, "iri_medio", _IRI_THRESHOLDS, 30.0),
+        attached=True,
     )
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     _render_condition_line_section(
         "IRI - Decrescente", "IRI por extensão (km) — sentido decrescente",
-        df_iri_f[sentido_iri.str.contains("decr")],
+        _iri_decr,
         km_col="km_inicial", value_col="iri_medio", faixa_col="faixa",
-        thresholds=_IRI_THRESHOLDS, y_max=30.0,
+        thresholds=_IRI_THRESHOLDS, km_domain=km_range,
+        y_max=_condition_pair_y_max(escala_y, _iri_decr, _iri_par, "iri_medio", _IRI_THRESHOLDS, 30.0),
     )
     st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
     km_range = _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "after_iri")
@@ -13442,19 +13794,24 @@ def _render_pavimentacao_page() -> None:
     df_atr_f = df_atr[(df_atr["km_final"].fillna(df_atr["km_inicial"]) >= km_range[0]) & (df_atr["km_inicial"] <= km_range[1])]
     sentido_atr = df_atr_f["sentido_trafego"].astype(str).str.strip().str.lower()
     _ATR_THRESHOLDS = [(0.0, 7.0, "Bom"), (7.0, 10.0, "Regular"), (10.0, 15.0, "Ruim")]
+    _atr_cres = df_atr_f[~sentido_atr.str.contains("decr")]
+    _atr_decr = df_atr_f[sentido_atr.str.contains("decr")]
+    _atr_par = [_atr_cres, _atr_decr]
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     _render_condition_line_section(
         "ATR - Crescente", "ATR por extensão (km) — sentido crescente",
-        df_atr_f[~sentido_atr.str.contains("decr")],
+        _atr_cres,
         km_col="km_inicial", value_col="atr", faixa_col="faixa",
-        thresholds=_ATR_THRESHOLDS, y_max=15.0,
+        thresholds=_ATR_THRESHOLDS, km_domain=km_range,
+        y_max=_condition_pair_y_max(escala_y, _atr_cres, _atr_par, "atr", _ATR_THRESHOLDS, 15.0),
     )
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     _render_condition_line_section(
         "ATR - Decrescente", "ATR por extensão (km) — sentido decrescente",
-        df_atr_f[sentido_atr.str.contains("decr")],
+        _atr_decr,
         km_col="km_inicial", value_col="atr", faixa_col="faixa",
-        thresholds=_ATR_THRESHOLDS, y_max=15.0,
+        thresholds=_ATR_THRESHOLDS, km_domain=km_range,
+        y_max=_condition_pair_y_max(escala_y, _atr_decr, _atr_par, "atr", _ATR_THRESHOLDS, 15.0),
     )
     st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
     km_range = _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "after_atr")
@@ -13462,19 +13819,24 @@ def _render_pavimentacao_page() -> None:
     df_d0_f = df_d0[(df_d0["km_final"].fillna(df_d0["km_inicial"]) >= km_range[0]) & (df_d0["km_inicial"] <= km_range[1])]
     sentido_d0 = df_d0_f["sentido_trafego"].astype(str).str.strip().str.lower()
     _D0_THRESHOLDS = [(0.0, 40.0, "Bom"), (40.0, 80.0, "Regular"), (80.0, 300.0, "Mau")]
+    _d0_cres = df_d0_f[~sentido_d0.str.contains("decr")]
+    _d0_decr = df_d0_f[sentido_d0.str.contains("decr")]
+    _d0_par = [_d0_cres, _d0_decr]
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     _render_condition_line_section(
         "d0 - Crescente", "d0 por extensão (km) — sentido crescente",
-        df_d0_f[~sentido_d0.str.contains("decr")],
+        _d0_cres,
         km_col="km_inicial", value_col="d0", faixa_col="faixa",
-        thresholds=_D0_THRESHOLDS, y_max=300.0,
+        thresholds=_D0_THRESHOLDS, km_domain=km_range,
+        y_max=_condition_pair_y_max(escala_y, _d0_cres, _d0_par, "d0", _D0_THRESHOLDS, 300.0),
     )
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     _render_condition_line_section(
         "d0 - Decrescente", "d0 por extensão (km) — sentido decrescente",
-        df_d0_f[sentido_d0.str.contains("decr")],
+        _d0_decr,
         km_col="km_inicial", value_col="d0", faixa_col="faixa",
-        thresholds=_D0_THRESHOLDS, y_max=300.0,
+        thresholds=_D0_THRESHOLDS, km_domain=km_range,
+        y_max=_condition_pair_y_max(escala_y, _d0_decr, _d0_par, "d0", _D0_THRESHOLDS, 300.0),
     )
     st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
     _pavimentacao_km_slider(rodovia_sel, km_min, km_max, "after_d0")
@@ -13613,6 +13975,11 @@ def main() -> None:
             paginated_table = pd.DataFrame()
         else:
             intervention_segments = _filter_map_segments(_base_segments, intervention_table)
+            # IPI calculado sobre a tabela COMPLETA do cenário (o mesmo lote das
+            # telas de priorização/econômico), depois anexado à tabela exibida:
+            # calcular sobre a tabela já filtrada mudaria a referência de tráfego
+            # (percentil 95 do lote) e daria valores diferentes das outras telas.
+            intervention_table = _attach_ipi(intervention_table, _ipi_by_segment(_base_table))
             filtered_table = _render_solution_filter_panel(intervention_table)
             filtered_segments = _filter_map_segments(intervention_segments, filtered_table)
             filtered_extension = (
