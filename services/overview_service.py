@@ -33,6 +33,7 @@ import bisect
 import math
 import os
 import functools
+import unicodedata
 from typing import Any
 
 import pandas as pd
@@ -156,15 +157,107 @@ _LINEAR_IAP_CLASS_COLORS = {
 }
 # Código de solução corretiva -> nome legível exibido ao usuário. README §11.1.
 # Fonte primária dos rótulos quando não há JSON de soluções gravado no banco.
+# Tradução dos códigos corretivos para texto. A grafia segue o vocabulário GRAVADO
+# NO BANCO (campo `tipoNome` do JSON `solucoes`), que usa "Reforço" com maiúscula:
+# este dicionário tinha "reforço" minúsculo, e como o painel usa o JSON quando ele
+# traz os nomes e cai aqui quando não traz, a MESMA intervenção saía com duas
+# grafias e virava duas séries em todo agrupamento por rótulo.
 _SOLUTION_LABELS = {
     "OK": "Sem intervenção",
     "RL": "Reparo localizado",
     "RL+RS": "Reparo localizado + Recarga Superficial",
-    "RL+REF": "Reparo localizado + reforço",
+    "RL+REF": "Reparo localizado + Reforço",
     "RPS": "Fresagem e recomposição",
-    "RPS+REF": "Fresagem e recomposição + reforço",
+    "RPS+REF": "Fresagem e recomposição + Reforço",
     "REC": "Reconstrução",
+    # "CA" vem de _IAP_CODE_GROUPS mas não tinha tradução, então aparecia como a
+    # sigla crua na tabela e nos gráficos. Mantido como sigla até haver o nome
+    # oficial — só deixa de ser um valor "sem dono" no dicionário.
+    "CA": "CA",
 }
+
+# Ordem canônica das partes de um rótulo composto, na mesma hierarquia de
+# severidade que o ORDER BY de _get_solution_table_from_database já aplica
+# (REC > RPS+REF > RPS > RL+REF > RL+RS > RL). Serve para "Reforço + Reparo
+# localizado" e "Reparo localizado + Reforço" — que o banco grava nas duas ordens,
+# conforme a sequência dos itens no JSON — virarem o MESMO rótulo.
+_SOLUTION_PART_ORDER = (
+    "Reconstrução",
+    "Fresagem e recomposição",
+    "Reparo localizado",
+    "Reforço",
+    "Recarga Superficial",
+)
+# Busca insensível a caixa/acento -> grafia canônica.
+_SOLUTION_PART_CANONICAL = {
+    unicodedata.normalize("NFKD", part.lower()).encode("ascii", "ignore").decode(): part
+    for part in _SOLUTION_PART_ORDER
+}
+
+
+def _canonical_solution_label(name: str) -> str:
+    """Padroniza um rótulo de solução composto: grafia e ordem das partes.
+
+    Quebra em " + ", troca cada parte pela grafia canônica (comparando sem caixa
+    nem acento), remove repetições e reordena por `_SOLUTION_PART_ORDER`. Partes
+    desconhecidas são preservadas como vieram e vão para o fim, em ordem
+    alfabética — assim um serviço novo no cadastro não é descartado nem renomeado.
+
+    É o que faz "A + B" e "B + A" se somarem num único item em tudo que agrupa
+    pelo rótulo (gráfico de distribuição, filtro "Tipo de solução", tabela, Excel
+    e as tabelas por solução do cenário econômico).
+    """
+    if not name or "+" not in name:
+        return _SOLUTION_PART_CANONICAL.get(
+            unicodedata.normalize("NFKD", str(name).strip().lower()).encode("ascii", "ignore").decode(),
+            str(name).strip(),
+        )
+
+    partes: list[str] = []
+    for bruto in str(name).split("+"):
+        parte = bruto.strip()
+        if not parte:
+            continue
+        chave = unicodedata.normalize("NFKD", parte.lower()).encode("ascii", "ignore").decode()
+        canonica = _SOLUTION_PART_CANONICAL.get(chave, parte)
+        if canonica not in partes:
+            partes.append(canonica)
+
+    def ordem(parte: str) -> tuple[int, str]:
+        try:
+            return (_SOLUTION_PART_ORDER.index(parte), "")
+        except ValueError:
+            return (len(_SOLUTION_PART_ORDER), parte.lower())
+
+    return " + ".join(sorted(partes, key=ordem))
+
+
+# Severidade CRESCENTE das soluções corretivas Paragon, do reparo mais leve à
+# reconstrução. É a mesma sequência de _SOLUTION_ORDER (overview_map) e a inversa
+# do CASE de _get_solution_table_from_database — aqui ela vira ordem de EXIBIÇÃO.
+_SOLUTION_SEVERITY_CODES = ("OK", "RL", "RL+RS", "RL+REF", "RPS", "RPS+REF", "REC")
+# Rótulo canônico -> posição na hierarquia. Montado a partir do próprio
+# _SOLUTION_LABELS para os nomes não ficarem repetidos em dois lugares: renomear
+# uma solução lá reordena aqui automaticamente. Declarado APÓS
+# _canonical_solution_label porque a chama na construção.
+_SOLUTION_SEVERITY_BY_LABEL = {
+    _canonical_solution_label(_SOLUTION_LABELS[code]): position
+    for position, code in enumerate(_SOLUTION_SEVERITY_CODES)
+    if code in _SOLUTION_LABELS
+}
+
+
+def solution_severity_rank(label: Any) -> int:
+    """Posição da solução na hierarquia de severidade (menor = mais leve).
+
+    Rótulos fora da hierarquia Paragon — inclusive os nomes compostos do DNIT
+    ("FR4 + CBUQ(4) + Drenagem") e a sigla "CA", que não tem severidade definida —
+    recebem um valor alto para ficarem no fim, sem embaralhar a ordenação de quem
+    chama (que usa a extensão como critério de desempate).
+    """
+    return _SOLUTION_SEVERITY_BY_LABEL.get(
+        str(label or "").strip(), len(_SOLUTION_SEVERITY_CODES) + 1
+    )
 
 
 # ============================================================================
@@ -552,12 +645,19 @@ def _solution_name(solution_code: str | None, solutions_json: Any = None) -> str
                 if isinstance(item, dict) and item.get("tipoNome")
             ]
             if names:
-                return _normalize_solution_label(" + ".join(dict.fromkeys(names)))
+                # A troca de terminologia vem ANTES da canonização: assim
+                # "Microrrevestimento" já chega como "Recarga Superficial" e é
+                # ordenado/deduplicado por esse nome.
+                return _canonical_solution_label(
+                    _normalize_solution_label(" + ".join(dict.fromkeys(names)))
+                )
         except (TypeError, ValueError):
             pass
 
-    return _normalize_solution_label(
-        _SOLUTION_LABELS.get(str(solution_code or ""), str(solution_code or "Sem intervenção"))
+    return _canonical_solution_label(
+        _normalize_solution_label(
+            _SOLUTION_LABELS.get(str(solution_code or ""), str(solution_code or "Sem intervenção"))
+        )
     )
 
 

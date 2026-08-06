@@ -52,6 +52,7 @@ from services.overview_service import (
     get_available_scenarios,
     get_available_years,
     get_scenario_label,
+    solution_severity_rank,
     get_dnit_economic_data,
     get_dnit_iri_projection,
     get_dnit_performance_projection,
@@ -3427,11 +3428,15 @@ def _render_solution_distribution(
         return
 
     color_fn = color_fn or _solution_color
-    grouped = (
-        table_df.groupby(group_col, as_index=False)["Extensão"]
-        .sum()
-        .sort_values("Extensão", ascending=False)
-    )
+    # Ordem = SEVERIDADE da solução (Reparo localizado → … → Reconstrução), não a
+    # extensão: o gráfico é lido como uma escala de intervenção, e ordenar por km
+    # embaralhava soluções leves e pesadas. Rótulos fora da hierarquia Paragon
+    # (nomes compostos do DNIT, sigla "CA") ficam no fim, aí sim por extensão.
+    grouped = table_df.groupby(group_col, as_index=False)["Extensão"].sum()
+    grouped["_severidade"] = grouped[group_col].map(solution_severity_rank)
+    grouped = grouped.sort_values(
+        ["_severidade", "Extensão"], ascending=[True, False]
+    ).reset_index(drop=True)
     total_extension = float(total_km or table_df["Extensão"].sum() or 0)
     if total_extension <= 0:
         return
