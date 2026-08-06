@@ -314,21 +314,43 @@ def _get_vmda_traffic_by_road(roads: set[Any]) -> dict[str, list[dict[str, Any]]
 
 
 def _match_vmda_traffic(traffic_rows: list[dict[str, Any]], km_inicial: float, km_final: float) -> dict[str, Any] | None:
-    """Encontra o trecho de tráfego que contém o segmento de pavimento.
+    """Encontra o trecho de tráfego do segmento de pavimento, pela maior SOBREPOSIÇÃO.
 
-    A regra de borda fica naturalmente respeitada:
-    - segmento que termina no km 12 ainda cabe no trecho 0-12;
-    - segmento que começa no km 12 e termina depois usa o trecho 12-x.
+    A regra anterior exigia CONTENÇÃO total (trecho de tráfego começando antes e
+    terminando depois do segmento). Só que os dois cadastros são segmentados de
+    forma independente e as bordas não coincidem: na BR-174, o pavimento é
+    fatiado em 13,10-13,70-14,30-14,80 e o tráfego em 13,20-14,70. Os segmentos
+    das pontas transbordavam ~100 m e ficavam SEM tráfego nenhum — logo sem VMDL/
+    VMDP e, por consequência, sem IPI —, mesmo com o dado existindo no banco.
+
+    Com sobreposição, cada segmento usa o trecho de tráfego com que mais se
+    superpõe. Casos de contenção continuam idênticos: ali a sobreposição é a
+    extensão inteira do segmento, o máximo possível. O desempate (menor extensão,
+    depois km inicial maior) é o mesmo de antes, para quando dois trechos cobrem
+    igualmente o segmento — mantém a escolha pelo trecho mais específico.
     """
     eps = 1e-6
-    matches = [
-        row
-        for row in traffic_rows
-        if float(row["km_inicial"]) <= km_inicial + eps and float(row["km_final"]) >= km_final - eps
-    ]
-    if not matches:
-        return None
-    return sorted(matches, key=lambda row: (float(row.get("extensao") or 0.0), -float(row["km_inicial"])))[0]
+    segment_start = min(float(km_inicial), float(km_final))
+    segment_end = max(float(km_inicial), float(km_final))
+
+    best: dict[str, Any] | None = None
+    best_key: tuple[float, float, float] | None = None
+    for row in traffic_rows:
+        start = float(row["km_inicial"])
+        end = float(row["km_final"])
+        overlap = min(segment_end, end) - max(segment_start, start)
+        if segment_end - segment_start <= eps:
+            # Segmento de extensão ~zero: não há sobreposição a medir; vale estar
+            # dentro da faixa de tráfego (comportamento antigo, por contenção).
+            if not (start <= segment_start + eps and end >= segment_end - eps):
+                continue
+            overlap = 0.0
+        elif overlap <= eps:
+            continue
+        key = (-overlap, float(row.get("extensao") or 0.0), -start)
+        if best_key is None or key < best_key:
+            best_key, best = key, row
+    return best
 
 
 # ============================================================================

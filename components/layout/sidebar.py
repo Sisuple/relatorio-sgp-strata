@@ -12,7 +12,7 @@ import html
 
 import streamlit as st
 
-from core.constants import MENU_ITEMS, PAGE_TITLE
+from core.constants import MENU_ITEMS
 
 
 # Ícones do menu como fragmentos de <path> SVG, indexados pela chave "icon" de
@@ -32,6 +32,21 @@ _ICON_SVGS = {
     "road": "<path d='M8 21L10 3M16 21L14 3'/><path d='M12 4v3M12 10.5v3M12 17v3'/>",
     "layers": "<path d='M12 3l9 5-9 5-9-5 9-5z'/><path d='M3 13l9 5 9-5'/><path d='M3 17l9 5 9-5'/>",
 }
+
+
+# Ícones do alternador de tema: o desenho indica PARA ONDE se vai (sol = claro,
+# lua = escuro), reforçando que o rótulo é uma ação e não o tema atual.
+_SUN_ICON = (
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" '
+    'stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="4"/>'
+    '<path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4'
+    'M18.4 5.6L17 7M7 17l-1.4 1.4"/></svg>'
+)
+_MOON_ICON = (
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" '
+    'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z"/></svg>'
+)
 
 
 def _menu_icon(icon: str) -> str:
@@ -57,6 +72,13 @@ def render_sidebar(active_key: str = "overview") -> None:
     descrições são escapados antes de entrarem no HTML.
     """
     current_theme = str(st.session_state.get("dashboard_theme", "dark"))
+    # Grupo da página aberta: o rótulo daquela seção fica destacado, para indicar
+    # em que parte do menu você está (antes os dois tinham o mesmo peso).
+    active_group = next(
+        (item.get("group") for item in MENU_ITEMS if item["key"] == active_key and item.get("group")),
+        None,
+    )
+
     items_html = []
     cta_html = []
     last_group = "__unset__"
@@ -78,38 +100,54 @@ def render_sidebar(active_key: str = "overview") -> None:
             )
             continue
         if group != last_group:
-            items_html.append(f'<div class="side-group-label">{html.escape(group)}</div>')
+            group_class = "side-group-label is-active" if group == active_group else "side-group-label"
+            items_html.append(f'<div class="{group_class}">{html.escape(group)}</div>')
         last_group = group
         # Destaca o item cuja key bate com a página ativa.
-        active_class = " active" if item["key"] == active_key else ""
+        is_active = item["key"] == active_key
+        active_class = " active" if is_active else ""
+        # aria-current identifica a página atual para leitores de tela — a cor
+        # sozinha não comunica isso.
+        aria = ' aria-current="page"' if is_active else ""
         href = f'?page={html.escape(item["key"])}&theme={html.escape(current_theme)}'
+        # A descrição aparece só no item ATIVO: repetida nos 8 itens, dobrava a
+        # altura do menu e competia com os rótulos, que já são autoexplicativos.
+        description = (
+            f'<div class="side-description">{html.escape(item["description"])}</div>'
+            if is_active else ""
+        )
         items_html.append(
-            f'<a class="side-item{active_class}" href="{href}" target="_self">'
+            f'<a class="side-item{active_class}" href="{href}" target="_self"{aria}>'
             f'<div class="side-icon">{_menu_icon(item["icon"])}</div>'
             '<div class="side-copy">'
             f'<div class="side-label">{html.escape(item["label"])}</div>'
-            f'<div class="side-description">{html.escape(item["description"])}</div>'
+            f'{description}'
             '</div>'
             '</a>'
         )
 
     next_theme = "light" if current_theme == "dark" else "dark"
-    theme_label = "Tema claro" if current_theme == "dark" else "Tema escuro"
+    # Rótulo em forma de AÇÃO ("Usar tema claro"), não o nome do tema de destino:
+    # "Tema claro" era ambíguo — parecia indicar o tema em uso.
+    theme_label = "Usar tema claro" if current_theme == "dark" else "Usar tema escuro"
+    theme_icon = _SUN_ICON if current_theme == "dark" else _MOON_ICON
     theme_href = f'?page={html.escape(active_key)}&theme={html.escape(next_theme)}'
 
+    # Sem faixa de marca aqui: o painel roda embutido no SGP, que já exibe a logo
+    # SIGMA no próprio cabeçalho — repeti-la logo abaixo duplicava a identidade.
+    # O bloco do CTA só entra se houver item sem grupo (hoje o IAGON está
+    # desativado em MENU_ITEMS): renderizá-lo vazio deixava um container morto.
+    cta_block = f'<div class="side-cta-row">{"".join(cta_html)}</div>' if cta_html else ""
     sidebar_html = (
         '<div class="sidebar-shell">'
-        '<div class="brand-row">'
-        '<div class="brand-title">'
-        '<span class="brand-title-tick brand-title-tick-l"><i></i><i></i></span>'
-        f'{html.escape(PAGE_TITLE)}'
-        '<span class="brand-title-tick brand-title-tick-r"><i></i><i></i></span>'
-        '</div>'
-        '</div>'
         f'<div class="side-menu">{"".join(items_html)}</div>'
         '<div class="side-footer">'
-        f'<div class="side-cta-row">{"".join(cta_html)}</div>'
-        f'<a class="side-theme-toggle" href="{theme_href}" target="_self">{html.escape(theme_label)}</a>'
+        f'{cta_block}'
+        f'<a class="side-theme-toggle" href="{theme_href}" target="_self" '
+        f'title="{html.escape(theme_label)}">'
+        f'<span class="side-theme-icon">{theme_icon}</span>'
+        f'<span>{html.escape(theme_label)}</span>'
+        '</a>'
         '</div>'
         '</div>'
     )
