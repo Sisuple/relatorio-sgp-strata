@@ -71,6 +71,7 @@ from services.overview_service import (
     _IAP_CLASS_ORDER,
     _dnit_solution_group,
     _normalize_road_code,
+    solution_code_from_name,
 )
 from services.prioritization import (
     DNIT_MODO_COMBINADO,
@@ -9867,6 +9868,58 @@ def _filter_map_segments(segments_df, filtered_table):
     return segments_df[segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
 
 
+def _align_map_solution_to_table(segments_df, table_df):
+    """Faz o mapa colorir pela MESMA fonte que a tabela e o filtro usam.
+
+    O mapa pinta por `intervencao_iap`, que vem da matriz de códigos IAP, enquanto
+    a tabela, o filtro "Tipo de solução", a distribuição e o Excel usam "Solução
+    recomendada", que vem do JSON `solucoes` do banco. As duas fontes discordam em
+    parte dos segmentos (na BR-319/2027, 14 de 169), e o efeito era o filtro
+    parecer quebrado: escolher "Fresagem e recomposição + Reforço" selecionava os
+    segmentos certos, mas o mapa os desenhava como RL+REF e a legenda passava a
+    listar uma solução que o filtro havia justamente excluído.
+
+    Reescreve `intervencao_iap` com o código equivalente ao nome da tabela. Nome que
+    não converte em código (compostos do DNIT) preserva o valor que já tinha, então
+    o segmento nunca perde a cor. Só o mapa desta tela muda: nenhuma métrica é
+    recalculada e `classe_iap` não é tocada.
+    """
+    if segments_df is None or segments_df.empty:
+        return segments_df
+    if table_df is None or table_df.empty:
+        return segments_df
+    if "intervencao_iap" not in segments_df.columns:
+        return segments_df
+    if "Solução recomendada" not in table_df.columns or "_segment_id" not in table_df.columns:
+        return segments_df
+
+    aligned = segments_df.copy()
+    codes = table_df["Solução recomendada"].map(solution_code_from_name)
+
+    def _resolve(segment_keys, table_keys):
+        return segment_keys.map(dict(zip(table_keys, codes)))
+
+    resolved = None
+    # Mesma chave composta de _filter_map_segments quando há mais de um sentido; se
+    # os dois lados montarem chaves de formatos diferentes o map não casa nada, e aí
+    # cair para o id puro é o que mantém o alinhamento funcionando.
+    if "sentido" in aligned.columns and "Sentido" in table_df.columns:
+        by_sentido = _resolve(
+            _economic_segment_key_series(aligned, "segment_id", "sentido"),
+            _economic_segment_key_series(table_df, "_segment_id", "Sentido"),
+        )
+        if by_sentido.notna().any():
+            resolved = by_sentido
+    if resolved is None:
+        resolved = _resolve(
+            aligned["segment_id"].astype(int).astype(str),
+            table_df["_segment_id"].astype(int).astype(str),
+        )
+
+    aligned["intervencao_iap"] = resolved.fillna(aligned["intervencao_iap"])
+    return aligned
+
+
 def _with_context_segments(main_segments, segments_df, intervention_table):
     """Soma aos segmentos do mapa os que NÃO têm intervenção prevista.
 
@@ -9884,6 +9937,45 @@ def _with_context_segments(main_segments, segments_df, intervention_table):
     if not frames:
         return main_segments
     return pd.concat(frames, ignore_index=True)
+
+
+def _solution_map_with_dimmed_rest(base_segments, filtered_segments, filtered_table):
+    """Mapa da tela Soluções com o filtro em destaque e o resto da via esmaecido.
+
+    Devolve `(segmentos, attended_ids)`. Tudo que está fora do filtro — as outras
+    soluções E os trechos sem intervenção — continua sendo desenhado, para a rodovia
+    não aparecer partida em pedaços, mas entra como "não atendido": o mapa o desenha
+    tracejado e apagado e NÃO o lista na legenda, que passa a mostrar somente as
+    soluções realmente selecionadas.
+
+    Antes disso, filtrar uma solução deixava o resto da rodovia como uma faixa ciano
+    de "OK / sem intervenção" que dominava o mapa e ocupava a legenda como se fosse
+    uma categoria escolhida.
+
+    A chave de atendimento é montada no DataFrame já concatenado, e não nos dois
+    lados em separado: `_economic_segment_key_series` decide usar o sentido pela
+    contagem de sentidos DAQUELE DataFrame, então calcular em separado poderia gerar
+    chaves de formatos diferentes ("12|CRESCENTE" x "12") e não casar nada.
+    """
+    rest = _context_map_segments(base_segments, filtered_table)
+    frames = []
+    if filtered_segments is not None and not filtered_segments.empty:
+        destaque = filtered_segments.copy()
+        destaque["_map_attended"] = True
+        frames.append(destaque)
+    if rest is not None and not rest.empty:
+        esmaecido = rest.copy()
+        esmaecido["_map_attended"] = False
+        frames.append(esmaecido)
+    if not frames:
+        return filtered_segments, None
+
+    everything = pd.concat(frames, ignore_index=True)
+    everything["_attendance_key"] = _economic_segment_key_series(
+        everything, "segment_id", "sentido"
+    )
+    attended = set(everything.loc[everything["_map_attended"], "_attendance_key"])
+    return everything.drop(columns=["_map_attended"]), attended
 
 
 def _context_map_segments(segments_df, intervention_table):
@@ -13987,6 +14079,9 @@ def main() -> None:
             intervention_table = _attach_ipi(intervention_table, _ipi_by_segment(_base_table))
             filtered_table = _render_solution_filter_panel(intervention_table)
             filtered_segments = _filter_map_segments(intervention_segments, filtered_table)
+            # Sem isto o mapa desenha os segmentos certos pintados pela OUTRA fonte
+            # de solução, e a legenda lista soluções que o filtro excluiu.
+            filtered_segments = _align_map_solution_to_table(filtered_segments, filtered_table)
             filtered_extension = (
                 float(filtered_table["Extensão"].sum())
                 if filtered_table is not None and not filtered_table.empty
@@ -13996,11 +14091,36 @@ def main() -> None:
             # partida em pedaços — e porque a legenda prometia uma cor ("OK / sem
             # intervenção") que nunca era desenhada. Não entram no
             # `filtered_extension`: o total continua sendo só o que tem obra.
-            render_overview_map(
-                _with_context_segments(filtered_segments, _base_segments, intervention_table),
-                filtered_extension,
-                color_by="solucao",
+            #
+            # Com filtro ativo isso se inverte: o contexto ciano passava a dominar o
+            # mapa e a ocupar a legenda como se fosse uma categoria selecionada. Aí o
+            # resto da via vai esmaecido e fora da legenda. Sem filtro, nada muda.
+            _filter_narrows = (
+                filtered_table is not None
+                and intervention_table is not None
+                and len(filtered_table) < len(intervention_table)
             )
+            if _filter_narrows:
+                _map_segments, _attended_keys = _solution_map_with_dimmed_rest(
+                    _base_segments, filtered_segments, filtered_table
+                )
+                render_overview_map(
+                    _map_segments,
+                    filtered_extension,
+                    color_by="solucao",
+                    attended_ids=_attended_keys,
+                    unattended_label="Fora do filtro",
+                    legend_foot=(
+                        '<span class="legend-line"></span>'
+                        "Trechos coloridos pela solução corretiva · tracejado = fora do filtro"
+                    ),
+                )
+            else:
+                render_overview_map(
+                    _with_context_segments(filtered_segments, _base_segments, intervention_table),
+                    filtered_extension,
+                    color_by="solucao",
+                )
             _render_solution_distribution(filtered_table, horizontal=True)
             _, paginated_table = _render_solution_table_controls(filtered_table)
             _render_solutions_table(paginated_table)

@@ -287,7 +287,21 @@ no fallback `#fff200` de quem consulta a paleta, saindo idêntica a `- Regular`.
 
 **Cores por solução** — duas fontes que precisam concordar: `_IAP_INTERVENTION_COLORS`
 (por código, `overview_service.py:50`) e `_solution_color()` (por **substring do nome**,
-`app.py:699` — frágil: renomear quebra a cor).
+`app.py:699` — frágil: renomear quebra a cor). A entrada `CA` existe nas **duas**
+paletas (por classe e por código): a tela Soluções colore por código, então faltar
+numa delas basta para a CA voltar ao amarelo.
+
+**Duas fontes para a solução do mesmo segmento — e elas discordam nos dados.**
+`Solução recomendada` (tabela, filtro "Tipo de solução", distribuição e Excel) vem de
+`_solution_name()`, que prefere o `tipoNome` do JSON `solucoes` do banco.
+`intervencao_iap` (cor do mapa) vem de `_iap_solution_from_code()`, da matriz
+`_IAP_CODE_GROUPS`. Na BR-319/SH-DECRESCENTE/2027 as duas divergem em **14 de 169
+segmentos** — inclusive 1 em que a matriz diz `OK` e o JSON registra
+"Reparo localizado + Reforço", ou seja, discordam sobre *existir* obra. Decisão
+vigente: **o JSON do banco é a verdade**, e `_align_map_solution_to_table()` (app.py)
+reescreve o código do mapa a partir do nome da tabela via `solution_code_from_name()`.
+Sem isso o filtro parecia quebrado — selecionava o segmento certo e o pintava com
+outra solução. `classe_iap` e as métricas NÃO são tocadas por esse alinhamento.
 
 **Classes de condição:** Excelente `#00c2e8` · Bom `#00a651` · Regular `#fff200` · Mau `#f2a51a` · Péssimo `#d71920`.
 
