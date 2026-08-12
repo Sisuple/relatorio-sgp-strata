@@ -29,6 +29,11 @@ _CLASS_COLORS = {
     "- Regular": "#fff200",
     "Mau": "#f2a51a",
     "Péssimo": "#d71920",
+    # "CA" não é nível da escala IAP, e sem cor própria caía no fallback amarelo
+    # do JS — ficando igual a "- Regular". Espelha overview_service._IAP_CLASS_COLORS
+    # para o mapa não contradizer a legenda da rosca. Só entra na legenda quando
+    # a classe existe nos dados visíveis (filtro `label in present`).
+    "CA": "#000000",
 }
 
 # Ordem (pior→melhor na legenda) e paleta hardcoded das soluções corretivas.

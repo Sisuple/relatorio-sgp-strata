@@ -279,7 +279,11 @@ Substituição textual aplicada ao nome do dicionário **e** ao `tipoNome` do ba
 | Excelente | `#00c2e8` | | - Regular | `#fff200` |
 | Bom | `#00a651` | | Mau | `#f2a51a` |
 | ++ Regular | `#b6d7a8` | | Péssimo | `#d71920` |
-| + Regular | `#f4f1a6` | | | |
+| + Regular | `#f4f1a6` | | CA | `#000000` |
+
+`CA` não é nível da escala IAP: vem da tabela de códigos do cliente
+(`_IAP_CODE_GROUPS`, sem valor numérico). Ficou sem cor própria até 08/2026 e caía
+no fallback `#fff200` de quem consulta a paleta, saindo idêntica a `- Regular`.
 
 **Cores por solução** — duas fontes que precisam concordar: `_IAP_INTERVENTION_COLORS`
 (por código, `overview_service.py:50`) e `_solution_color()` (por **substring do nome**,
