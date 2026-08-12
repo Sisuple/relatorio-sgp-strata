@@ -132,6 +132,10 @@ _IAP_INTERVENTION_COLORS = {
     "RPS+REF": "#f2a51a",
     "REC": "#d71920",
     "Sem intervenção": "#82929d",
+    # Espelha a entrada "CA" de _IAP_CLASS_COLORS. Esta paleta é indexada por CÓDIGO
+    # e ficou de fora daquela correção, então na tela Soluções (e na composição por
+    # intervenção), que coloca cor por código, a CA seguia caindo no amarelo.
+    "CA": "#000000",
 }
 # Código de solução -> conceito IAP correspondente (Quadro 37 DNIT). README §11.3.
 # É o que permite colorir o mapa PELA solução em vez do IAP numérico (ver
@@ -664,6 +668,32 @@ def _solution_name(solution_code: str | None, solutions_json: Any = None) -> str
             _SOLUTION_LABELS.get(str(solution_code or ""), str(solution_code or "Sem intervenção"))
         )
     )
+
+
+# Inverso de _solution_name: nome exibido -> código corretivo. Montado a partir de
+# _SOLUTION_LABELS pela MESMA normalização que `_solution_name` aplica na ida, para
+# os dois lados não saírem do compasso quando um rótulo for renomeado.
+_SOLUTION_CODE_BY_LABEL = {
+    _canonical_solution_label(_normalize_solution_label(label)): code
+    for code, label in _SOLUTION_LABELS.items()
+}
+
+
+def solution_code_from_name(name: Any) -> str | None:
+    """Código corretivo ("RPS+REF") a partir do nome exibido na tabela.
+
+    Existe porque a tela de Soluções tem duas fontes para a solução do MESMO
+    segmento, e elas discordam em parte dos dados: a tabela, o filtro, a
+    distribuição e o Excel usam "Solução recomendada" (do JSON `solucoes` do
+    banco), enquanto o mapa pinta por `intervencao_iap` (da matriz de códigos IAP).
+    A paleta e a legenda do mapa são indexadas por código, então converter o nome
+    de volta em código é o que permite o mapa seguir a mesma fonte do filtro.
+
+    Devolve None para nomes fora da tabela Paragon — os compostos do DNIT
+    ("FR4 + CBUQ(4) + Drenagem"), por exemplo —, para quem chama preservar o
+    código que já tinha em vez de perder a cor do segmento.
+    """
+    return _SOLUTION_CODE_BY_LABEL.get(str(name or "").strip())
 
 
 def _solution_cost(solutions_json: Any = None) -> float:

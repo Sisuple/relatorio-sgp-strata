@@ -50,6 +50,9 @@ _SOLUTION_COLORS = {
     "RPS+REF": "#f2a51a",
     "REC": "#d71920",
     "Sem intervenção": "#82929d",
+    # Espelha overview_service._IAP_INTERVENTION_COLORS: é esta paleta (por código)
+    # que colore o mapa da tela Soluções, então sem a CA aqui ela seguia amarela lá.
+    "CA": "#000000",
 }
 
 
@@ -116,6 +119,7 @@ def render_overview_map(
     class_tooltip_label: str | None = None,
     unattended_color: str = "#2f6072",
     unattended_dash: str | None = "4 14",
+    unattended_label: str = "Fora do orçamento",
     legend_extra_items: dict[str, str] | None = None,
 ) -> None:
     """Renderiza o mapa Leaflet da rede no Streamlit.
@@ -126,7 +130,12 @@ def render_overview_map(
     - extent_km: extensão total (recebida por assinatura; o enquadramento real é
       feito pelo fitBounds no JS a partir das coordenadas).
     - attended_ids: ids atendidos pelo orçamento; os demais são desenhados
-      esmaecidos/tracejados. None => todos atendidos.
+      esmaecidos/tracejados. None => todos atendidos. Os não atendidos também ficam
+      FORA da legenda (ela se monta só com os visíveis), o que serve para destacar
+      um filtro sem que o resto da rodovia vire uma categoria da legenda.
+    - unattended_label: sufixo do tooltip dos não atendidos. Padrão "Fora do
+      orçamento"; a tela Soluções usa "Fora do filtro", porque lá o esmaecido
+      significa outra coisa.
     - legend_foot: rodapé customizado da legenda (senão usa o padrão do modo).
     - color_by: "iap" (cor por conceito) ou "solucao" (cor pela solução corretiva).
     - gap_px: afastamento lateral entre cenários/sentidos sobrepostos.
@@ -462,7 +471,7 @@ $sv_modal
                   ' · IAP ' + Number(segment.iap).toFixed(2) +
                   ' · $tooltip_label ' + colorKey +
                   (segment._custo_sre_label ? ' · Custo ' + segment._custo_sre_label : '') +
-                  (attended ? '' : ' · Fora do orçamento')
+                  (attended ? '' : ' · $unattended_label')
                 ).on('click', (e) => window.__openTrecho(e.latlng.lat, e.latlng.lng, segment.detail));
                 drawn.push({ polyline: pl, coords: coordinates, sidePx });
               });
@@ -521,6 +530,7 @@ $sv_modal
             unattended_opacity=0.96 if unattended_color == "#ef4444" else 0.62,
             unattended_weight=5 if unattended_color == "#ef4444" else 2.5,
             unattended_dash="null" if unattended_dash is None else json.dumps(unattended_dash),
+            unattended_label=unattended_label,
             gap_px=float(gap_px),  # separação em px entre sentidos vizinhos (constante em qualquer zoom)
             sv_css=SV_CSS,
             sv_modal=SV_MODAL_HTML,
