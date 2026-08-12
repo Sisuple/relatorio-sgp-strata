@@ -104,6 +104,11 @@ _IAP_CLASS_COLORS = {
     "- Regular": "#fff200",
     "Mau": "#f2a51a",
     "Péssimo": "#d71920",
+    # "CA" é classe da tabela de códigos do cliente (_IAP_CODE_GROUPS), não um
+    # conceito da escala IAP. Sem entrada aqui ela caía no fallback "#fff200" de
+    # quem consulta este dicionário e saía IDÊNTICA a "- Regular" na legenda e na
+    # rosca. Preto por não ser um nível de severidade.
+    "CA": "#000000",
 }
 # Ordem canônica dos códigos de solução corretiva (menos -> mais severa). Usada
 # para ordenar as composições por intervenção. README §11.1.
