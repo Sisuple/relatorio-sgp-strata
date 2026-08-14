@@ -1272,6 +1272,28 @@ def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") ->
     return list(collapsed.values())
 
 
+def _resolve_analysis_id(
+    selected_road: str | None,
+    matrix_type: str = "Paragon",
+    scenario_key: str | None = None,
+) -> int | None:
+    """Resolve a análise (cenário) da rodovia/key informada, por metodologia.
+
+    Sem `scenario_key` explícita, cai no cenário default da metodologia pedida.
+    """
+    code = _normalize_road_code(selected_road)
+    if not code:
+        return None
+
+    if matrix_type == "Matriz Cadastrada":
+        analysis = _get_dnit_analysis_for_road(code, scenario_key)
+        return int(analysis["analise_id"]) if analysis else None
+
+    db = MySQLConnection()
+    scenario = _get_iap_scenario_by_key(code, scenario_key) or _get_default_iap_scenario(db, code)
+    return int(scenario["analise_id"]) if scenario else None
+
+
 def get_available_years(
     selected_road: str | None,
     matrix_type: str = "Paragon",
@@ -1285,21 +1307,10 @@ def get_available_years(
     cenário default da metodologia pedida. Em bases com um ciclo por análise o
     resultado é o mesmo de antes — o horizonte é o do único ciclo.
     """
-    code = _normalize_road_code(selected_road)
-    if not code:
+    analise_id = _resolve_analysis_id(selected_road, matrix_type, scenario_key)
+    if analise_id is None:
         return []
-
-    if matrix_type == "Matriz Cadastrada":
-        analysis = _get_dnit_analysis_for_road(code, scenario_key)
-        if not analysis:
-            return []
-        return _get_analysis_years(analysis["analise_id"], "Matriz Cadastrada")
-
-    db = MySQLConnection()
-    scenario = _get_iap_scenario_by_key(code, scenario_key) or _get_default_iap_scenario(db, code)
-    if not scenario:
-        return []
-    return _get_analysis_years(scenario["analise_id"], "Paragon")
+    return _get_analysis_years(analise_id, matrix_type)
 
 
 def get_iap_extraction(
@@ -1877,6 +1888,71 @@ _INTERVENTION_TABLE_BY_MATRIX = {
     "Matriz Cadastrada": "analise_gerencial_intervencoes_dnit",
     "Paragon": "analise_gerencial_intervencoes_iap",
 }
+
+
+@cached(ttl=1800)
+def _get_analysis_year_window(analise_id: int) -> tuple[int, int] | None:
+    """Janela de anos da análise lida do CADASTRO dos ciclos, não das intervenções.
+
+    `analise_gerencial_ciclos.ano_inicial`/`ano_final` guardam o horizonte que foi
+    rodado (ex.: 2027 a 2054, fatiado em 3-4 ciclos). Derivar isso de
+    `MIN/MAX(intervencoes.ano)` dá um fim menor, porque o último ano só aparece se
+    houver intervenção/orçamento nele — era o que fazia o horizonte de cada cenário
+    parar em ano diferente (2037, 2050, 2052) mesmo tendo todos ido até 2054.
+
+    Devolve None quando a base não tem essas colunas ou não as preenche; nesse caso
+    quem chama volta a deduzir pelos anos de intervenção/orçamento.
+    """
+    db = MySQLConnection()
+    try:
+        rows = db.execute_query(
+            """
+            SELECT MIN(agc.ano_inicial) AS ano_ini,
+                   MAX(agc.ano_final) AS ano_fim
+            FROM analise_gerencial_ciclos agc
+            WHERE agc.analise_gerencial_id = %s
+              AND agc.ano_inicial IS NOT NULL
+              AND agc.ano_final IS NOT NULL
+            """,
+            (int(analise_id),),
+        ) or []
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+    ano_ini = rows[0].get("ano_ini")
+    ano_fim = rows[0].get("ano_fim")
+    if ano_ini is None or ano_fim is None:
+        return None
+    ano_ini, ano_fim = int(ano_ini), int(ano_fim)
+    if ano_fim < ano_ini:
+        return None
+    return ano_ini, ano_fim
+
+
+def get_analysis_year_window(
+    selected_road: str | None,
+    matrix_type: str = "Paragon",
+    scenario_key: str | None = None,
+) -> tuple[int, int] | None:
+    """Horizonte cadastrado do cenário (primeiro e último ano), ou None se a base
+    não tiver esse cadastro.
+
+    A key já é "analise_id:ciclo_id" e é a fonte preferida: consultar de novo pela
+    rodovia pode cair em outra análise quando a rodovia tem vários cenários. Só sem
+    key (ou com key fora do padrão) cai na resolução por rodovia.
+    """
+    analise_id: int | None = None
+    if scenario_key:
+        head = str(scenario_key).split(":", 1)[0].strip()
+        if head.isdigit():
+            analise_id = int(head)
+    if analise_id is None:
+        analise_id = _resolve_analysis_id(selected_road, matrix_type, scenario_key)
+    if analise_id is None:
+        return None
+    return _get_analysis_year_window(analise_id)
 
 
 @cached(ttl=1800)

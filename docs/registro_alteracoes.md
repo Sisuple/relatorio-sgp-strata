@@ -977,3 +977,133 @@ O título do mapa ficou mais próximo do próprio mapa. No gráfico de extensão
 O Tipo de Matriz ainda parecia diferente porque era montado com outro componente do Streamlit. Troquei somente sua apresentação para usar o mesmo campo compacto dos filtros de Rodovia, Cenário e Ano. A seleção continua sendo única.
 
 Também padronizei a lista aberta. O Tipo de Matriz agora mostra as mesmas caixas de seleção usadas nos outros slicers, mas desmarca automaticamente a opção anterior quando uma nova é escolhida.
+
+
+## Nome do cenário no filtro (revisão)
+
+O rótulo do cenário voltou a ficar ambíguo depois que a base passou a usar outro padrão de nome.
+
+Exemplos do banco (`nome` da análise):
+
+- `Cenário 1: I_SP088_2026 - CRESCENTE (Reforço)`;
+- `Cenário 1: I_SP088_2026 - CRESCENTE (Sem Reforço)`;
+- `Cenário 1: V_SP055_2026 - DECRESCENTE (km 368,2 a 369,4) (Sem Reforço)`;
+- `Cenário 1: Duplicação IV_055_2028 - CRESCENTE (Reforço)`.
+
+O que estava acontecendo:
+
+- a regra de trecho esperava o número **depois** do código da rodovia (`SP-055_trecho V`). No padrão novo o trecho vem **antes** (`I_SP088_2026`), então ela lia o ano como se fosse o trecho e todos os cenários viravam `trecho 2026`;
+- `Reforço` e `Sem Reforço` eram descartados, mesmo sendo a única diferença entre dois cenários;
+- a faixa de km só era reconhecida sem o prefixo `km`, então `(km 368,2 a 369,4)` também caía fora.
+
+Resultado: cenários diferentes apareciam com o mesmo texto no filtro.
+
+O que foi feito:
+
+- a leitura do identificador passou a ser token a token, em vez de um padrão fixo de posição. Assim o trecho é reconhecido antes ou depois do código da rodovia;
+- o ano é preservado, porque diferencia cenários (`2026` e `2028`);
+- qualificadores como `Duplicação` são preservados;
+- `Reforço` e `Sem Reforço` passaram a aparecer no rótulo;
+- a faixa de km é reconhecida com e sem o prefixo `km`;
+- continua saindo do rótulo apenas o código da rodovia, que já é escolhido no filtro de Rodovia.
+
+Exemplos do rótulo agora:
+
+- `Cenário 1 - trecho I - 2026 - CRESCENTE - Reforço`;
+- `Cenário 1 - trecho I - 2026 - CRESCENTE - Sem Reforço`;
+- `Cenário 1 - trecho V - 2026 - DECRESCENTE - km 368,2 a 369,4 - Sem Reforço`;
+- `Cenário 1 - Duplicação - trecho IV - 2028 - CRESCENTE - Reforço`.
+
+Os nomes no padrão antigo continuam com o mesmo rótulo de antes. O valor real do cenário não muda; só muda o texto exibido.
+
+Arquivo alterado: `app.py` (`_network_scenario_label` e o novo `_scenario_identifier_tokens`).
+
+
+## Troca de cenário na mesma pista
+
+A trava que impede duas pistas iguais estava mantendo sempre a **primeira** seleção. Na prática, ao clicar em outro `Crescente`, o clique novo era descartado e o antigo continuava marcado — para trocar de cenário era preciso desmarcar o antigo primeiro.
+
+Agora quem manda é o clique novo. Ao marcar um segundo `Crescente`, o `Crescente` anterior é desmarcado automaticamente.
+
+A regra de dupla contagem continua igual:
+
+- `Todos` fica sozinho;
+- `Crescente` só combina com `Decrescente`.
+
+Detalhes:
+
+- ao trocar um dos lados, o sentido oposto que já estava marcado é preservado (`Crescente A` + `Decrescente A`, clicando em `Crescente B`, resulta em `Crescente B` + `Decrescente A`);
+- o aviso de ajuste da seleção só aparece quando a combinação em si era inválida (ex.: misturar `Todos` com um sentido). Trocar de cenário na mesma pista é o comportamento esperado e não gera mais aviso;
+- a regra continua sendo aplicada por rodovia.
+
+Para saber qual cenário acabou de ser clicado, a seleção anterior é guardada na sessão antes do widget, porque o estado do próprio filtro já chega com o valor novo.
+
+Vale nas duas barras: `Visão geral` e `Cenário econômico`.
+
+Arquivo alterado: `app.py` (`_sanitize_network_scenario_selection`, `render_network_top_bar` e `render_economic_top_bar`).
+
+
+## Filtro de Horizonte: erro com um único ano e anos faltando
+
+Duas coisas na mesma caixa.
+
+### 1. `RangeError: min (0) is equal/bigger than max (0)`
+
+Quando a análise tinha um único ano (o rótulo mostrava `2036 até 2036 · 1 ano(s)`), o `st.select_slider` recebia uma lista com uma só opção. O componente monta a régua com `min` e `max` iguais e quebra a tela.
+
+Agora, com um único ano, não existe horizonte para escolher: o ano aparece como texto e o filtro não desenha a régua. Com dois anos ou mais nada muda.
+
+Também passei a limpar o valor salvo do horizonte quando ele não existe mais na lista de anos (acontece ao trocar de cenário ou de base), porque isso gerava erro de opção inválida.
+
+### 2. Anos que não apareciam
+
+O horizonte era montado só a partir do orçamento (`budget_items`). Esse orçamento só traz ano que tem item com custo maior que zero — ano da análise sem item precificado não entrava na régua. Em cenários com poucos itens precificados, a régua encolhia; no caso do erro acima, encolheu para um único ano.
+
+Agora os anos da própria análise também entram na conta do horizonte. A régua passa a cobrir a janela da análise, e não apenas os anos que já têm custo lançado.
+
+Vale nas duas telas de `Cenário econômico` (Paragon e Matriz Cadastrada). Se a consulta dos anos falhar, o horizonte volta a usar só os anos do orçamento, sem derrubar a tela.
+
+Nenhum cálculo mudou: o custo continua vindo dos itens de orçamento dentro da janela selecionada. O que mudou é até onde a janela pode ir.
+
+Arquivos alterados: `app.py` (`_render_horizon_year_selector`, `_budget_year_bounds`, `_analysis_years_safe`, `_render_economic_controls` e `_render_dnit_economic_controls`).
+
+
+## Horizonte lido do cadastro dos ciclos
+
+O ano final do horizonte variava de cenário para cenário (2037, 2050, 2052, 2054) mesmo tendo todos sido rodados até 2054.
+
+### Causa
+
+Um cenário no banco é uma análise fatiada em **ciclos**, e cada ciclo é uma janela de anos. Exemplo real (análise 273):
+
+- ciclo 587, ordem 1: 2027 a 2028;
+- ciclo 588, ordem 2: 2029 a 2037;
+- ciclo 589, ordem 3: 2038 a 2052;
+- ciclo 590, ordem 4: 2053 a 2054.
+
+O painel nunca lia esse cadastro. Ele deduzia a janela procurando `MIN`/`MAX(ano)` nas intervenções e nos orçamentos. Isso dá um fim menor, porque o último ano só existe como registro se houver intervenção com custo naquele ano. Conferindo no banco, o último ano com orçamento agrupado por ciclo explica exatamente os números que apareciam na tela: 2028, 2036, 2037, 2050, 2051, 2052 e 2054.
+
+Ou seja: o horizonte mostrava "último ano em que esse cenário tem obra", e não "horizonte da análise".
+
+### Correção
+
+`analise_gerencial_ciclos` já tem `ano_inicial` e `ano_final`. O horizonte passou a ler dali, somando todos os ciclos da análise: primeiro ano = `MIN(ano_inicial)`, último ano = `MAX(ano_final)`.
+
+Resultado nos 44 cenários da base atual:
+
+- antes, anos finais distintos: 2050, 2051, 2052 e 2054;
+- agora: 2054 em todos.
+
+O primeiro ano continua variando, e isso está certo: os cenários de `Duplicação` começam depois (2029, 2030, 2031, 2033).
+
+### Detalhes
+
+A análise é identificada pela própria `scenario_key`, que já é `analise_id:ciclo_id`. Antes eu resolvia consultando de novo pela rodovia, e isso trazia a janela de outro cenário quando a rodovia tem vários (um cenário de 2027 aparecia como 2033).
+
+Se a base não tiver `ano_inicial`/`ano_final` preenchidos, ou se a consulta falhar, o horizonte volta a ser deduzido pelos anos de intervenção e, por último, pelos anos do orçamento. Nenhuma tela quebra por causa disso.
+
+Isso também resolve na origem o erro `RangeError` do filtro de Horizonte: a janela não colapsa mais para um único ano. A proteção do seletor continua no lugar como rede de segurança.
+
+Observação sobre a base atual (`sgp-cnl`): todas as 44 análises são `Matriz Cadastrada` e `analise_gerencial_intervencoes_iap` está vazia. O caminho Paragon não tem dado nessa base.
+
+Arquivos alterados: `services/overview_service.py` (`_get_analysis_year_window`, `get_analysis_year_window`, `_resolve_analysis_id`) e `app.py` (`_analysis_years_safe`).
