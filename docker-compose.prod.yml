@@ -2,3 +2,6 @@ services:
   app:
     image: ghcr.io/strataengenharia/relatorio-sgp-strata:${IMAGE_TAG:-latest}
     pull_policy: always
+  auth-gateway:
+    image: ghcr.io/strataengenharia/relatorio-sgp-strata-auth-gateway:${IMAGE_TAG:-latest}
+    pull_policy: always

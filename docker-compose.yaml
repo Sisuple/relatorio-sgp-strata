@@ -16,3 +16,17 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+
+  auth-gateway:
+    build:
+      context: ./auth-gateway
+      dockerfile: Dockerfile
+    image: relatorio-sgp-strata-auth-gateway:latest
+    container_name: relatorio-sgp-strata-auth-gateway
+    ports:
+      - "127.0.0.1:8502:8502"
+    env_file:
+      - .env
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
