@@ -51,6 +51,7 @@ from services.overview_service import (
     get_available_roads,
     get_available_scenarios,
     get_available_years,
+    get_analysis_year_window,
     get_scenario_label,
     solution_severity_rank,
     get_dnit_economic_data,
@@ -1984,9 +1985,44 @@ def _short_scenario_label(s: dict | None) -> str:
 # Só casam em nomes que os tragam — bases cujos nomes não têm trecho/variante/faixa
 # de km seguem rendendo exatamente o mesmo rótulo de antes.
 _SCEN_NUMERO_RE = re.compile(r"\bCen[áa]rio\s+([A-Za-z0-9]+)\s*:", re.I)
-_SCEN_TRECHO_RE = re.compile(r"\b[A-Z]{2,3}-?\d+[_-](?:trecho\s+)?([IVXLC]+|\d+)\b", re.I)
 _SCEN_VARIANTE_RE = re.compile(r"\b(IRI)\s*(\d+(?:[.,]\d+)?)", re.I)
-_SCEN_FAIXA_KM_RE = re.compile(r"\(\s*(\d+(?:[.,]\d+)?\s*a\s*\d+(?:[.,]\d+)?)\s*\)")
+# O banco grava a faixa com e sem o prefixo "km" — sem o `(?:km\s*)?` a faixa era
+# descartada e cenários que só diferem pelo km viravam o mesmo rótulo.
+_SCEN_FAIXA_KM_RE = re.compile(r"\(\s*(?:km\s*)?(\d+(?:[.,]\d+)?\s*a\s*\d+(?:[.,]\d+)?)\s*\)", re.I)
+_SCEN_REFORCO_RE = re.compile(r"\(\s*(sem\s+refor[çc]o|refor[çc]o)\s*\)", re.I)
+_SCEN_ANO_RE = re.compile(r"^(?:19|20)\d{2}$")
+_SCEN_ROMANO_RE = re.compile(r"^[IVXLC]+$", re.I)
+# Código/número de rodovia ("SP088", "SP-055", "BR-364", "088"): já vem do filtro
+# de Rodovia, então sai do rótulo. Ano é checado antes para não cair aqui.
+_SCEN_RODOVIA_TOKEN_RE = re.compile(r"^(?:[A-Z]{2,3}-?)?\d{2,4}$", re.I)
+
+
+def _scenario_identifier_tokens(cen: str) -> list[str]:
+    """Tokens do identificador do cenário, sem o que já está em outro filtro.
+
+    O identificador é o pedaço antes do sentido: `I_SP088_2026`,
+    `Duplicação IV_055_2028`, `SP-055_trecho V`. O trecho pode vir antes ou
+    depois do código da rodovia, por isso a leitura é token a token em vez de
+    um padrão fixo. Preserva trecho, ano e qualificadores (ex.: `Duplicação`);
+    descarta apenas o código da rodovia.
+    """
+    head = re.split(r"\s+-\s+", cen, maxsplit=1)[0]
+    head = _SCEN_NUMERO_RE.sub("", head)
+    head = re.sub(r"\(.*?\)", " ", head)  # parênteses (SH, faixa, reforço) têm regra própria
+    tokens: list[str] = []
+    for raw in re.split(r"[_\s]+", head):
+        token = raw.strip(" .,;:")
+        if not token or token.lower() == "trecho":
+            continue
+        if _SCEN_ANO_RE.match(token):
+            tokens.append(token)
+        elif _SCEN_RODOVIA_TOKEN_RE.match(token):
+            continue
+        elif _SCEN_ROMANO_RE.match(token):
+            tokens.append(f"trecho {token.upper()}")
+        else:
+            tokens.append(token)
+    return tokens
 
 
 def _network_scenario_label(s: dict | None) -> str:
@@ -2028,9 +2064,7 @@ def _network_scenario_label(s: dict | None) -> str:
     elif re.search(r"\bfixa\b", low):
         parts.append("Fixa")
 
-    trecho = _SCEN_TRECHO_RE.search(cen)
-    if trecho:
-        parts.append(f"trecho {trecho.group(1).upper()}")
+    parts.extend(_scenario_identifier_tokens(cen))
 
     if "cr e de" in low or "cr/de" in low or "ambas" in low:
         parts.append("CR e DE")
@@ -2048,6 +2082,12 @@ def _network_scenario_label(s: dict | None) -> str:
     faixa = _SCEN_FAIXA_KM_RE.search(cen)
     if faixa:
         parts.append(f"km {faixa.group(1)}")
+
+    # Reforço/Sem Reforço costuma ser a única diferença entre dois cenários do
+    # mesmo trecho e sentido, então precisa aparecer no rótulo.
+    reforco = _SCEN_REFORCO_RE.search(cen)
+    if reforco:
+        parts.append("Sem Reforço" if "sem" in reforco.group(1).lower() else "Reforço")
 
     gatilho = re.search(r"(GATILHO\s+[A-Z0-9._/-]+)", cen, re.I)
     if gatilho:
@@ -2261,7 +2301,11 @@ def _normalize_scenario_pista(scenario: dict | None) -> str:
     return value or "outro"
 
 
-def _sanitize_network_scenario_selection(selected_tokens: list[str], scenario_options: list[dict]) -> tuple[list[str], str | None]:
+def _sanitize_network_scenario_selection(
+    selected_tokens: list[str],
+    scenario_options: list[dict],
+    previous_tokens: list[str] | None = None,
+) -> tuple[list[str], str | None]:
     """Impede combinações de cenários que duplicam a mesma pista/rodovia.
 
     Regra:
@@ -2269,51 +2313,60 @@ def _sanitize_network_scenario_selection(selected_tokens: list[str], scenario_op
     - `Crescente` só pode combinar com `Decrescente`;
     - `Decrescente` só pode combinar com `Crescente`;
     - qualquer outra pista fica exclusiva para evitar dupla contagem.
+
+    `previous_tokens` é a seleção anterior. Ela define quem é o clique novo, e o
+    clique novo é quem manda: ao marcar um segundo `Crescente`, o `Crescente`
+    anterior é desmarcado em vez de o novo ser ignorado — sem isso não dá para
+    trocar de cenário, só desmarcando o antigo primeiro.
     """
     if not selected_tokens:
         return [], None
 
     option_by_token = {str(item["token"]): item for item in scenario_options}
     selected = [str(token) for token in selected_tokens if str(token) in option_by_token]
+    previous_set = {str(token) for token in (previous_tokens or [])}
     by_road: dict[str, list[str]] = {}
     for token in selected:
         road_code = str(option_by_token[token].get("road_code") or option_by_token[token].get("road") or "")
         by_road.setdefault(road_code, []).append(token)
 
+    def _pista(token: str) -> str:
+        return str(option_by_token[token].get("pista") or "")
+
     sanitized: list[str] = []
-    changed = False
-    for road_code, tokens in by_road.items():
+    conflict = False
+    for tokens in by_road.values():
         if len(tokens) <= 1:
             sanitized.extend(tokens)
             continue
 
-        def _pista(token: str) -> str:
-            return str(option_by_token[token].get("pista") or "")
+        # Âncora: o cenário recém-marcado. Se nada é novo (combinação inválida já
+        # gravada na sessão), cai no primeiro, como antes.
+        novos = [token for token in tokens if token not in previous_set]
+        anchor = novos[-1] if novos else tokens[0]
+        anchor_pista = _pista(anchor)
 
-        todos = [token for token in tokens if _pista(token) == "todos"]
-        if todos:
-            sanitized.append(todos[0])
-            changed = True
-            continue
+        keep = [anchor]
+        if anchor_pista in ("crescente", "decrescente"):
+            oposto = "decrescente" if anchor_pista == "crescente" else "crescente"
+            complementares = [token for token in tokens if _pista(token) == oposto]
+            if complementares:
+                # Preferir o sentido oposto que já estava marcado: o usuário só
+                # trocou o outro lado.
+                antigos = [token for token in complementares if token in previous_set]
+                keep.append((antigos or complementares)[0])
 
-        crescentes = [token for token in tokens if _pista(token) == "crescente"]
-        decrescentes = [token for token in tokens if _pista(token) == "decrescente"]
-        if crescentes or decrescentes:
-            allowed = []
-            if crescentes:
-                allowed.append(crescentes[0])
-            if decrescentes:
-                allowed.append(decrescentes[0])
-            sanitized.extend(allowed)
-            changed = changed or len(allowed) != len(tokens)
-            continue
-
-        sanitized.append(tokens[0])
-        changed = True
+        keep_set = set(keep)
+        kept_pistas = {_pista(token) for token in keep}
+        # Troca de cenário na mesma pista é o comportamento esperado, não avisa.
+        # Só avisa quando a combinação em si era inválida (ex.: `Todos` com sentido).
+        if any(_pista(token) not in kept_pistas for token in tokens if token not in keep_set):
+            conflict = True
+        sanitized.extend(token for token in tokens if token in keep_set)
 
     ordered = [token for token in selected if token in set(sanitized)]
     message = None
-    if changed or ordered != selected:
+    if conflict:
         message = (
             "A seleção de cenários foi ajustada para evitar dupla contagem: "
             "`Todos` fica sozinho; `Crescente` só combina com `Decrescente`."
@@ -2398,6 +2451,9 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
         valid_scenario_tokens = {item["token"] for item in scenario_options}
         pending_key = "_topbar_network_scenario_pending"
         warning_key = "_topbar_network_scenario_warning"
+        # Guardada antes do widget: é o que permite saber qual cenário acabou de
+        # ser clicado (o session_state do widget já vem com o valor novo).
+        previous_scenarios_key = "_topbar_network_scenario_previous"
         if pending_key in st.session_state:
             pending_values = [
                 token for token in st.session_state.pop(pending_key)
@@ -2410,6 +2466,10 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
             current_scenarios = [str(scenario_options[0]["token"])]
         st.session_state[scenario_key] = current_scenarios
         scenario_warning = st.session_state.pop(warning_key, None)
+        previous_scenarios = [
+            str(token) for token in (st.session_state.get(previous_scenarios_key) or [])
+            if str(token) in valid_scenario_tokens
+        ]
 
         with scenario_col:
             _filter_label("Cenário")
@@ -2433,10 +2493,13 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
             sanitized_scenarios, sanitize_message = _sanitize_network_scenario_selection(
                 selected_scenarios,
                 scenario_options,
+                previous_tokens=previous_scenarios,
             )
-            if sanitize_message:
+            st.session_state[previous_scenarios_key] = list(sanitized_scenarios)
+            if [str(token) for token in selected_scenarios] != sanitized_scenarios:
                 st.session_state[pending_key] = sanitized_scenarios
-                st.session_state[warning_key] = sanitize_message
+                if sanitize_message:
+                    st.session_state[warning_key] = sanitize_message
                 st.rerun()
             selected_scenarios = sanitized_scenarios
             if scenario_warning:
@@ -2545,6 +2608,7 @@ def render_economic_top_bar() -> tuple[str, list[str], list[tuple[str, str]], di
         valid_scenario_tokens = set(option_by_token.keys())
         pending_key = "_topbar_eco_scenario_pending"
         warning_key = "_topbar_eco_scenario_warning"
+        previous_scenarios_key = "_topbar_eco_scenario_previous"
         if pending_key in st.session_state:
             pending_values = [
                 token for token in st.session_state.pop(pending_key)
@@ -2557,6 +2621,10 @@ def render_economic_top_bar() -> tuple[str, list[str], list[tuple[str, str]], di
             current_scenarios = [str(scenario_options[0]["token"])]
         st.session_state[scenario_key] = current_scenarios
         scenario_warning = st.session_state.pop(warning_key, None)
+        previous_scenarios = [
+            str(token) for token in (st.session_state.get(previous_scenarios_key) or [])
+            if str(token) in valid_scenario_tokens
+        ]
 
         with scenario_col:
             _filter_label("Cenário")
@@ -2577,10 +2645,13 @@ def render_economic_top_bar() -> tuple[str, list[str], list[tuple[str, str]], di
             sanitized_scenarios, sanitize_message = _sanitize_network_scenario_selection(
                 selected_scenarios,
                 scenario_options,
+                previous_tokens=previous_scenarios,
             )
-            if sanitize_message:
+            st.session_state[previous_scenarios_key] = list(sanitized_scenarios)
+            if [str(token) for token in selected_scenarios] != sanitized_scenarios:
                 st.session_state[pending_key] = sanitized_scenarios
-                st.session_state[warning_key] = sanitize_message
+                if sanitize_message:
+                    st.session_state[warning_key] = sanitize_message
                 st.rerun()
             selected_scenarios = sanitized_scenarios
             if scenario_warning:
@@ -4161,12 +4232,20 @@ def _budget_year_bounds(
     *,
     fallback_start: int | None = None,
     fallback_horizon: int = _ECONOMIC_DEFAULT_HORIZON,
+    extra_years: list[int] | None = None,
 ) -> tuple[int, int]:
-    """Retorna o primeiro e o último ano disponível para montar a linha do tempo."""
+    """Retorna o primeiro e o último ano disponível para montar a linha do tempo.
+
+    `budget_items` só traz ano que tem item de orçamento com custo — ano da
+    análise sem item precificado não aparece ali. `extra_years` (os anos da
+    análise) entra na conta para o horizonte cobrir a janela inteira.
+    """
+    candidates: list[int] = [int(year) for year in (extra_years or [])]
     if budget_items is not None and not budget_items.empty and "Ano" in budget_items.columns:
         years = pd.to_numeric(budget_items["Ano"], errors="coerce").dropna()
-        if not years.empty:
-            return int(years.min()), int(years.max())
+        candidates.extend(int(year) for year in years.tolist())
+    if candidates:
+        return min(candidates), max(candidates)
     fallback_start = int(fallback_start or _ECONOMIC_FALLBACK_START_YEAR)
     return int(fallback_start), int(fallback_start) + int(fallback_horizon) - 1
 
@@ -4222,6 +4301,32 @@ def _render_scope_mode_selector(key: str) -> str:
     return options[selected]
 
 
+def _analysis_years_safe(road: str | None, matrix_type: str, scenario_key: str | None) -> list[int]:
+    """Anos da análise para dimensionar o horizonte, sem derrubar a tela se falhar.
+
+    Prefere a janela CADASTRADA nos ciclos (`ano_inicial`/`ano_final`): é o
+    horizonte que foi rodado, igual para todos os cenários. Os anos de intervenção
+    param no último ano em que houve obra, o que fazia cada cenário exibir um fim
+    diferente (2037, 2050, 2052) mesmo tendo todos ido até 2054.
+
+    Se a base não tiver esse cadastro, volta a deduzir pelos anos de intervenção —
+    e, se nem isso responder, o cálculo segue com os anos do próprio orçamento.
+    """
+    if not road:
+        return []
+    try:
+        window = get_analysis_year_window(road, matrix_type, scenario_key or None)
+        if window:
+            start, end = window
+            return list(range(int(start), int(end) + 1))
+    except Exception:
+        pass
+    try:
+        return [int(year) for year in get_available_years(road, matrix_type, scenario_key or None)]
+    except Exception:
+        return []
+
+
 def _render_horizon_year_selector(
     *,
     key: str,
@@ -4232,6 +4337,23 @@ def _render_horizon_year_selector(
     years = list(range(int(start_year), int(end_year) + 1))
     if not years:
         years = [int(start_year)]
+
+    if len(years) == 1:
+        # `st.select_slider` com uma única opção quebra no componente (min == max
+        # ⇒ "RangeError: min (0) is equal/bigger than max (0)"). Análise de um ano
+        # só não tem horizonte para escolher: mostra o ano e pronto.
+        único = int(years[0])
+        st.markdown(
+            f'<div class="economic-control-value">{único} · 1 ano(s)</div>',
+            unsafe_allow_html=True,
+        )
+        return 1, único
+
+    # Valor salvo de outro recorte pode ter saído da lista (cenário/base diferente).
+    # Sem isso o próprio Streamlit levanta erro de opção inválida.
+    if key in st.session_state and st.session_state[key] not in years:
+        del st.session_state[key]
+
     selected_end_year = st.select_slider(
         "Até o ano",
         options=years,
@@ -4588,14 +4710,22 @@ def _budget_items_for_year(budget_items: pd.DataFrame | None, year: int | None) 
     return budget_items.loc[years == int(year)].copy()
 
 
-def _render_economic_controls(table_df, budget_items, total_snv: int, scenario_key: str) -> tuple[int, int, float, int, int, str]:
+def _render_economic_controls(
+    table_df,
+    budget_items,
+    total_snv: int,
+    scenario_key: str,
+    available_years: list[int] | None = None,
+) -> tuple[int, int, float, int, int, str]:
     """Sliders do cenário econômico: orçamento anual, horizonte e modo de cálculo.
     O default do orçamento cobre 100% da necessidade e o horizonte default é o total programado no banco."""
     budget_col, horizon_col, scope_col, _spacer = st.columns([1, 1, 1.05, 1], gap="medium")
 
     # Horizonte TOTAL da análise (ano-base até o último ano programado) — é o default
     # e o máximo do slider (não fixo em 8/20). O gestor pode reduzir a partir do total.
-    start_year, end_year = _budget_year_bounds(budget_items)
+    # `available_years` garante que o horizonte cubra os anos da análise, e não só
+    # os anos que já têm item de orçamento precificado.
+    start_year, end_year = _budget_year_bounds(budget_items, extra_years=available_years)
 
     # Horizonte primeiro: a necessidade total (default do orçamento) depende dele.
     with horizon_col:
@@ -6328,6 +6458,7 @@ def _render_economic_page(
         budget_items,
         total_snv,
         scenario_key,
+        available_years=_analysis_years_safe(road, "Paragon", scenario_key),
     )
     calc_start_year = horizon_end_year if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY else horizon_start_year
     calc_horizon = _analysis_budget_multiplier(scope_mode, horizon_start_year, horizon_end_year)
@@ -6731,6 +6862,7 @@ def _render_dnit_economic_controls(
     scenario_key: str,
     budget_items: pd.DataFrame | None = None,
     ano_base: int | None = None,
+    available_years: list[int] | None = None,
 ) -> tuple[int, int, float, int, int, str]:
     """Mesmo layout do controle Paragon, mas com defaults compatíveis com DNIT."""
     budget_col, horizon_col, scope_col, _spacer = st.columns([1, 1, 1.05, 1], gap="medium")
@@ -6738,6 +6870,7 @@ def _render_dnit_economic_controls(
         budget_items,
         fallback_start=ano_base,
         fallback_horizon=30,
+        extra_years=available_years,
     )
 
     with horizon_col:
@@ -6988,11 +7121,15 @@ def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> No
     priority_mode_key = f"dnit_priority_mode_{scenario_scope_key}"
     priority_view_key = f"dnit_priority_view_{scenario_scope_key}"
     priority_mode = _dnit_priority_mode_from_state(priority_mode_key)
+    _dnit_years: list[int] = []
+    for _r, _k in _dnit_pairs:
+        _dnit_years.extend(_analysis_years_safe(_r, "Matriz Cadastrada", _k))
     annual_budget, horizon, _prio_min, horizon_start_year, horizon_end_year, scope_mode = _render_dnit_economic_controls(
         total_need,
         scenario_scope_key,
         budget_items=budget_items,
         ano_base=ano_base,
+        available_years=_dnit_years,
     )
 
     calc_horizon = _analysis_budget_multiplier(scope_mode, horizon_start_year, horizon_end_year)
