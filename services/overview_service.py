@@ -1272,6 +1272,71 @@ def get_available_scenarios(selected_road: str, matrix_type: str = "Paragon") ->
     return list(collapsed.values())
 
 
+@_cache_unless_empty(maxsize=32)
+def get_scenario_km_ranges(analise_ids: tuple[int, ...]) -> dict[int, list[tuple[float, float]]]:
+    """Intervalos de km cobertos por cada análise, de `analise_gerencial_segmento_pistas`.
+
+    Existe para a tela avisar quando dois cenários selecionados juntos cobrem o
+    MESMO km e portanto contam km/custo em dobro. É a única fonte confiável do
+    footprint: `dados_trechos.ids_segmentos` grava um único elemento na maioria
+    das análises e cruza indevidamente entre análises diferentes.
+
+    Devolve `{analise_id: [(km_inicial, km_final), ...]}` com os intervalos já
+    unidos (trechos contíguos viram um só), para o teste de sobreposição não
+    depender do número de segmentos. Análises sem segmentos ficam fora do dict.
+    """
+    ids = tuple(sorted({int(value) for value in (analise_ids or ()) if value is not None}))
+    if not ids:
+        return {}
+
+    db = MySQLConnection()
+    placeholders = ", ".join(["%s"] * len(ids))
+    rows = db.execute_query(
+        f"""
+        SELECT analise_gerencial_id AS analise_id, km_inicial, km_final
+        FROM analise_gerencial_segmento_pistas
+        WHERE analise_gerencial_id IN ({placeholders})
+          AND km_inicial IS NOT NULL AND km_final IS NOT NULL
+        ORDER BY analise_gerencial_id, km_inicial
+        """,
+        ids,
+    ) or []
+
+    ranges: dict[int, list[tuple[float, float]]] = {}
+    for row in rows:
+        try:
+            km_i, km_f = _to_float(row["km_inicial"]), _to_float(row["km_final"])
+        except (TypeError, ValueError):
+            continue
+        # O banco grava alguns segmentos invertidos (decrescente): normaliza.
+        low, high = (km_i, km_f) if km_i <= km_f else (km_f, km_i)
+        bucket = ranges.setdefault(int(row["analise_id"]), [])
+        # Vem ordenado por km_inicial, então basta olhar o último para unir.
+        if bucket and low <= bucket[-1][1]:
+            bucket[-1] = (bucket[-1][0], max(bucket[-1][1], high))
+        else:
+            bucket.append((low, high))
+    return ranges
+
+
+def km_ranges_overlap(
+    ranges_a: list[tuple[float, float]],
+    ranges_b: list[tuple[float, float]],
+    tolerance: float = 0.001,
+) -> tuple[float, float] | None:
+    """Primeiro trecho de km em comum entre dois footprints, ou None.
+
+    `tolerance` (1 m) evita acusar sobreposição onde uma análise termina no km em
+    que a outra começa — encosto, não superposição.
+    """
+    for start_a, end_a in ranges_a or []:
+        for start_b, end_b in ranges_b or []:
+            start, end = max(start_a, start_b), min(end_a, end_b)
+            if end - start > tolerance:
+                return (start, end)
+    return None
+
+
 def _resolve_analysis_id(
     selected_road: str | None,
     matrix_type: str = "Paragon",
@@ -2051,6 +2116,69 @@ def _get_analysis_years(analise_id: int, matrix_type: str) -> list[int]:
     return [int(row["ano"]) for row in rows if row.get("ano") is not None]
 
 
+@_cache_unless_empty(maxsize=64)
+def _get_analysis_condition_years(analise_id: int) -> list[int]:
+    """Anos em que a análise tem CONDIÇÃO medida (IRI ou IGG), não obra programada.
+
+    `analise_gerencial_intervencoes_dnit` só tem linha no ano em que a matriz
+    programou intervenção, então `_get_analysis_years` devolve poucos anos para
+    trechos curtos: o cenário "Duplicação IV_055_2028 CRESCENTE" tem obra em 3 anos
+    (2036, 2043, 2050) mas IRI calculado nos 27 anos de 2028 a 2054. Nas telas de
+    condição (Visão geral e Diagnóstico) o filtro de ano tem de oferecer os 27 — o
+    dado existe, e ano sem obra continua tendo condição.
+    """
+    db = MySQLConnection()
+    # Exige VALOR, não só linha: o ano-base da análise tem uma linha por segmento
+    # como referência, mas com `iria` NULL e `igga` = 0 (confirmado na BR-055/2026,
+    # 112 linhas de cada, todas sem valor). Listar esse ano fazia o Diagnóstico abrir
+    # com IRI 0,00 · IGG 0 · 0,0% acima do gatilho — tudo zero, sem nada a ler.
+    rows = db.execute_query(
+        """
+        SELECT DISTINCT ano FROM (
+            SELECT r.ano
+            FROM analise_gerencial_roughness r
+            JOIN analise_gerencial_ciclos c ON c.id = r.gerencial_ciclo_id
+            WHERE c.analise_gerencial_id = %s AND r.ano IS NOT NULL
+              AND r.iria IS NOT NULL AND r.iria > 0
+            UNION
+            SELECT g.ano
+            FROM analise_gerencial_igg g
+            JOIN analise_gerencial_ciclos c ON c.id = g.gerencial_ciclo_id
+            WHERE c.analise_gerencial_id = %s AND g.ano IS NOT NULL
+              AND g.igga IS NOT NULL AND g.igga > 0
+        ) anos
+        ORDER BY ano
+        """,
+        (int(analise_id), int(analise_id)),
+    ) or []
+    return [int(row["ano"]) for row in rows if row.get("ano") is not None]
+
+
+def get_condition_years(
+    selected_road: str | None,
+    matrix_type: str = "Paragon",
+    scenario_key: str | None = None,
+) -> list[int]:
+    """Anos para os filtros das telas de CONDIÇÃO (Visão geral e Diagnóstico).
+
+    Na Matriz Cadastrada sai de IRI/IGG; no Paragon a própria
+    `analise_gerencial_intervencoes_iap` já traz uma linha por segmento-ano com o
+    `iapa`, então o comportamento é o mesmo de `get_available_years`.
+
+    As telas de OBRA (Soluções, Cenário econômico, Projeção) continuam em
+    `get_available_years`: lá ano sem intervenção não tem o que mostrar.
+    """
+    analise_id = _resolve_analysis_id(selected_road, matrix_type, scenario_key)
+    if analise_id is None:
+        return []
+    if matrix_type != "Matriz Cadastrada":
+        return _get_analysis_years(analise_id, matrix_type)
+    anos = _get_analysis_condition_years(analise_id)
+    # Sem IRI/IGG (base incompleta), melhor cair nos anos de intervenção do que
+    # deixar a tela sem nenhum ano selecionável.
+    return anos or _get_analysis_years(analise_id, matrix_type)
+
+
 def _scenario_segment_type(name: str | None) -> tuple[str, str, int]:
     """Deduz o tipo de segmentação do NOME do cenário -> (código, rótulo, ordem).
 
@@ -2455,6 +2583,149 @@ _DNIT_ZONA_COLORS = {
 }
 
 
+# --- IRI x GATILHO da matriz (cor da Visão geral e do Diagnóstico) ---
+# Gatilho de IRI por faixa de IDADE do pavimento, conforme definição do cliente
+# (08/2026). São os mesmos valores cadastrados nas matrizes 30/31/32/33 do SGP,
+# fixados aqui de propósito: as matrizes de solução forçada (REF, FR17, FR11…)
+# gravam `IRI > 1`, que não é gatilho técnico — é um "sempre verdadeiro" para a
+# solução sair. Usar aquele 1,0 pintaria a rede inteira de vermelho, porque o
+# menor IRI da base é 1,13.
+#
+# (idade_inicial, idade_final, gatilho) — idade_final None = daí para frente.
+DNIT_IRI_TRIGGERS: tuple[tuple[int, int | None, float], ...] = (
+    (1, 3, 3.46),
+    (4, 13, 2.69),
+    (14, 28, 2.46),
+    (29, None, 2.46),
+)
+DNIT_IRI_TRIGGER_DEFAULT = DNIT_IRI_TRIGGERS[0][2]
+
+# Bandas de condição do IRI, medidas contra o GATILHO da faixa de idade. A margem
+# de 5% abaixo dele é o "Regular": o trecho ainda passa, mas está a um passo de
+# exigir intervenção.
+#
+# Os nomes são Bom/Regular/Ruim (decisão do cliente, 08/2026) para todos os
+# artefatos de IRI falarem a mesma língua — mapa, donut, filtro, card e diagrama
+# linear —, e são os mesmos que a tela de Pavimentação já usa. A REGRA (a
+# inequação) aparece na legenda do mapa junto do nome, em `DNIT_IRI_BAND_RULES`;
+# o valor do gatilho de cada trecho fica no tooltip e no detalhe, porque ele varia
+# com a idade do pavimento e com o ano.
+DNIT_IRI_BAND_MARGIN = 0.95
+DNIT_IRI_BANDS = (
+    ("Ruim", "#d71920"),
+    ("Regular", "#fff200"),
+    ("Bom", "#00a651"),
+)
+DNIT_IRI_BAND_ORDER = [nome for nome, _ in DNIT_IRI_BANDS]
+DNIT_IRI_BAND_COLORS = dict(DNIT_IRI_BANDS)
+DNIT_IRI_BAND_ABOVE, DNIT_IRI_BAND_LIMIT, DNIT_IRI_BAND_BELOW = DNIT_IRI_BAND_ORDER
+
+# Regra de cada banda, para a legenda do mapa mostrar o critério ao lado do nome.
+# Forma curta de propósito: a legenda tem 280px e a inequação completa
+# ("0,95 × Gatilho ≤ IRI ≤ Gatilho") quebra em duas linhas.
+DNIT_IRI_BAND_RULES = {
+    DNIT_IRI_BAND_ABOVE: "IRI > Gatilho",
+    DNIT_IRI_BAND_LIMIT: "IRI ≥ 0,95 × Gatilho",
+    DNIT_IRI_BAND_BELOW: "IRI < 0,95 × Gatilho",
+}
+DNIT_IRI_BAND_LEGEND = {
+    banda: f"{banda} · {regra}" for banda, regra in DNIT_IRI_BAND_RULES.items()
+}
+
+
+def dnit_iri_trigger_for_age(idade: float | int | None) -> float:
+    """Gatilho de IRI para uma idade de pavimento (em anos)."""
+    if idade is None:
+        return DNIT_IRI_TRIGGER_DEFAULT
+    try:
+        anos = int(idade)
+    except (TypeError, ValueError):
+        return DNIT_IRI_TRIGGER_DEFAULT
+    for inicio, fim, gatilho in DNIT_IRI_TRIGGERS:
+        if anos >= inicio and (fim is None or anos <= fim):
+            return gatilho
+    return DNIT_IRI_TRIGGER_DEFAULT
+
+
+def dnit_iri_band(iri: float | None, gatilho: float | None) -> tuple[str, str]:
+    """(banda, cor) de um IRI contra o gatilho: >gatilho vermelho, 95%..gatilho amarelo, abaixo verde."""
+    limite = float(gatilho or DNIT_IRI_TRIGGER_DEFAULT)
+    valor = _to_float(iri)
+    if valor > limite:
+        banda = DNIT_IRI_BAND_ABOVE
+    elif valor >= DNIT_IRI_BAND_MARGIN * limite:
+        banda = DNIT_IRI_BAND_LIMIT
+    else:
+        banda = DNIT_IRI_BAND_BELOW
+    return banda, DNIT_IRI_BAND_COLORS[banda]
+
+
+# "1º ao 3º ano", "4º ao 13º ano", "a partir do 29º ano" -> idade INICIAL da faixa.
+_DNIT_AGE_RANGE_RE = re.compile(r"(\d+)\s*º?\s*ao\s+\d+\s*º?\s*ano", re.I)
+_DNIT_AGE_FROM_RE = re.compile(r"a\s+partir\s+do\s+(\d+)\s*º?\s*ano", re.I)
+
+
+def _dnit_age_from_matrix_name(nome: Any) -> int | None:
+    """Idade inicial da faixa declarada no nome da matriz, ou None se não declarar.
+
+    Usa o INÍCIO da faixa porque é ele que decide em qual gatilho ela cai: a matriz
+    "3º ao 4º ano" começa no 3º, que está na faixa 1–3 → gatilho 3,46 (confirmado
+    com o cliente em 08/2026). Matrizes de solução forçada não trazem idade no nome
+    e caem no fallback por ordem do ciclo.
+    """
+    texto = str(nome or "")
+    match = _DNIT_AGE_RANGE_RE.search(texto) or _DNIT_AGE_FROM_RE.search(texto)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+@_cache_unless_empty(maxsize=256)
+def dnit_iri_trigger_for_cycle(ciclo_id: int | None) -> float:
+    """Gatilho de IRI do ciclo: pela idade que a matriz dele declara.
+
+    Os ciclos de uma análise SÃO as janelas de idade do pavimento — é por isso que
+    o 2º ciclo se chama "4º ao 13º ano". Então:
+
+    1. se a matriz do ciclo declara faixa de idade no nome, é ela que manda;
+    2. se não declara (REF 12, FR17, FR11… — matrizes de solução forçada), cai na
+       faixa correspondente à ORDEM do ciclo no horizonte: ordem 1 = 1ª faixa
+       (1º ao 3º ano, 3,46), ordem 2 = 2ª faixa, e assim por diante.
+
+    A regra 2 é o que resolve o ciclo de ordem 1 (2027–2028) dessas matrizes, cuja
+    condição gravada é `IRI > 1`.
+    """
+    if not ciclo_id:
+        return DNIT_IRI_TRIGGER_DEFAULT
+
+    db = MySQLConnection()
+    rows = db.execute_query(
+        """
+        SELECT c.ordem, m.nome AS matriz_nome
+        FROM analise_gerencial_ciclos c
+        LEFT JOIN matrizes m ON m.id = c.matriz_dnit_id
+        WHERE c.id = %s
+        """,
+        (int(ciclo_id),),
+    ) or []
+    if not rows:
+        return DNIT_IRI_TRIGGER_DEFAULT
+
+    idade = _dnit_age_from_matrix_name(rows[0].get("matriz_nome"))
+    if idade is not None:
+        return dnit_iri_trigger_for_age(idade)
+
+    try:
+        ordem = max(int(rows[0].get("ordem") or 1), 1)
+    except (TypeError, ValueError):
+        ordem = 1
+    # Ordem além da última faixa fica na última (a partir do 29º ano).
+    return DNIT_IRI_TRIGGERS[min(ordem, len(DNIT_IRI_TRIGGERS)) - 1][2]
+
+
 def _dnit_matriz_zona(iri: float) -> tuple[str, str]:
     """(zona, cor) da matriz DNIT pela faixa de IRI, igual à imagem do DNIT."""
     if iri <= 3:
@@ -2603,11 +2874,27 @@ def get_dnit_overview_data(
         sol = _get_dnit_solutions_from_database(analise_id, ciclo_id, year) or {}
         sol_segs = sol.get("segments")
         sol_by_seg: dict[int, Any] = {}
+        familia_by_seg: dict[int, Any] = {}
         if sol_segs is not None and not sol_segs.empty and "solucao_grupo" in sol_segs.columns:
-            sol_by_seg = dict(zip(sol_segs["segment_id"].astype(int), sol_segs["solucao_grupo"]))
+            ids = sol_segs["segment_id"].astype(int)
+            familia_by_seg = dict(zip(ids, sol_segs["solucao_grupo"]))
+            # Texto completo da solução quando houver; senão o nome da família.
+            texto = sol_segs["solucao"] if "solucao" in sol_segs.columns else sol_segs["solucao_grupo"]
+            sol_by_seg = dict(zip(ids, texto))
         segs = data.get("segments")
         if segs is not None and not segs.empty:
             segs["solucao"] = segs["segment_id"].astype(int).map(sol_by_seg)
+            # Família + cor por solução, para as telas que colorem o mapa por
+            # intervenção (Comparativo) em vez de faixa de IRI. Segmento sem
+            # solução gravada fica sem família e cai no neutro do componente.
+            segs["solucao_grupo"] = (
+                segs["segment_id"].astype(int).map(familia_by_seg).fillna(DNIT_FAMILY_NO_WORK)
+            )
+            segs["solucao_color"] = segs["solucao_grupo"].map(dnit_family_color)
+        data["familia_order"] = DNIT_FAMILY_ORDER
+        data["familia_colors"] = DNIT_FAMILY_COLORS
+        data["iri_banda_order"] = DNIT_IRI_BAND_ORDER
+        data["iri_banda_colors"] = DNIT_IRI_BAND_COLORS
     return data
 
 
@@ -2654,6 +2941,9 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
     ) or []
     d0_by = {int(r["seg"]): _to_float(r["d0"]) for r in d0_rows if r["d0"] is not None}
     dadm_by = {int(r["seg"]): _to_float(r["dadm"]) for r in dadm_rows if r["dadm"] is not None}
+    # Um gatilho por CICLO: o ciclo é a janela de idade do pavimento, então todos os
+    # segmentos deste recorte comparam contra o mesmo valor.
+    iri_gatilho = dnit_iri_trigger_for_cycle(ciclo_id)
 
     records = []
     for row in geo.to_dict("records"):
@@ -2684,6 +2974,9 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
 
         # Cor da matriz DNIT pela faixa de IRI (sem intervenção nesta tela).
         zona, zona_color = _dnit_matriz_zona(iri)
+        # IRI x gatilho da faixa de idade — é o que colore a Visão geral e o
+        # Diagnóstico. Convive com `zona`/`iri_classe`, que seguem existindo.
+        iri_banda, iri_banda_color = dnit_iri_band(iri, iri_gatilho)
 
         records.append(
             {
@@ -2702,6 +2995,9 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
                 "dadm": round(dadm_mm, 3) if dadm_mm else None,
                 "matriz_categoria": zona,
                 "matriz_color": zona_color,
+                "iri_gatilho": iri_gatilho,
+                "iri_banda": iri_banda,
+                "iri_banda_color": iri_banda_color,
             }
         )
 
@@ -2712,22 +3008,48 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
     # Agregados ponderados por extensão (km) do segmento.
     ext = (segments["km_final"] - segments["km_inicial"]).clip(lower=0)
     total = float(ext.sum()) or 1.0
-    # % de km com deficiência estrutural (Dc > Dadm)
-    dc_gt = segments["dc"].notna() & segments["dadm"].notna() & (segments["dc"] > segments["dadm"])
+    # % de km com deficiência estrutural (Dc > Dadm).
+    #
+    # `to_numeric` antes de comparar não é redundância. Dc vem de
+    # `parametros_iniciais` (por ciclo) e Dadm de `desempenho_pavimento` (por ciclo E
+    # ANO). Existe ano com Dc medido e NENHUM Dadm: aí a coluna `dc` sai float64 e a
+    # `dadm`, só com None, sai dtype `object`. Comparar as duas levanta
+    # `TypeError: '>' not supported between instances of 'float' and 'NoneType'` —
+    # e o `notna()` antes não protege, porque o `&` do pandas não faz
+    # curto-circuito: a comparação é avaliada na Series inteira de qualquer forma.
+    #
+    # O erro era intermitente porque só acontecia em ano sem Dadm; virou constante
+    # quando o filtro passou a oferecer todos os anos com IRI/IGG (ex.: 2026 na
+    # BR-055) em vez de apenas os anos com intervenção.
+    dc_num = pd.to_numeric(segments["dc"], errors="coerce")
+    dadm_num = pd.to_numeric(segments["dadm"], errors="coerce")
+    dc_gt = dc_num.notna() & dadm_num.notna() & (dc_num > dadm_num)
     defl_bad = float(ext[dc_gt].sum()) / total * 100
-    # % de km crítico = zonas de IRI pior (4-5,5 e >5,5)
+    # % de km crítico pelas zonas fixas antigas da matriz (4-5,5 e >5,5). Mantido
+    # porque a Visão geral e o contexto do IAGON ainda leem esta métrica.
     critico_pct = float(ext[segments["matriz_categoria"].isin(["4 < IRI ≤ 5,5", "IRI > 5,5"])].sum()) / total * 100
+    # % de km ACIMA DO GATILHO da faixa de idade — é o que o mapa pinta de vermelho.
+    # O `critico_pct` acima não serve para esse card: com gatilho 2,69 há trecho
+    # vermelho no mapa que não chega a 4,0 e o card mostrava 0,0%.
+    acima_gatilho_pct = float(
+        ext[segments["iri_banda"] == DNIT_IRI_BAND_ABOVE].sum()
+    ) / total * 100
     return {
         "segments": segments,
         "iri_avg": round(float((segments["iri"] * ext).sum() / total), 2),
         "igg_avg": round(float((segments["igg"] * ext).sum() / total), 1),
         "defl_bad_pct": round(defl_bad, 1),
         "critico_pct": round(critico_pct, 1),
+        "acima_gatilho_pct": round(acima_gatilho_pct, 1),
         "total_km": round(total, 1),
         "colors": _DNIT_COLORS,
         "order": _DNIT_ORDER,
         "zona_order": _DNIT_ZONA_ORDER,
         "zona_colors": _DNIT_ZONA_COLORS,
+        # Paleta/ordem do IRI x gatilho, para o mapa colorir por condição de IRI.
+        "iri_gatilho": iri_gatilho,
+        "iri_banda_order": DNIT_IRI_BAND_ORDER,
+        "iri_banda_colors": DNIT_IRI_BAND_COLORS,
     }
 
 
@@ -2736,36 +3058,191 @@ def _get_dnit_overview_from_database(analise_id: int, ciclo_id: int, year: int) 
 # Lê analise_gerencial_intervencoes_dnit; nomes/cores hardcoded (candidato a rel_* na v2).
 # ============================================================================
 
-# --- Soluções DNIT (Matriz Revitaliza DNIT/RO) ---
-# Categoria macro da solução DNIT (para a distribuição/cor da barra). A tabela mostra a solução detalhada.
-_DNIT_GROUP_COLORS = {
-    "Reconstrução": "#d71920",
-    "Fresagem + CBUQ": "#f2a51a",
-    "Recapeamento CBUQ": "#fff200",
-    "Microrrevestimento": "#b6d7a8",
-    "Reparo localizado": "#00a651",
-    "Outras soluções": "#9fb9d9",
-    "A avaliar em campo": "#9fb9d9",
-}
+# --- Soluções DNIT (Matriz Cadastrada) — famílias, severidade e cores ---
+# Uma família por COR: RL e RL+Micro dividem o verde; Reforço e Fresagem+Reforço
+# dividem o laranja (decisão do cliente em 08/2026). A ordem da tupla é a
+# severidade — índice 0 = mais grave — e é ela que decide quem "ganha" quando um
+# segmento recebe várias soluções, além de ordenar a legenda e as barras.
+#
+# Antes daqui existia `_DNIT_GROUP_COLORS`, cuja paleta estava INVERTIDA em
+# relação à do Paragon: pintava fresagem de laranja (#f2a51a) e reforço/CBUQ de
+# amarelo (#fff200). Agora as duas trilhas usam a mesma leitura de cor:
+# verde = conservação/superficial · amarelo = fresagem · laranja = reforço ·
+# vermelho = reconstrução.
+DNIT_SOLUTION_FAMILIES = (
+    ("Reconstrução", "#d71920"),
+    ("Reforço", "#f2a51a"),
+    ("Fresagem e recomposição", "#fff200"),
+    ("Reparo localizado / Micro", "#00a651"),
+    ("Outras soluções", "#9fb9d9"),
+    # Não é uma família de solução: é o trecho que existe na análise mas não tem
+    # intervenção prevista. Entra no mapa em AZUL para a rodovia aparecer inteira
+    # — sem ele o mapa fica cheio de lacunas e o trecho parece não existir. Mesmo
+    # azul que o Paragon usa para OK/Excelente, para as duas trilhas lerem igual.
+    # Fica no fim da ordem e nunca é devolvido pelo classificador: só é preenchido
+    # por quem junta geometria e soluções.
+    ("OK", "#00c2e8"),
+)
+DNIT_FAMILY_ORDER = [nome for nome, _ in DNIT_SOLUTION_FAMILIES]
+DNIT_FAMILY_COLORS = dict(DNIT_SOLUTION_FAMILIES)
+_DNIT_FAMILY_SEVERITY = {nome: i for i, (nome, _) in enumerate(DNIT_SOLUTION_FAMILIES)}
+_DNIT_FAMILY_FALLBACK = "Outras soluções"
+DNIT_FAMILY_NO_WORK = "OK"
+
+# Padrões que identificam a família a partir do nome de UM tipo de intervenção.
+# Casar por nome — e não por `tipoId` — é o que faz a regra valer em QUALQUER
+# banco: `intervencao_tipos` é uma tabela por base, então os ids não são estáveis
+# entre instalações, mas a terminologia DNIT é. Nome desconhecido cai em "Outras
+# soluções" e aparece na legenda como tal, em vez de ser pintado errado em silêncio.
+#
+# Cobre os DOIS vocabulários que o banco usa para a mesma coisa:
+#   - catálogo (`intervencao_tipos.nome`): "Fresagem e recomposição", "Reforço CBUQ";
+#   - comercial (`solucoes[].tipoNome`):   "FR4 + CBUQ(4)", "CBUQ (8)", "Micro(1,5)".
+#
+# A ORDEM aqui é de especificidade dentro de um item, e é diferente da severidade
+# entre itens. "FR4 + CBUQ(4)" é um item só (fresagem, onde o CBUQ é a
+# recomposição), por isso fresagem é testada antes de CBUQ; já "CBUQ (4)" avulso é
+# reforço. Quando o segmento tem os dois itens, quem decide é a severidade das
+# famílias — Reforço (1) vence Fresagem (2) —, o que produz o laranja de
+# "Fresagem + Reforço" sem precisar de caso especial.
+_DNIT_FAMILY_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    # "REC8"/"REC 4" (comercial) e "Reconstrução" (catálogo). O \d evita casar
+    # "recomposição", que é fresagem.
+    ("Reconstrução", re.compile(r"reconstru|\brec\s*\d")),
+    # "FR4", "FR(11)", "FR5 + CBUQ(3)" e os nomes do catálogo.
+    ("Fresagem e recomposição", re.compile(r"fresagem|recomposicao|reperfil|\bfr\s*\(?\s*\d")),
+    # "Reforço CBUQ" (catálogo) e "CBUQ (4)"/"CBUQ (8)" avulsos (comercial).
+    ("Reforço", re.compile(r"reforco|cbuq")),
+    (
+        "Reparo localizado / Micro",
+        re.compile(
+            # \btsd (sem \b final) casa "TSD" e também "TSDp", como o banco grava.
+            r"micro|superficial|\btsd|\btss|fog|seal|selagem|reparo|remendo"
+            r"|tapa[\s-]*buraco|bordo|conservacao|lama asfaltica|\brl\b"
+        ),
+    ),
+)
+# Serviços que não são de revestimento: entram na solução exibida, mas não
+# definem a cor do trecho. Um segmento SÓ com eles não tem família de pavimento
+# e cai no neutro (hoje nenhum segmento da base é assim — drenagem sempre vem
+# acompanhada —, mas outra base pode ter).
+_DNIT_NON_SURFACE_KEYWORDS = ("drenagem", "sinalizacao", "terraplen", "contencao")
+
+
+def _ascii_lower(value: Any) -> str:
+    """Minúscula sem acento, para casar nome de tipo entre bases (e entre grafias)."""
+    text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def dnit_family_from_type_name(nome: Any) -> str | None:
+    """Família de cor de UM tipo de intervenção. None = não é revestimento (drenagem…)."""
+    texto = _ascii_lower(nome)
+    if not texto:
+        return None
+    if any(termo in texto for termo in _DNIT_NON_SURFACE_KEYWORDS):
+        return None
+    for familia, padrao in _DNIT_FAMILY_PATTERNS:
+        if padrao.search(texto):
+            return familia
+    return _DNIT_FAMILY_FALLBACK
+
+
+def dnit_family_from_solution_text(texto: Any) -> str:
+    """Família a partir do TEXTO de uma solução, que pode juntar vários serviços.
+
+    Usado pelos gráficos e pelo PDF, onde só existe o rótulo — o mapa e a tabela
+    classificam por `tipoId`, que é exato (`dnit_family_from_parsed`).
+
+    O texto é classificado INTEIRO depois de remover os serviços que não são
+    revestimento. Os dois passos são necessários, e cada um conserta um erro que o
+    outro causava:
+
+    - classificar inteiro (sem separar no "+") é o que faz "FR4 + CBUQ(4)" cair em
+      fresagem. Essa é UMA intervenção, em que o CBUQ é a recomposição; separando no
+      "+", o "CBUQ(4)" isolado virava Reforço e a barra saía laranja;
+    - remover a drenagem antes é o que faz "FR4 + CBUQ(4) + Drenagem" também cair em
+      fresagem. Sem isso o "drenagem" no meio do texto disparava a regra de "não é
+      revestimento" para a solução inteira, e a barra saía com o cinza de
+      "Outras soluções".
+    """
+    partes = [parte.strip() for parte in re.split(r"\s*\+\s*", str(texto or "")) if parte.strip()]
+    revestimento = [
+        parte for parte in partes
+        if not any(termo in _ascii_lower(parte) for termo in _DNIT_NON_SURFACE_KEYWORDS)
+    ]
+    if not revestimento:
+        # Só drenagem/sinalização: não há revestimento para dar cor ao trecho.
+        return _DNIT_FAMILY_FALLBACK
+    return dnit_solution_family([" + ".join(revestimento)])
+
+
+def dnit_solution_family(nomes: list[str] | None) -> str:
+    """Família da solução COMPLETA de um segmento — a mais severa vence.
+
+    Recebe os nomes dos tipos de intervenção do segmento (preferindo o nome
+    canônico de `intervencao_tipos`; o `tipoNome` do JSON serve igual, porque a
+    regra é a mesma por palavra-chave). Independe de espessura (`CBUQ (4)` ou
+    `CBUQ (8)`), da ordem e de quantos reparos localizados vieram.
+    """
+    familias = [f for f in (dnit_family_from_type_name(n) for n in (nomes or [])) if f]
+    if not familias:
+        return _DNIT_FAMILY_FALLBACK
+    return min(familias, key=lambda f: _DNIT_FAMILY_SEVERITY.get(f, len(DNIT_SOLUTION_FAMILIES)))
+
+
+def dnit_family_color(familia: Any) -> str:
+    """Cor hex da família (fallback = neutro de 'Outras soluções')."""
+    return DNIT_FAMILY_COLORS.get(str(familia or ""), DNIT_FAMILY_COLORS[_DNIT_FAMILY_FALLBACK])
+
+
+def dnit_family_severity(familia: Any) -> int:
+    """Posição da família na severidade (0 = Reconstrução). Desconhecida vai para o fim."""
+    return _DNIT_FAMILY_SEVERITY.get(str(familia or ""), len(DNIT_SOLUTION_FAMILIES))
+
+
+@_cache_unless_empty(maxsize=4)
+def _dnit_type_names_by_id() -> dict[int, str]:
+    """`intervencao_tipos` (id -> nome) do banco conectado.
+
+    Lido do banco de propósito: é o que permite a classificação seguir a
+    terminologia da base em uso em vez de um mapa de ids fixo no código.
+    """
+    db = MySQLConnection()
+    rows = db.execute_query("SELECT id, nome FROM intervencao_tipos") or []
+    return {int(r["id"]): str(r["nome"]) for r in rows if r.get("id") is not None}
+
+
+def dnit_family_from_parsed(parsed: list[tuple[int | None, str]] | None) -> str:
+    """Família a partir do `[(tipo_id, nome)]` de `_dnit_parse_solucoes`.
+
+    Prefere o nome canônico de `intervencao_tipos` (o `tipoNome` gravado no JSON
+    é o nome comercial da intervenção — "FR4 + CBUQ(4)", "Micro(1,5)" —, mais
+    sujeito a variação entre bases). Sem id, ou id ausente do catálogo, usa o
+    próprio `tipoNome`.
+    """
+    if not parsed:
+        return _DNIT_FAMILY_FALLBACK
+    catalogo = _dnit_type_names_by_id()
+    nomes = [
+        (catalogo.get(int(tipo_id)) if tipo_id is not None else None) or nome
+        for tipo_id, nome in parsed
+    ]
+    return dnit_solution_family(nomes)
+
+
+# Mantido só para as telas que ainda pedem a paleta por nome de grupo.
+_DNIT_GROUP_COLORS = DNIT_FAMILY_COLORS
 
 
 def _dnit_solution_group(solucoes: list[str]) -> str:
-    """Agrupa a solução detalhada da matriz numa categoria macro (mais severa vence)."""
-    if not solucoes:
-        return "A avaliar em campo"
-    texto = " ".join(solucoes).lower()
-    tokens = texto.replace("+", " ").split()
-    if any(t.startswith("rec") for t in tokens):
-        return "Reconstrução"
-    if "fr5" in texto or "fresagem" in texto:
-        return "Fresagem + CBUQ"
-    if "cbuq" in texto:
-        return "Recapeamento CBUQ"
-    if "micro" in texto:
-        return "Microrrevestimento"
-    if "rl" in tokens or "reparo" in texto:
-        return "Reparo localizado"
-    return "Outras soluções"
+    """Família de cor da solução DNIT (compatibilidade: mesma assinatura antiga).
+
+    Recebe os nomes gravados no JSON (`tipoNome`) e não os do catálogo, então a
+    classificação sai da própria string — que é o fallback previsto em
+    `dnit_family_from_parsed`.
+    """
+    return dnit_solution_family(solucoes)
 
 
 # Tipos de intervenção "reparo localizado / conservação" (tabela `intervencao_tipos`): aparecem em
@@ -3086,16 +3563,42 @@ def _get_dnit_solutions_from_database(
     for row in geo.to_dict("records"):
         seg = int(row["segment_id"])
         parsed = _dnit_parse_solucoes(sol_by.get(seg))
-        if not parsed:
-            continue  # só segmentos com solução DNIT gravada
-        nomes = [n for _, n in parsed]
-
         iri = iri_by.get(seg) or 0.0
         igg_val = igg_by.get(seg, (0.0, None))[0] or 0.0
         zona, zona_color = _dnit_matriz_zona(iri)
+
+        if not parsed:
+            # Sem intervenção prevista: entra SÓ no mapa, como "OK" em azul, para a
+            # rodovia ser desenhada inteira. Fora da tabela de propósito — ela
+            # alimenta extensão, custo, priorização e Excel, que continuam
+            # contando apenas trecho com obra.
+            seg_records.append(
+                {
+                    "segment_id": seg,
+                    "sre": row.get("sre"),
+                    "km_inicial": _to_float(row.get("km_inicial")),
+                    "km_final": _to_float(row.get("km_final")),
+                    "paths": row["paths"],
+                    "iri": round(iri, 2),
+                    "igg": round(igg_val, 1),
+                    "vmda": None,
+                    "def": def_by.get(seg),
+                    "matriz_categoria": zona,
+                    "matriz_color": zona_color,
+                    "solucao": DNIT_FAMILY_NO_WORK,
+                    "solucao_grupo": DNIT_FAMILY_NO_WORK,
+                    "solucao_color": dnit_family_color(DNIT_FAMILY_NO_WORK),
+                }
+            )
+            continue
+        nomes = [n for _, n in parsed]
+
         solucao_txt = " + ".join(nomes)
         nucleo = _dnit_solution_core_label(parsed)
-        solucao_grupo = _dnit_solution_group(nomes)
+        # Família de cor da solução (usa o catálogo de tipos do banco conectado).
+        # Convive com a zona de IRI: a tela escolhe por qual das duas colorir.
+        solucao_grupo = dnit_family_from_parsed(parsed)
+        solucao_color = dnit_family_color(solucao_grupo)
 
         km_i = _to_float(row.get("km_inicial"))
         km_f = _to_float(row.get("km_final"))
@@ -3120,7 +3623,9 @@ def _get_dnit_solutions_from_database(
                 "def": def_by.get(seg),
                 "matriz_categoria": zona,
                 "matriz_color": zona_color,
+                "solucao": solucao_txt,
                 "solucao_grupo": solucao_grupo,
+                "solucao_color": solucao_color,
             }
         )
         table_records.append(
@@ -3136,8 +3641,10 @@ def _get_dnit_solutions_from_database(
                 "Faixa": zona,
                 "Solução recomendada": solucao_txt,
                 "Solução núcleo": nucleo,
+                "Solução família": solucao_grupo,
                 "_segment_id": seg,
                 "_zona_color": zona_color,
+                "_solucao_color": solucao_color,
             }
         )
 
@@ -3159,9 +3666,13 @@ def _get_dnit_solutions_from_database(
         "segments": segments,
         "table": table,
         "extension_km": round(float(table["Extensão"].sum()), 1),
-        "group_colors": _DNIT_GROUP_COLORS,
+        "group_colors": DNIT_FAMILY_COLORS,
         "zona_order": _DNIT_ZONA_ORDER,
         "zona_colors": _DNIT_ZONA_COLORS,
+        # Paleta/ordem por SOLUÇÃO, para as telas que colorem o mapa por
+        # intervenção em vez de faixa de IRI.
+        "familia_order": DNIT_FAMILY_ORDER,
+        "familia_colors": DNIT_FAMILY_COLORS,
     }
 
 
@@ -4036,6 +4547,8 @@ _LOCAL_CACHED_FUNCS = (
     _get_available_roads_from_database,
     _load_dnit_matrix,
     _get_dnit_analysis_for_road,
+    get_scenario_km_ranges,
+    _get_analysis_condition_years,
 )
 
 # Assinatura já vista POR ESTE processo (cada worker mantém a sua).

@@ -71,20 +71,39 @@ def render_dnit_map(
     segments_df,
     zona_colors: dict | None = None,
     zona_order: list | None = None,
-    gap_px: int | float = 18,
+    gap_m: int | float = 24,
+    min_gap_px: int | float = 14,
     legend_title: str = "CLASSE IRI (MATRIZ DNIT)",
     attended_ids=None,
     unattended_color: str = "#ef4444",
     legend_extra_items: dict[str, str] | None = None,
+    color_by: str = "iri",
+    legend_labels: dict[str, str] | None = None,
 ) -> None:
-    """Mapa DNIT colorido pela intervenção da matriz (faixas de cor da matriz CBUQ).
+    """Mapa DNIT colorido pela faixa de IRI da matriz OU pela solução/intervenção.
 
     Parâmetros:
     - segments_df: segmentos com geometria ('paths') e os campos da matriz DNIT
       (iri, igg, matriz_categoria, matriz_color; opcionalmente solucao_grupo).
     - zona_colors: mapa categoria->cor hex para a legenda (fallback #fff200).
-    - zona_order: ordem das zonas do pior IRI ao melhor, usada para ordenar a legenda.
-    - gap_px: afastamento lateral entre cenários/sentidos sobrepostos.
+    - zona_order: ordem das categorias, usada para ordenar a legenda.
+    - gap_m: afastamento lateral TOTAL entre sentidos sobrepostos, em METROS de
+      terreno (`offset_side` é a fração desse total) — em metros e não em pixels
+      para a linha acompanhar a rodovia em qualquer zoom.
+    - min_gap_px: piso em pixels, para os sentidos não colapsarem numa linha só
+      quando `gap_m` valer menos de 1 px no zoom aberto. Tem de ser MAIOR que a
+      espessura da linha (5 px): abaixo disso os dois traços se sobrepõem e
+      continuam parecendo um só.
+    - legend_labels: troca o texto de uma categoria SÓ na legenda (a chave nos dados
+      e no filtro continua a mesma). Serve para o IRI mostrar "Bom · IRI < 0,95 ×
+      Gatilho": o nome da classe é o que os outros gráficos usam, e a regra explica
+      o critério sem precisar de um número que varia por trecho.
+    - color_by: 'iri' (default, faixa da matriz), 'solucao' (família da
+      intervenção) ou 'iri_gatilho' (IRI comparado ao gatilho da faixa de idade).
+      Em 'solucao' a cor sai de `solucao_color` e a legenda de `solucao_grupo`; em
+      'iri_gatilho', de `iri_banda_color`/`iri_banda`. As colunas de IRI seguem
+      intactas nos dois casos, porque o filtro de faixa e o PDF continuam lendo
+      `matriz_categoria`.
     Mantém o card do mapa visível mesmo sem dados, usando uma base vazia com aviso discreto.
     """
     if segments_df is None or segments_df.empty:
@@ -100,6 +119,25 @@ def render_dnit_map(
         return
 
     df = segments_df.copy()
+    # Colorir por solução = trocar o que alimenta cor e legenda, mantendo as
+    # colunas de IRI onde estão. `_legend_col`/`matriz_color` são o contrato com o
+    # JS e com a legenda; sem as colunas de solução, cai no IRI em vez de quebrar.
+    if color_by == "solucao" and {"solucao_grupo", "solucao_color"}.issubset(df.columns):
+        df["matriz_color"] = df["solucao_color"].fillna("#9fb9d9")
+        df["_legend_key"] = df["solucao_grupo"].astype(str)
+    elif color_by == "iri_gatilho" and {"iri_banda", "iri_banda_color"}.issubset(df.columns):
+        df["matriz_color"] = df["iri_banda_color"].fillna("#9fb9d9")
+        df["_legend_key"] = df["iri_banda"].astype(str)
+        # No tooltip a inequação seria redundante: ele já mostra o IRI e o gatilho
+        # do trecho, que é a informação que a fórmula da legenda representa.
+        df["_tip_key"] = ""
+    else:
+        df["_legend_key"] = df["matriz_categoria"].astype(str)
+    if "_tip_key" not in df.columns:
+        df["_tip_key"] = df["_legend_key"]
+    cols = cols + ["_legend_key", "_tip_key"]
+    if "iri_gatilho" in df.columns:
+        cols = cols + ["iri_gatilho"]
 
     def _row_detail(r):
         """Monta o dict de detalhe (título + linhas chave/valor) do drawer para um segmento."""
@@ -112,6 +150,17 @@ def render_dnit_map(
             ["Solução recomendada", solucao],
             ["Extensão", (f"{ext:.2f} km").replace(".", ",")],
         ]
+        if r.get("iri_gatilho"):
+            # IRI medido contra o gatilho da faixa de idade. Os dois limites vêm
+            # escritos porque só o gatilho não diz onde começa o amarelo, e só a
+            # margem de 95% não diz onde começa o vermelho.
+            gatilho = float(r["iri_gatilho"])
+            rows.insert(2, ["IRI do trecho", f"{float(r.get('iri') or 0):.2f}".replace(".", ",")])
+            rows.insert(3, [
+                "Gatilho",
+                (f"{gatilho:.2f}  ·  amarelo de {0.95 * gatilho:.2f} a {gatilho:.2f}"
+                 f"  ·  vermelho acima de {gatilho:.2f}").replace(".", ","),
+            ])
         if r.get("_custo_sre_label"):
             rows.insert(2, ["Custo do SRE", clean(r.get("_custo_sre_label"))])
         return {
@@ -135,11 +184,13 @@ def render_dnit_map(
 
     visible_df = df[df["attended"]] if attended_ids is not None else df
     has_unattended = bool((~df["attended"]).any()) if attended_ids is not None else False
-    presentes_set = set(visible_df["matriz_categoria"].dropna().astype(str))
+    presentes_set = set(visible_df["_legend_key"].dropna().astype(str))
     ordered = [z for z in (zona_order or []) if z in presentes_set]
     extras = sorted(presentes_set - set(ordered))
+    rotulos = legend_labels or {}
     legend_items = "".join(
-        f'<div class="legend-item"><span class="legend-dot" style="background:{(zona_colors or {}).get(z, "#fff200")}"></span>{z}</div>'
+        f'<div class="legend-item"><span class="legend-dot" style="background:{(zona_colors or {}).get(z, "#fff200")}"></span>'
+        f'{rotulos.get(z, z)}</div>'
         for z in ordered + extras
     )
     if legend_extra_items:
@@ -227,14 +278,36 @@ $sv_modal
               topographic: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { maxZoom: 17, attribution: '&copy; OpenTopoMap &copy; OpenStreetMap' })
             };
             let currentBaseLayer = baseLayers.satellite.addTo(map);
-            const GAP_PX = $gap_px;
+            // Afastamento entre sentidos em METROS de terreno, com piso em pixels.
+            const GAP_M = $gap_m;
+            const MIN_GAP_PX = $min_gap_px;
             const pts = [];
             const drawn = [];
             const fmt = (v) => Number(v).toFixed(2);
 
-            function offsetPathPixels(coords, sidePx) {
-              if (coords.length < 2 || !sidePx) return coords;
+            // Pixels por metro no zoom z, na latitude lat (segue a projeção do Leaflet).
+            function pixelsPerMeter(lat, z) {
+              const a = L.latLng(lat, 0), b = L.latLng(lat, 0.01);
+              const metros = map.distance(a, b);
+              if (!metros) return 0;
+              const pa = map.project(a, z), pb = map.project(b, z);
+              return Math.hypot(pb.x - pa.x, pb.y - pa.y) / metros;
+            }
+
+            // O offset já foi em pixels fixos, e isso descolava a linha da rodovia:
+            // 18 px valem ~20 m no zoom fechado mas centenas de metros no aberto,
+            // jogando o traçado no meio da mata. Em metros a linha acompanha a
+            // geografia; o piso em pixels cobre o caso oposto, em que GAP_M vale
+            // menos de 1 px e os sentidos virariam uma linha só.
+            function gapPixels(lat) {
+              return Math.max(GAP_M * pixelsPerMeter(lat, map.getZoom()), MIN_GAP_PX);
+            }
+
+            // `side` é a FRAÇÃO do afastamento (offset_side), não pixels.
+            function offsetPathPixels(coords, side) {
+              if (coords.length < 2 || !side) return coords;
               const z = map.getZoom();
+              const sidePx = side * gapPixels(coords[0][0]);
               const projected = coords.map((c) => map.project(L.latLng(c[0], c[1]), z));
               const out = [];
               for (let i = 0; i < projected.length; i++) {
@@ -252,21 +325,22 @@ $sv_modal
               return out;
             }
 
-            // Padroniza apenas a ordem geométrica usada no cálculo do offset.
-            // O sentido real vem do cadastro: Crescente = km 0 -> X e
-            // Decrescente = km X -> 0.
-            function canonicalPath(coords) {
-              if (coords.length < 2) return coords;
-              const first = coords[0], last = coords[coords.length - 1];
-              const reversed = first[0] > last[0] || (first[0] === last[0] && first[1] > last[1]);
-              return reversed ? coords.slice().reverse() : coords;
-            }
+            // A ordem dos pontos NÃO é normalizada aqui de propósito: ela já chega
+            // coerente do banco (o shape da pista é recortado em ordem de km), e é
+            // ela que define de que lado a perpendicular do offset aponta.
+            //
+            // Existia um `canonicalPath()` que reordenava cada trecho comparando a
+            // LATITUDE do primeiro ponto com a do último. Numa rodovia leste-oeste a
+            // latitude quase não varia, o sinal virava ruído e trocava de segmento
+            // para segmento — o traçado saltava de um lado da rodovia para o outro.
+            // Na BR-055, das 111 emendas entre trechos, 109 vinham coerentes do
+            // banco e o canonicalPath deixava 81 invertidas.
 
             segments.forEach((s) => {
               const attended = s.attended !== false;
-              const sidePx = (Number(s.offset_side) || 0) * GAP_PX;
+              const side = Number(s.offset_side) || 0;
               s.paths.forEach((path) => {
-                const coords = canonicalPath(path.map((c) => [Number(c[0]), Number(c[1])]));
+                const coords = path.map((c) => [Number(c[0]), Number(c[1])]);
                 if (coords.length < 2) return;
                 coords.forEach((c) => pts.push(c));
                 const pl = L.polyline(coords, {
@@ -279,17 +353,18 @@ $sv_modal
                   .addTo(map)
                   .bindTooltip((s.sentido ? s.sentido + ' · ' : '') + 'SRE ' + (s.sre || '-') + ' · km ' + fmt(s.km_inicial) + ' - ' + fmt(s.km_final)
                     + ' · IRI ' + Number(s.iri).toFixed(2) + ' · IGG ' + Number(s.igg).toFixed(0)
-                    + ' · ' + s.matriz_categoria
+                    + (s.iri_gatilho ? ' (gatilho ' + fmt(s.iri_gatilho) + ')' : '')
+                    + (s._tip_key ? ' · ' + s._tip_key : '')
                     + (s._custo_sre_label ? ' · Custo ' + s._custo_sre_label : '')
                     + (attended ? '' : ' · Fora do orçamento'))
                   .on('click', (e) => window.__openTrecho(e.latlng.lat, e.latlng.lng, s.detail));
-                drawn.push({ polyline: pl, coords, sidePx });
+                drawn.push({ polyline: pl, coords, side });
               });
             });
             if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [34, 34] });
             function redrawOffsets() {
               drawn.forEach((d) => {
-                if (d.sidePx) d.polyline.setLatLngs(offsetPathPixels(d.coords, d.sidePx));
+                if (d.side) d.polyline.setLatLngs(offsetPathPixels(d.coords, d.side));
               });
             }
             redrawOffsets();
@@ -321,7 +396,8 @@ $sv_modal
             legend_items=legend_items,
             legend_title=legend_title,
             unattended_color=unattended_color,
-            gap_px=float(gap_px),
+            gap_m=float(gap_m),
+            min_gap_px=float(min_gap_px),
             sv_css=SV_CSS,
             sv_modal=SV_MODAL_HTML,
             sv_js=sv_init_js(),
