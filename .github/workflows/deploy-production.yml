@@ -29,8 +29,30 @@ jobs:
       - name: Build Docker image (smoke test)
         run: docker build -t relatorio-sgp-strata:ci .
 
+  test-auth-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: auth-gateway
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        working-directory: auth-gateway
+        run: python -m pytest tests/ -v
+
+      - name: Build Docker image (smoke test)
+        run: docker build -t auth-gateway:ci auth-gateway/
+
   build-and-push:
-    needs: test
+    needs: [test, test-auth-gateway]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -57,6 +79,15 @@ jobs:
           tags: |
             ghcr.io/strataengenharia/relatorio-sgp-strata:${{ github.sha }}
             ghcr.io/strataengenharia/relatorio-sgp-strata:latest
+
+      - name: Build e push da imagem do auth-gateway
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: auth-gateway
+          push: true
+          tags: |
+            ghcr.io/strataengenharia/relatorio-sgp-strata-auth-gateway:${{ github.sha }}
+            ghcr.io/strataengenharia/relatorio-sgp-strata-auth-gateway:latest
 
   deploy:
     needs: build-and-push
