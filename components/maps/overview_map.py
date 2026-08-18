@@ -113,7 +113,8 @@ def render_overview_map(
     attended_ids=None,
     legend_foot: str | None = None,
     color_by: str = "iap",
-    gap_px: int | float = 12,
+    gap_m: int | float = 24,
+    min_gap_px: int | float = 14,
     class_colors: dict[str, str] | None = None,
     class_legend_title: str | None = None,
     class_tooltip_label: str | None = None,
@@ -138,7 +139,14 @@ def render_overview_map(
       significa outra coisa.
     - legend_foot: rodapé customizado da legenda (senão usa o padrão do modo).
     - color_by: "iap" (cor por conceito) ou "solucao" (cor pela solução corretiva).
-    - gap_px: afastamento lateral entre cenários/sentidos sobrepostos.
+    - gap_m: afastamento lateral TOTAL entre sentidos sobrepostos, em METROS de
+      terreno (o `offset_side` de cada segmento é a fração desse total). Em metros
+      e não em pixels porque a linha tem de acompanhar a rodovia em qualquer zoom
+      — ver `offsetPathPixels`.
+    - min_gap_px: piso do afastamento em pixels de tela. No zoom aberto `gap_m`
+      vale menos de 1 px e os dois sentidos colapsariam numa linha só. Tem de ser
+      MAIOR que a espessura da linha (5 px), senão os dois traços se sobrepõem e
+      continuam parecendo um: com 14 px de eixo a eixo sobram ~9 px de vão limpo.
 
     Mantém o card do mapa mesmo sem dados, usando uma base vazia com aviso discreto.
     """
@@ -361,7 +369,10 @@ $sv_modal
           <script>
             const segments = $segments_json;
             const colors = $colors_json;
-            const GAP_PX = $gap_px;   // separação (px) entre sentidos vizinhos — constante em qualquer zoom
+            // Afastamento entre sentidos medido em METROS de terreno, com piso em
+            // pixels. Ver offsetPathPixels para o porquê.
+            const GAP_M = $gap_m;
+            const MIN_GAP_PX = $min_gap_px;
             const map = L.map('map', {
               zoomControl: false,
               attributionControl: true,
@@ -412,11 +423,37 @@ $sv_modal
             const drawn = [];   // { polyline, coords (originais), sidePx }
             const formatKm = (value) => Number(value).toFixed(2);
 
-            // Desloca a polilinha perpendicularmente por `sidePx` PIXELS no zoom atual
-            // (separação constante em qualquer zoom — técnica portada da v2).
-            function offsetPathPixels(coords, sidePx) {
-              if (coords.length < 2 || !sidePx) return coords;
+            // Pixels por metro no zoom `z`, na latitude `lat`. Mede uma distância
+            // conhecida em graus e compara projeção com distância real, então segue
+            // a projeção do Leaflet em vez de assumir uma constante de Mercator.
+            function pixelsPerMeter(lat, z) {
+              const a = L.latLng(lat, 0), b = L.latLng(lat, 0.01);
+              const metros = map.distance(a, b);
+              if (!metros) return 0;
+              const pa = map.project(a, z), pb = map.project(b, z);
+              return Math.hypot(pb.x - pa.x, pb.y - pa.y) / metros;
+            }
+
+            // Afastamento lateral em pixels do zoom atual, a partir de GAP_M metros.
+            //
+            // O offset já foi em pixels fixos, e isso descolava a linha da rodovia:
+            // 18 px valem ~20 m no zoom fechado (cabe na plataforma) mas centenas de
+            // metros no zoom aberto, jogando o traçado no meio da mata. Medindo em
+            // metros a linha acompanha a geografia em qualquer zoom; o piso em pixels
+            // existe para o caso oposto — no zoom bem aberto GAP_M vale menos de 1 px
+            // e os dois sentidos virariam uma linha só.
+            function gapPixels(lat) {
               const z = map.getZoom();
+              return Math.max(GAP_M * pixelsPerMeter(lat, z), MIN_GAP_PX);
+            }
+
+            // Desloca a polilinha perpendicularmente. `side` é a FRAÇÃO do
+            // afastamento (offset_side: ±0,5 para dois sentidos, ±0,33/±0,67 quando
+            // há mais de um cenário do mesmo lado).
+            function offsetPathPixels(coords, side) {
+              if (coords.length < 2 || !side) return coords;
+              const z = map.getZoom();
+              const sidePx = side * gapPixels(coords[0][0]);
               const pts = coords.map((c) => map.project(L.latLng(c[0], c[1]), z));
               const out = [];
               for (let i = 0; i < pts.length; i++) {
@@ -431,15 +468,18 @@ $sv_modal
               return out;
             }
 
-            // Padroniza apenas a ordem geométrica usada no cálculo do offset.
-            // O sentido real vem do cadastro: Crescente = km 0 -> X e
-            // Decrescente = km X -> 0.
-            function canonicalPath(coords) {
-              if (coords.length < 2) return coords;
-              const first = coords[0], last = coords[coords.length - 1];
-              const reversed = first[0] > last[0] || (first[0] === last[0] && first[1] > last[1]);
-              return reversed ? coords.slice().reverse() : coords;
-            }
+            // A ordem dos pontos NÃO é normalizada aqui de propósito: ela já chega
+            // coerente do banco (o shape da pista é recortado em ordem de km), e é
+            // ela que define de que lado a perpendicular do offset aponta.
+            //
+            // Existia um `canonicalPath()` que reordenava cada trecho comparando a
+            // LATITUDE do primeiro ponto com a do último. Numa rodovia que corre
+            // leste-oeste a latitude quase não varia, então o sinal da comparação
+            // virava ruído e trocava de segmento para segmento: o traçado saltava de
+            // um lado da rodovia para o outro. Medido na BR-055: das 111 emendas
+            // entre trechos, 109 vinham coerentes do banco e o canonicalPath deixava
+            // 81 invertidas. Sem ele, um sentido sai todo do mesmo lado e
+            // Crescente/Decrescente saem em lados opostos, que é o esperado.
 
             segments.forEach((segment) => {
               const attended = segment.attended !== false;
@@ -448,10 +488,10 @@ $sv_modal
               const opacity = attended ? 0.96 : $unattended_opacity;
               const weight = attended ? 5 : $unattended_weight;
               const dashArray = attended ? null : $unattended_dash;
-              const sidePx = (Number(segment.offset_side) || 0) * GAP_PX;
+              const side = Number(segment.offset_side) || 0;
 
               segment.paths.forEach((path) => {
-                const coordinates = canonicalPath(path.map((coord) => [Number(coord[0]), Number(coord[1])]));
+                const coordinates = path.map((coord) => [Number(coord[0]), Number(coord[1])]);
                 if (coordinates.length < 2) return;
 
                 coordinates.forEach((coord) => latLngs.push(coord));
@@ -473,16 +513,17 @@ $sv_modal
                   (segment._custo_sre_label ? ' · Custo ' + segment._custo_sre_label : '') +
                   (attended ? '' : ' · $unattended_label')
                 ).on('click', (e) => window.__openTrecho(e.latlng.lat, e.latlng.lng, segment.detail));
-                drawn.push({ polyline: pl, coords: coordinates, sidePx });
+                drawn.push({ polyline: pl, coords: coordinates, side });
               });
             });
 
             const bounds = L.latLngBounds(latLngs);
             map.fitBounds(bounds, { padding: [34, 34] });
 
-            // Reaplica o offset em pixels a cada zoom (mantém a separação constante).
+            // Recalcula o offset a cada zoom: GAP_M é fixo no terreno, mas o
+            // equivalente em pixels muda com o zoom.
             function redrawOffsets() {
-              drawn.forEach((d) => { if (d.sidePx) d.polyline.setLatLngs(offsetPathPixels(d.coords, d.sidePx)); });
+              drawn.forEach((d) => { if (d.side) d.polyline.setLatLngs(offsetPathPixels(d.coords, d.side)); });
             }
             redrawOffsets();
             map.on('zoomend', redrawOffsets);
@@ -531,7 +572,10 @@ $sv_modal
             unattended_weight=5 if unattended_color == "#ef4444" else 2.5,
             unattended_dash="null" if unattended_dash is None else json.dumps(unattended_dash),
             unattended_label=unattended_label,
-            gap_px=float(gap_px),  # separação em px entre sentidos vizinhos (constante em qualquer zoom)
+            # Afastamento entre sentidos em METROS de terreno (segue a rodovia em
+            # qualquer zoom), com piso em pixels para não colapsarem numa linha só.
+            gap_m=float(gap_m),
+            min_gap_px=float(min_gap_px),
             sv_css=SV_CSS,
             sv_modal=SV_MODAL_HTML,
             sv_js=sv_init_js(),

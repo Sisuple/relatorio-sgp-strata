@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -52,7 +53,10 @@ from services.overview_service import (
     get_available_scenarios,
     get_available_years,
     get_analysis_year_window,
+    get_condition_years,
+    get_scenario_km_ranges,
     get_scenario_label,
+    km_ranges_overlap,
     solution_severity_rank,
     get_dnit_economic_data,
     get_dnit_iri_projection,
@@ -70,6 +74,20 @@ from services.overview_service import (
     _DNIT_GROUP_COLORS,
     _DNIT_ORDER,
     _IAP_CLASS_ORDER,
+    DNIT_FAMILY_COLORS,
+    DNIT_FAMILY_NO_WORK,
+    DNIT_FAMILY_ORDER,
+    DNIT_IRI_BAND_ABOVE,
+    DNIT_IRI_BAND_BELOW,
+    DNIT_IRI_BAND_COLORS,
+    DNIT_IRI_BAND_LEGEND,
+    DNIT_IRI_BAND_LIMIT,
+    DNIT_IRI_BAND_MARGIN,
+    DNIT_IRI_BAND_ORDER,
+    dnit_family_color,
+    dnit_family_from_solution_text,
+    dnit_family_severity,
+    dnit_solution_family,
     _dnit_solution_group,
     _normalize_road_code,
     solution_code_from_name,
@@ -93,20 +111,19 @@ from services.traffic_service import (
     get_vmda_long,
     get_vmda_wide,
 )
-from utils.geo import road_local_scenario_offsets
 from services.geotecnia_service import (
     LAYER_ORDER,
     get_pavement_structure,
     get_pavement_structure_roads,
 )
 from services.pavimentacao_service import (
-    get_atr_composition,
     get_atr_series,
+    get_condition_compositions,
+    get_condition_sentidos_faixas,
     get_d0_series,
-    get_igg_composition,
-    get_iri_composition,
     get_iri_series,
     get_pavimentacao_roads,
+    get_survey_years,
 )
 
 
@@ -1303,6 +1320,38 @@ def inject_css() -> None:
                 .solution-distribution-meta span {
                     color: var(--muted) !important;
                 }
+
+                /* Pílulas de detalhe do card (ex.: "Alta 12 · Crítica 3" em
+                   SEGMENTOS PRIORITÁRIOS). No escuro o valor é #eef6fb sobre fundo
+                   escuro; no claro as pílulas high/critical trocam o fundo por um
+                   tom translúcido de 10-11%, que sobre o card branco fica quase
+                   branco — e o valor em #eef6fb desaparecia.
+                   O matiz (laranja/vermelho) é o que codifica a gravidade e fica
+                   preservado; o que muda é só o contraste do TEXTO. */
+                .metric-detail-pill {
+                    background: rgba(19,36,50,.05) !important;
+                    border-color: rgba(91,119,138,.24) !important;
+                    color: var(--muted) !important;
+                }
+                .metric-detail-pill strong {
+                    color: var(--text) !important;
+                }
+                .metric-detail-high {
+                    background: rgba(237,150,23,.16) !important;
+                    border-color: rgba(176,110,8,.42) !important;
+                }
+                .metric-detail-high,
+                .metric-detail-high strong {
+                    color: #85530a !important;
+                }
+                .metric-detail-critical {
+                    background: rgba(215,25,32,.11) !important;
+                    border-color: rgba(176,20,26,.40) !important;
+                }
+                .metric-detail-critical,
+                .metric-detail-critical strong {
+                    color: #9c1219 !important;
+                }
                 [data-testid="stMarkdownContainer"] p,
                 [data-testid="stMarkdownContainer"] li {
                     color: inherit;
@@ -2263,6 +2312,18 @@ def _network_filter_roads(selected_roads: list[str] | None, diagnosis: str) -> l
 
 
 def _collect_network_scenario_options(roads: list[str], matrix_type: str) -> list[dict]:
+    """Opções de cenário da Visão geral / Cenário econômico, na ORDEM DO BANCO.
+
+    A ordem é a que `get_available_scenarios` devolve — Segmento Homogêneo primeiro,
+    depois 1km, depois o resto, e dentro de cada grupo os mais recentes antes. É a
+    mesma que o Diagnóstico, Soluções e Comparativo usam, então as telas listam os
+    cenários na mesma sequência e abrem no mesmo cenário por padrão.
+
+    Antes daqui saía um `sort` alfabético por rótulo. Como toda tela seleciona o
+    primeiro item da sua lista, a Visão geral abria em "Duplicação…" (D no alfabeto)
+    enquanto o Diagnóstico abria no SH — mesma rodovia, mesmos 22 cenários, cenário
+    inicial diferente, o que dava a impressão de que as listas eram outras.
+    """
     options: list[dict] = []
     multi_road = len(roads) > 1
     for road in roads:
@@ -2281,7 +2342,8 @@ def _collect_network_scenario_options(roads: list[str], matrix_type: str) -> lis
                     "pista": pista,
                 }
             )
-    options.sort(key=lambda item: (str(item["road"]), str(item["display_label"])))
+    # Sem `sort` de propósito: o loop já agrupa por rodovia (na ordem em que foram
+    # selecionadas) e preserva a ordem do banco dentro de cada uma.
     return options
 
 
@@ -2301,23 +2363,153 @@ def _normalize_scenario_pista(scenario: dict | None) -> str:
     return value or "outro"
 
 
+def _analise_id_from_scenario_key(scenario_key: Any) -> int | None:
+    """Id da análise a partir da key "analise_id:ciclo_id" do cenário."""
+    head = str(scenario_key or "").split(":", 1)[0]
+    try:
+        return int(head)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scenario_overlap_warning(entries: list[dict]) -> str | None:
+    """Aviso de dupla contagem quando cenários selecionados cobrem o mesmo km.
+
+    `entries` são dicts com `scenario_key`, `label` e a chave de agrupamento
+    `group` (rodovia + pista) — só faz sentido comparar km dentro do mesmo
+    sentido da mesma rodovia: Crescente e Decrescente compartilham a quilometragem
+    por definição e somá-los é o comportamento correto.
+
+    NÃO bloqueia nem altera a seleção: cenários de mesmo km podem ser somados de
+    propósito (duplicação e faixa adicional são pista nova sobre o km existente),
+    e quem sabe disso é o usuário. O aviso existe para o caso oposto — variantes
+    do mesmo trecho, como `(Reforço)` e `(Sem Reforço)`, que dobram extensão e
+    custo silenciosamente.
+    """
+    if len(entries) < 2:
+        return None
+
+    ranges_by_analise = get_scenario_km_ranges(
+        tuple(
+            analise_id
+            for entry in entries
+            if (analise_id := _analise_id_from_scenario_key(entry.get("scenario_key"))) is not None
+        )
+    )
+    if not ranges_by_analise:
+        return None
+
+    conflicts: list[str] = []
+    for group_entries in _group_by(entries, lambda entry: str(entry.get("group") or "")).values():
+        for first, second in itertools.combinations(group_entries, 2):
+            ranges_a = ranges_by_analise.get(_analise_id_from_scenario_key(first.get("scenario_key")) or -1)
+            ranges_b = ranges_by_analise.get(_analise_id_from_scenario_key(second.get("scenario_key")) or -1)
+            if not ranges_a or not ranges_b:
+                continue
+            overlap = km_ranges_overlap(ranges_a, ranges_b)
+            if overlap:
+                conflicts.append(
+                    f"**{first.get('label')}** e **{second.get('label')}** "
+                    f"(km {_fmt_km(overlap[0])} a {_fmt_km(overlap[1])})"
+                )
+
+    if not conflicts:
+        return None
+
+    # Mais de 3 pares vira parede de texto e nenhum deles é lido; o total ainda
+    # informa o tamanho do problema.
+    shown = conflicts[:3]
+    resto = len(conflicts) - len(shown)
+    sufixo = f" · e mais {resto} par(es) sobrepostos" if resto > 0 else ""
+    return (
+        "Cenários selecionados cobrem o mesmo trecho: "
+        + " · ".join(shown)
+        + sufixo
+        + ". Extensão, km críticos e custo somam o trecho mais de uma vez."
+    )
+
+
+def _keys_overlap_warning(
+    scenarios: list[dict],
+    selected_keys: list[str],
+    labels: dict | None = None,
+) -> str | None:
+    """`_scenario_overlap_warning` para as telas que selecionam por `key` (rodovia única)."""
+    by_key = {str(item["key"]): item for item in scenarios}
+    entries = []
+    for key in selected_keys or []:
+        scenario = by_key.get(str(key))
+        if not scenario:
+            continue
+        entries.append(
+            {
+                "scenario_key": str(key),
+                "label": (labels or {}).get(str(key)) or _network_scenario_label(scenario) or str(key),
+                "group": _normalize_scenario_pista(scenario),
+            }
+        )
+    return _scenario_overlap_warning(entries)
+
+
+def _tokens_overlap_warning(
+    selected_tokens: list[str],
+    scenario_options: list[dict],
+) -> str | None:
+    """`_scenario_overlap_warning` para as telas que selecionam por token (multi-rodovia)."""
+    option_by_token = {str(item["token"]): item for item in scenario_options}
+    entries = []
+    for token in selected_tokens or []:
+        option = option_by_token.get(str(token))
+        if not option:
+            continue
+        entries.append(
+            {
+                "scenario_key": option.get("scenario_key"),
+                "label": option.get("display_label") or str(token),
+                "group": f"{option.get('road_code')}|{option.get('pista')}",
+            }
+        )
+    return _scenario_overlap_warning(entries)
+
+
+def _render_scenario_overlap_warning(message: str | None) -> None:
+    """Mostra o aviso de sobreposição — informativo, nunca altera a seleção."""
+    if message:
+        st.warning(message, icon="⚠️")
+
+
+def _group_by(items: list[dict], key_func) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for item in items:
+        grouped.setdefault(key_func(item), []).append(item)
+    return grouped
+
+
+def _fmt_km(value: float) -> str:
+    return f"{value:,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def _sanitize_network_scenario_selection(
     selected_tokens: list[str],
     scenario_options: list[dict],
     previous_tokens: list[str] | None = None,
 ) -> tuple[list[str], str | None]:
-    """Impede combinações de cenários que duplicam a mesma pista/rodovia.
+    """Impede a única combinação que nunca faz sentido: `Todos` com outro cenário.
 
-    Regra:
-    - `Todos` é exclusivo para a rodovia;
-    - `Crescente` só pode combinar com `Decrescente`;
-    - `Decrescente` só pode combinar com `Crescente`;
-    - qualquer outra pista fica exclusiva para evitar dupla contagem.
+    Regra: `Todos` é exclusivo para a rodovia (ele já é a rodovia inteira, então
+    somar qualquer outro cenário conta km duas vezes). Todo o resto é livre —
+    inclusive dois `Crescente` ou dois `Decrescente`.
+
+    Antes a regra era por pista: `Crescente` só combinava com `Decrescente`. Isso
+    valia enquanto um sentido era sempre uma análise só, mas passou a impedir o
+    caso real de um mesmo sentido dividido em trechos analisados com parâmetros
+    diferentes (ex.: BR-088 CRESCENTE km 32–39,2 e km 40,5–49,4). Quem decide se
+    os cenários são complementares é o usuário; a dupla contagem por km
+    sobreposto agora é sinalizada por `_scenario_overlap_warning`, sem bloquear.
 
     `previous_tokens` é a seleção anterior. Ela define quem é o clique novo, e o
-    clique novo é quem manda: ao marcar um segundo `Crescente`, o `Crescente`
-    anterior é desmarcado em vez de o novo ser ignorado — sem isso não dá para
-    trocar de cenário, só desmarcando o antigo primeiro.
+    clique novo é quem manda: ao marcar um cenário com `Todos` já selecionado,
+    `Todos` sai — em vez de o clique novo ser ignorado.
     """
     if not selected_tokens:
         return [], None
@@ -2336,40 +2528,27 @@ def _sanitize_network_scenario_selection(
     sanitized: list[str] = []
     conflict = False
     for tokens in by_road.values():
-        if len(tokens) <= 1:
+        todos = [token for token in tokens if _pista(token) == "todos"]
+        outros = [token for token in tokens if token not in todos]
+        if len(tokens) <= 1 or not todos or not outros:
             sanitized.extend(tokens)
             continue
 
-        # Âncora: o cenário recém-marcado. Se nada é novo (combinação inválida já
-        # gravada na sessão), cai no primeiro, como antes.
+        # `Todos` conflita com o resto. Quem fica é o clique novo; se nada é novo
+        # (combinação inválida já gravada na sessão), `Todos` cede o lugar.
         novos = [token for token in tokens if token not in previous_set]
-        anchor = novos[-1] if novos else tokens[0]
-        anchor_pista = _pista(anchor)
+        anchor = novos[-1] if novos else outros[0]
+        keep = todos if anchor in todos else outros
 
-        keep = [anchor]
-        if anchor_pista in ("crescente", "decrescente"):
-            oposto = "decrescente" if anchor_pista == "crescente" else "crescente"
-            complementares = [token for token in tokens if _pista(token) == oposto]
-            if complementares:
-                # Preferir o sentido oposto que já estava marcado: o usuário só
-                # trocou o outro lado.
-                antigos = [token for token in complementares if token in previous_set]
-                keep.append((antigos or complementares)[0])
-
-        keep_set = set(keep)
-        kept_pistas = {_pista(token) for token in keep}
-        # Troca de cenário na mesma pista é o comportamento esperado, não avisa.
-        # Só avisa quando a combinação em si era inválida (ex.: `Todos` com sentido).
-        if any(_pista(token) not in kept_pistas for token in tokens if token not in keep_set):
-            conflict = True
-        sanitized.extend(token for token in tokens if token in keep_set)
+        conflict = True
+        sanitized.extend(token for token in tokens if token in set(keep))
 
     ordered = [token for token in selected if token in set(sanitized)]
     message = None
     if conflict:
         message = (
             "A seleção de cenários foi ajustada para evitar dupla contagem: "
-            "`Todos` fica sozinho; `Crescente` só combina com `Decrescente`."
+            "`Todos` já cobre a rodovia inteira, então fica sozinho."
         )
     return ordered, message
 
@@ -2379,6 +2558,12 @@ def _collect_network_year_options(
     matrix_type: str,
     selected_scenario_tokens: list[str] | None,
 ) -> list[int]:
+    """Anos do filtro da Visão geral — de CONDIÇÃO, não de obra.
+
+    `get_condition_years` em vez de `get_available_years`: a tela mostra IRI/IGG, e a
+    tabela de intervenções só tem linha no ano em que a matriz programou obra. Em
+    trechos curtos isso reduzia o filtro a 3 anos com 27 anos de IRI no banco.
+    """
     years: set[int] = set()
     if selected_scenario_tokens:
         for token in selected_scenario_tokens:
@@ -2386,10 +2571,10 @@ def _collect_network_year_options(
             road = next((item for item in roads if _normalize_road_code(item) == road_code), None)
             if not road:
                 continue
-            years.update(get_available_years(road, matrix_type, scenario_key))
+            years.update(get_condition_years(road, matrix_type, scenario_key))
     else:
         for road in roads:
-            years.update(get_available_years(road, matrix_type, None))
+            years.update(get_condition_years(road, matrix_type, None))
     return sorted(years)
 
 
@@ -2531,6 +2716,12 @@ def render_network_top_bar() -> tuple[str, list[str], list[str], list[int]]:
                 st.session_state[year_pending_key] = [year_options[0]]
                 st.rerun()
 
+    # Fora da coluna do filtro: o aviso é uma frase longa e não cabe legível nos
+    # ~25% de largura do seletor.
+    _render_scenario_overlap_warning(
+        _tokens_overlap_warning(selected_scenarios, scenario_options)
+    )
+
     header_slot.markdown(
         """
         <div class="top-copy">
@@ -2657,6 +2848,12 @@ def render_economic_top_bar() -> tuple[str, list[str], list[tuple[str, str]], di
             if scenario_warning:
                 st.caption(scenario_warning)
 
+    # Aqui a soma vira orçamento: dupla contagem por km sobreposto infla
+    # necessidade e custo, então o aviso é ainda mais importante que na rede.
+    _render_scenario_overlap_warning(
+        _tokens_overlap_warning(selected_scenarios, scenario_options)
+    )
+
     road_scenario_pairs = [
         (option_by_token[token]["road"], option_by_token[token]["scenario_key"])
         for token in selected_scenarios
@@ -2751,9 +2948,11 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
             else:
                 _placeholder("Sem cenários para a rodovia")
 
+        # Anos de CONDIÇÃO (IRI/IGG): o Diagnóstico mostra condição, e a tabela de
+        # intervenções só tem linha em ano com obra programada.
         year_set: set[int] = set()
         for scenario_key in scenario_keys:
-            year_set.update(get_available_years(selected_road, matrix_type, scenario_key))
+            year_set.update(get_condition_years(selected_road, matrix_type, scenario_key))
         years = sorted(year_set)
         with year_col:
             _filter_label("Ano")
@@ -2766,6 +2965,8 @@ def render_diagnosis_top_bar(default_road: str) -> tuple[str, str, list[str], in
                 )
             else:
                 _placeholder("Sem anos")
+
+    _render_scenario_overlap_warning(_keys_overlap_warning(scenarios, scenario_keys))
 
     header_slot.markdown(
         """
@@ -2875,6 +3076,10 @@ def render_solution_top_bar(default_road: str) -> tuple[str, str, list[str], int
             else:
                 _placeholder("Sem anos")
 
+    _render_scenario_overlap_warning(
+        _keys_overlap_warning(scenarios, [str(value) for value in scenario_keys])
+    )
+
     header_slot.markdown(
         """
         <div class="top-copy">
@@ -2925,7 +3130,9 @@ def _render_economic_master_filters(
         placeholder="Selecione um ou mais",
     )
 
-    return [str(value) for value in selected_keys], labels
+    selected_keys = [str(value) for value in selected_keys]
+    _render_scenario_overlap_warning(_keys_overlap_warning(scenarios, selected_keys, labels))
+    return selected_keys, labels
 
 
 def _comparison_matrix_label(matrix_type: str) -> str:
@@ -3014,6 +3221,9 @@ def _render_comparison_side_filter(road: str, side: str, default_matrix: str) ->
             format_func=lambda k: labels.get(str(k), str(k)),
             placeholder="Selecione um ou mais",
         )
+    _render_scenario_overlap_warning(
+        _keys_overlap_warning(scenarios, [str(value) for value in selected], labels)
+    )
     return {
         "side": side.upper(),
         "matrix_type": matrix_type,
@@ -3188,6 +3398,117 @@ def _weighted_iap_from_linear(diagram_df: pd.DataFrame | None, fallback: float) 
     return float((diagram_df["iap"].astype(float) * diagram_df["extensao"].astype(float)).sum() / total_ext)
 
 
+def _scenario_map_offsets(keys: list[str], by_key: dict) -> list[float]:
+    """Deslocamento lateral de cada cenário no mapa, na ordem de `keys`.
+
+    O offset existe para desempilhar geometrias que ocupam o MESMO eixo da
+    rodovia — não para etiquetar cenário. Então só recebe offset quem tem km em
+    comum com outro cenário selecionado:
+
+    - trechos em CONTINUAÇÃO (km disjuntos, ex.: km 32–39,2 e km 40,5–49,4) são a
+      mesma rodovia seguindo em frente: ficam em 0,0, na posição real. Deslocá-los
+      tiraria os dois do eixo verdadeiro sem nada para desempilhar;
+    - trechos COINCIDENTES vão para lados opostos pelo sentido (Crescente +,
+      Decrescente −), que é a convenção de pista das telas;
+    - vários cenários coincidentes no MESMO sentido abrem em leque dentro do seu
+      lado (+0,33 e +0,67 para dois), senão a última camada desenhada cobre as
+      anteriores e um trecho parece não existir no mapa.
+
+    A sobreposição é medida entre TODOS os selecionados, não por sentido: é
+    justamente Crescente e Decrescente no mesmo km que compartilham o eixo e
+    precisam de lados opostos.
+
+    O leque é calculado por GRUPO de sobreposição, não por sentido no geral. Com
+    Crescente+Decrescente em km 32–39,2 e outro par em km 40,5–49,4 há dois grupos
+    independentes: cada um usa o lado inteiro (±0,5) em vez de os dois Crescentes
+    se abrirem em +0,33/+0,67 e a linha dar um degrau na virada de um trecho para
+    o outro, onde nada se sobrepõe.
+    """
+    n = len(keys)
+    if n <= 1:
+        return [0.0] * n
+
+    pistas = [_normalize_scenario_pista(by_key.get(key)) for key in keys]
+    analise_ids = [_analise_id_from_scenario_key(key) for key in keys]
+    ranges_by_analise = get_scenario_km_ranges(
+        tuple(value for value in analise_ids if value is not None)
+    )
+
+    def _ranges(index: int) -> list[tuple[float, float]]:
+        return ranges_by_analise.get(analise_ids[index] or -1) or []
+
+    # Sem footprint no banco não há como decidir: trata tudo como coincidente e
+    # mantém a separação por sentido (comportamento anterior), que é o caso comum
+    # de Crescente × Decrescente.
+    sem_footprint = not ranges_by_analise
+    vizinhos: dict[int, set[int]] = {index: set() for index in range(n)}
+    for a, b in itertools.combinations(range(n), 2):
+        if sem_footprint or km_ranges_overlap(_ranges(a), _ranges(b)):
+            vizinhos[a].add(b)
+            vizinhos[b].add(a)
+
+    # Componentes conexas do grafo de sobreposição: cada grupo divide o próprio lado.
+    grupo_de: dict[int, int] = {}
+    for index in range(n):
+        if index in grupo_de:
+            continue
+        grupo_id = len(set(grupo_de.values()))
+        fila = [index]
+        while fila:
+            atual = fila.pop()
+            if atual in grupo_de:
+                continue
+            grupo_de[atual] = grupo_id
+            fila.extend(vizinho for vizinho in vizinhos[atual] if vizinho not in grupo_de)
+
+    total_por_grupo_pista: dict[tuple[int, str], int] = {}
+    for index, pista in enumerate(pistas):
+        if vizinhos[index]:  # sozinho no grupo = nada para desempilhar
+            chave = (grupo_de[index], pista)
+            total_por_grupo_pista[chave] = total_por_grupo_pista.get(chave, 0) + 1
+    rank_por_grupo_pista: dict[tuple[int, str], int] = {}
+
+    offsets: list[float] = []
+    for index, pista in enumerate(pistas):
+        if not vizinhos[index] or pista == "todos":
+            offsets.append(0.0)
+            continue
+        chave = (grupo_de[index], pista)
+        rank = rank_por_grupo_pista.get(chave, 0)
+        rank_por_grupo_pista[chave] = rank + 1
+        # Com 1 no sentido dentro do grupo dá 0,5 (o de sempre); com 2, 0,33 e 0,67.
+        fracao = (rank + 1) / (total_por_grupo_pista.get(chave, 1) + 1)
+        if pista == "crescente":
+            offsets.append(fracao)
+        elif pista == "decrescente":
+            offsets.append(-fracao)
+        else:
+            offsets.append(index - (n - 1) / 2.0)
+    return offsets
+
+
+def _road_scenario_map_offsets(
+    road_scenario_pairs: list[tuple[str, str]], matrix_type: str
+) -> list[float]:
+    """`_scenario_map_offsets` para as telas multi-rodovia, na ordem dos pares.
+
+    Cada rodovia é resolvida por conta: o afastamento de um cenário depende só dos
+    outros cenários DA MESMA rodovia, porque é com eles que ele pode disputar o
+    mesmo eixo. Substituiu `road_local_scenario_offsets`, que centralizava por
+    índice e por isso mandava dois cenários do MESMO sentido para lados opostos.
+    """
+    por_rodovia: dict[str, list[str]] = {}
+    for road, key in road_scenario_pairs:
+        por_rodovia.setdefault(str(road), []).append(str(key))
+
+    resolvidos: dict[tuple[str, str], float] = {}
+    for road, keys in por_rodovia.items():
+        by_key = {str(s["key"]): s for s in get_available_scenarios(road, matrix_type)}
+        for key, offset in zip(keys, _scenario_map_offsets(keys, by_key)):
+            resolvidos[(road, key)] = offset
+    return [resolvidos.get((str(road), str(key)), 0.0) for road, key in road_scenario_pairs]
+
+
 def _scenario_offset_parts(
     road: str,
     scenario_keys: list[str],
@@ -3205,24 +3526,14 @@ def _scenario_offset_parts(
     keys = [str(key) for key in (scenario_keys or []) if key]
     scenarios = get_available_scenarios(road, matrix_type)
     by_key = {str(s["key"]): s for s in scenarios}
-    n = len(keys)
-    fallback_offsets = [i - (n - 1) / 2.0 for i in range(n)]
+    offsets = _scenario_map_offsets(keys, by_key)
     parts: list[dict] = []
     for i, key in enumerate(keys):
         data = data_loader(road, key, year) or {}
         segments = data.get("segments") if data else None
         if segments is not None and not segments.empty:
             segments = segments.copy()
-            pista = _normalize_scenario_pista(by_key.get(key))
-            if n <= 1 or pista == "todos":
-                offset_side = 0.0
-            elif pista == "crescente":
-                offset_side = 0.5
-            elif pista == "decrescente":
-                offset_side = -0.5
-            else:
-                offset_side = fallback_offsets[i]
-            segments["offset_side"] = offset_side
+            segments["offset_side"] = offsets[i]
             segments["sentido"] = _network_scenario_label(by_key.get(key)) or str(key)
             data = dict(data)
             data["segments"] = segments
@@ -3311,6 +3622,7 @@ def _render_diagnosis_iap_class_filter(
     *,
     key: str,
     class_order: list[str] | None = None,
+    format_func=None,
 ) -> str:
     class_order = class_order or _IAP_CLASS_ORDER
     options = ["Todas"]
@@ -3327,6 +3639,7 @@ def _render_diagnosis_iap_class_filter(
         key=key,
         horizontal=True,
         label_visibility="collapsed",
+        format_func=format_func or (lambda value: str(value)),
     )
 
 
@@ -3657,7 +3970,12 @@ def _render_solution_distribution_h(
 
 def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type="Paragon"):
     """Multiselect de cenários (sentidos). Devolve (keys, labels).
-    Default = CRESCENTE + DECRESCENTE se existirem; senão o cenário do topo."""
+    Default = CRESCENTE + DECRESCENTE se existirem; senão o cenário do topo.
+
+    ⚠️ SEM CHAMADORES: a tela Soluções passou a montar o seletor de cenários na
+    própria `render_solution_top_bar`. Mantido por ora, mas é o `render_*` que
+    vale — inclusive para o aviso de sobreposição de km.
+    """
     scenarios = get_available_scenarios(road, matrix_type)
     labels = {s["key"]: s["cenario"] for s in scenarios}
     by_key = {s["key"]: s for s in scenarios}
@@ -3669,9 +3987,15 @@ def _solutions_sentido_keys(road, topbar_key, widget_key="sol_scen", matrix_type
     de = next((k for k in keys if "decrescente" in labels[k].lower()), None)
     default = [k for k in (cr, de) if k] or ([topbar_key] if topbar_key in keys else keys[:1])
     _filter_caption("Cenários (sentidos) — selecione um ou mais")
+    # `_short_scenario_label` colapsa todo Crescente em "Pista simples - LD": com
+    # dois cenários do mesmo sentido as duas opções ficavam com nome idêntico e
+    # sem como escolher. `_network_scenario_label` preserva trecho, km e
+    # Reforço/Sem Reforço — o que de fato distingue os cenários.
     selected = _compact_multiselect(
         "Cenários (sentidos)", keys, default=default,
-        format_func=lambda k: _short_scenario_label(by_key.get(k)),  # nome curto (igual às outras telas)
+        format_func=lambda k: (
+            _network_scenario_label(by_key.get(k)) or _short_scenario_label(by_key.get(k))
+        ),
         key=f"{widget_key}_{road}",
     )
     return (selected or default), labels
@@ -3681,7 +4005,13 @@ def _combined_solution_data(road, keys, labels, year: int | None = None):
     """Tabela e segmentos combinados de vários cenários, com coluna/atributo de
     Sentido e os segmentos deslocados (uma camada por sentido) para o mapa."""
     tables, segs = [], []
-    n = len(keys)
+    keys = [str(k) for k in keys]
+    # Antes o offset era um leque por índice (i - (n-1)/2), que deslocava TODO
+    # cenário selecionado. Com trechos em continuação isso tirava a rodovia do
+    # eixo real sem nada para desempilhar — ver `_scenario_map_offsets`.
+    offsets = _scenario_map_offsets(
+        keys, {str(s["key"]): s for s in get_available_scenarios(road, "Paragon")}
+    )
     for i, k in enumerate(keys):
         d = get_solutions_data(road, scenario_key=k, year=year)
         t, s = d.get("table"), d.get("segments")
@@ -3692,7 +4022,7 @@ def _combined_solution_data(road, keys, labels, year: int | None = None):
             tables.append(t)
         if s is not None and not s.empty:
             s = s.copy()
-            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
+            s["offset_side"] = offsets[i]  # lado p/ offset por pixel (zoom-aware) no mapa
             s["sentido"] = sent
             segs.append(s)
     return (
@@ -3708,7 +4038,10 @@ def _combined_dnit_solution_data(road, keys, labels):
     `offset_side` nos segmentos, para o mapa mostrar pistas separadas.
     """
     tables, segs = [], []
-    n = len(keys)
+    keys = [str(k) for k in keys]
+    offsets = _scenario_map_offsets(
+        keys, {str(s["key"]): s for s in get_available_scenarios(road, "Matriz Cadastrada")}
+    )
     zona_colors = None
     zona_order = None
     for i, k in enumerate(keys):
@@ -3725,7 +4058,7 @@ def _combined_dnit_solution_data(road, keys, labels):
             tables.append(t)
         if s is not None and not s.empty:
             s = s.copy()
-            s["offset_side"] = (i - (n - 1) / 2.0)
+            s["offset_side"] = offsets[i]
             s["sentido"] = sent
             segs.append(s)
     return {
@@ -3734,6 +4067,8 @@ def _combined_dnit_solution_data(road, keys, labels):
         "segments": pd.concat(segs, ignore_index=True) if segs else pd.DataFrame(),
         "zona_colors": zona_colors or _DNIT_ZONA_COLORS,
         "zona_order": zona_order or _DNIT_ZONA_ORDER,
+        "familia_colors": DNIT_FAMILY_COLORS,
+        "familia_order": DNIT_FAMILY_ORDER,
     }
 
 
@@ -3970,14 +4305,56 @@ def _render_solution_table_controls(filtered_table, *, export_fn=None):
 # Página: SOLUÇÕES (DNIT / Matriz Cadastrada) — versão _dnit_* da tela de soluções
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _dnit_group_color(label: str) -> str:
-    """Cor do grupo de solução DNIT (paleta `_DNIT_GROUP_COLORS`; fallback cinza)."""
-    return _DNIT_GROUP_COLORS.get(str(label), "#9fb9d9")
+def _dnit_solution_label_color(label: Any) -> str:
+    """Cor da família de solução DNIT a partir de um rótulo de solução.
+
+    Serve tanto para o nome de uma família ("Reforço") quanto para o texto de uma
+    solução ("FR4 + CBUQ(4)") ou de um núcleo. É o que mantém gráfico, mapa e
+    legenda na mesma cor para a mesma solução.
+
+    Quando o rótulo não é o nome de uma família, a dedução fica com
+    `dnit_family_from_solution_text`, que trata os dois jeitos de o "+" aparecer no
+    texto (dentro do nome de uma intervenção e entre intervenções diferentes).
+    """
+    texto = str(label or "")
+    if texto in DNIT_FAMILY_COLORS:
+        return DNIT_FAMILY_COLORS[texto]
+    return dnit_family_color(dnit_family_from_solution_text(texto))
 
 
-def _dnit_core_color(label: str) -> str:
-    """Cor da barra pela severidade do núcleo da solução (Micro=verde, FR5+CBUQ=laranja, REC=vermelho)."""
-    return _DNIT_GROUP_COLORS.get(_dnit_solution_group([str(label)]), "#9fb9d9")
+def _dnit_core_color_map(table_df):
+    """Função de cor por núcleo de solução, usando a família EXATA da tabela.
+
+    A tabela traz `Solução família`, classificada pelo `tipoId` de cada intervenção —
+    a mesma fonte que colore o mapa. Deduzir a família do TEXTO do núcleo acerta na
+    quase totalidade dos casos, mas não em todos: em
+    "FR(11) + CBUQ (11) + Drenagem + CBUQ (4)" o `CBUQ (4)` é um reforço SEPARADO
+    (família Reforço, laranja), e pelo texto ele é indistinguível do CBUQ que é a
+    recomposição da própria fresagem (amarelo). São 4 rótulos, 5 segmentos na base
+    atual — pouco, mas sairiam com a cor errada e diferente do mapa.
+
+    Devolve um callable porque é isso que `_render_solution_distribution` espera;
+    rótulo fora da tabela cai na dedução por texto.
+    """
+    por_nucleo: dict[str, str] = {}
+    if (
+        table_df is not None
+        and not table_df.empty
+        and {"Solução núcleo", "Solução família"}.issubset(table_df.columns)
+    ):
+        for nucleo, grupo in table_df.groupby("Solução núcleo"):
+            familias = grupo["Solução família"].dropna().astype(str)
+            if familias.empty:
+                continue
+            # Mais severa vence: um núcleo com dois segmentos de famílias diferentes
+            # (não deveria acontecer, mas o dado manda) não pode virar a mais leve.
+            por_nucleo[str(nucleo)] = min(familias.unique(), key=dnit_family_severity)
+
+    def cor(label) -> str:
+        familia = por_nucleo.get(str(label))
+        return dnit_family_color(familia) if familia else _dnit_solution_label_color(label)
+
+    return cor
 
 
 def _render_dnit_solution_filters(table_df, zona_order):
@@ -4174,17 +4551,26 @@ def _render_dnit_solutions_page(road, scenario_keys) -> None:
     st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
     filtered_table = _render_dnit_solution_filters(data["table"], data["zona_order"])
     filtered_segments = _filter_map_segments(data["segments"], filtered_table)
-    render_dnit_map(filtered_segments, zona_colors=data["zona_colors"], zona_order=data["zona_order"])
-    nucleo_iri_color = {
-        str(nucleo): sub["_zona_color"].mode().iloc[0]
-        for nucleo, sub in filtered_table.groupby("Solução núcleo")
-        if "_zona_color" in sub.columns and not sub["_zona_color"].mode().empty
-    } if filtered_table is not None and not filtered_table.empty else {}
+    # Mapa por SOLUÇÃO, não por faixa de IRI: a tela é de intervenção, então a cor
+    # responde "o que fazer aqui" em vez de repetir a condição. Os trechos sem obra
+    # voltam em azul para a rodovia aparecer inteira, sem lacunas.
+    render_dnit_map(
+        _with_no_work_segments(filtered_segments, data["segments"]),
+        zona_colors=data.get("familia_colors"),
+        zona_order=data.get("familia_order"),
+        legend_title="SOLUÇÃO (MATRIZ CADASTRADA)",
+        color_by="solucao",
+    )
     _render_solution_distribution(
         filtered_table,
         group_col="Solução núcleo",
         subtitle="Soluções aplicadas · Matriz Revitaliza DNIT/RO (gravadas no banco)",
-        color_fn=lambda label: nucleo_iri_color.get(str(label), "#9fb9d9"),
+        # Antes a barra herdava a cor da faixa de IRI predominante do núcleo, o que
+        # dava duas cores para a mesma solução em trechos de condição diferente.
+        # Agora vale a família da solução — a MESMA do mapa, e vinda da mesma fonte:
+        # a coluna `Solução família`, classificada por `tipoId`. Deduzir do texto do
+        # núcleo não fecha em todos os casos (ver `_dnit_core_color_map`).
+        color_fn=_dnit_core_color_map(filtered_table),
         horizontal=True,
     )
     _, paginated_table = _render_solution_table_controls(filtered_table, export_fn=_render_dnit_export_button)
@@ -6406,7 +6792,6 @@ def _render_economic_scenario_map(
         attended_ids=attended_ids,
         legend_foot=legend_foot,
         color_by="solucao",
-        gap_px=18,
     )
 
 
@@ -6696,7 +7081,10 @@ def _combined_economic_data(road, keys, labels, year: int | None = None):
     módulo econômico: a simulação roda sobre os dois juntos (necessidade total =
     soma) e `per_sentido` traz a necessidade de cada um para o comparativo."""
     tables, budgets, segs, per_sentido = [], [], [], []
-    n = len(keys)
+    keys = [str(k) for k in keys]
+    offsets = _scenario_map_offsets(
+        keys, {str(s["key"]): s for s in get_available_scenarios(road, "Paragon")}
+    )
     for i, k in enumerate(keys):
         d = get_solutions_data(road, scenario_key=k, year=year)
         t, b, s = d.get("table"), d.get("budget_items"), d.get("segments")
@@ -6716,7 +7104,7 @@ def _combined_economic_data(road, keys, labels, year: int | None = None):
             budgets.append(b)
         if s is not None and not s.empty:
             s = s.copy()
-            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
+            s["offset_side"] = offsets[i]
             s["sentido"] = sent
             segs.append(s)
     return {
@@ -6739,7 +7127,7 @@ def _combined_economic_data_multi(
     também a coluna `Rodovia`, para as telas conseguirem distinguir de qual
     rodovia veio cada segmento quando há mais de uma selecionada."""
     tables, budgets, segs, per_sentido = [], [], [], []
-    offsets = road_local_scenario_offsets(road_scenario_pairs)
+    offsets = _road_scenario_map_offsets(road_scenario_pairs, "Paragon")
     multi_road = len({road for road, _ in road_scenario_pairs}) > 1
     for i, (road, k) in enumerate(road_scenario_pairs):
         d = get_solutions_data(road, scenario_key=k, year=year)
@@ -6969,7 +7357,10 @@ def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
     roda sobre os dois juntos (necessidade total = soma) e `per_sentido` traz a
     necessidade de cada um para o comparativo. Segmentos deslocados (2 camadas)."""
     tables, budgets, segs, per_sentido = [], [], [], []
-    n = len(keys)
+    keys = [str(k) for k in keys]
+    offsets = _scenario_map_offsets(
+        keys, {str(s["key"]): s for s in get_available_scenarios(road, "Matriz Cadastrada")}
+    )
     zona_colors = zona_order = ano_base = None
     for i, k in enumerate(keys):
         d = get_dnit_economic_data(road, scenario_key=k, year=year)
@@ -6992,7 +7383,7 @@ def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
             budgets.append(b)
         if s is not None and not s.empty:
             s = s.copy()
-            s["offset_side"] = (i - (n - 1) / 2.0)  # lado p/ offset por pixel (zoom-aware) no mapa
+            s["offset_side"] = offsets[i]
             s["sentido"] = sent
             segs.append(s)
     return {
@@ -7003,6 +7394,8 @@ def _combined_dnit_economic_data(road, keys, labels, year: int | None = None):
         "per_sentido": per_sentido,
         "zona_colors": zona_colors,
         "zona_order": zona_order,
+        "familia_colors": DNIT_FAMILY_COLORS,
+        "familia_order": DNIT_FAMILY_ORDER,
         "ano_base": ano_base,
     }
 
@@ -7015,7 +7408,7 @@ def _combined_dnit_economic_data_multi(
     """Generaliza `_combined_dnit_economic_data` para somar VÁRIAS RODOVIAS × cenários
     (mesmo espírito de `_combined_economic_data_multi`, mas para a Matriz Cadastrada)."""
     tables, budgets, segs, per_sentido = [], [], [], []
-    offsets = road_local_scenario_offsets(road_scenario_pairs)
+    offsets = _road_scenario_map_offsets(road_scenario_pairs, "Matriz Cadastrada")
     multi_road = len({road for road, _ in road_scenario_pairs}) > 1
     zona_colors = zona_order = ano_base = None
     for i, (road, k) in enumerate(road_scenario_pairs):
@@ -7056,6 +7449,8 @@ def _combined_dnit_economic_data_multi(
         "per_sentido": per_sentido,
         "zona_colors": zona_colors,
         "zona_order": zona_order,
+        "familia_colors": DNIT_FAMILY_COLORS,
+        "familia_order": DNIT_FAMILY_ORDER,
         "ano_base": ano_base,
     }
 
@@ -7218,32 +7613,26 @@ def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> No
             unsafe_allow_html=True,
         )
         render_dnit_map(
-            scoped_segments,
-            zona_colors=data.get("zona_colors"),
-            zona_order=data.get("zona_order"),
+            # Trechos sem obra em azul: o recorte de prioridade escolhe o que é
+            # ATENDIDO, mas a rodovia continua sendo desenhada inteira.
+            _with_no_work_segments(scoped_segments, segments_df),
+            zona_colors=data.get("familia_colors") or DNIT_FAMILY_COLORS,
+            zona_order=data.get("familia_order") or DNIT_FAMILY_ORDER,
+            legend_title="SOLUÇÃO (MATRIZ CADASTRADA)",
+            color_by="solucao",
         )
 
-    # Cor por IRI faixa dominante de cada solução (compartilhada entre gráfico e PDF).
-    seg_zona_color = dict(zip(
-        table["_segment_id"].astype(int),
-        table["_zona_color"].astype(str),
-    ))
-    solucao_iri_color: dict[str, str] = {}
-    if budget_items is not None and not budget_items.empty:
-        joined = budget_items.copy()
-        joined["_zona_color"] = joined["_segment_id"].astype(int).map(seg_zona_color)
-        solucao_iri_color = {
-            str(sol): sub["_zona_color"].mode().iloc[0]
-            for sol, sub in joined.groupby("Solução")
-            if not sub["_zona_color"].mode().empty
-        }
+    # A cor da solução nos gráficos e no PDF sai de `_dnit_solution_label_color` —
+    # a mesma família do mapa. Antes vinha da faixa de IRI dominante dos segmentos
+    # que recebiam aquela solução, então a MESMA solução mudava de cor conforme a
+    # condição do trecho, e a leitura brigava com a do Paragon.
 
     # Custo por ano (gráfico de barras anual a partir do budget_items).
     if budget_items is not None and not budget_items.empty:
         _render_budget_cost_by_year(budget_items)
         _render_budget_cost_by_solution(
             budget_items,
-            color_fn=lambda label: solucao_iri_color.get(str(label), "#9fb9d9"),
+            color_fn=_dnit_solution_label_color,
         )
         _render_segment_intervention_timeline(
             budget_items,
@@ -7251,7 +7640,7 @@ def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> No
             start_year=horizon_end_year if scope_mode == _ECONOMIC_SCOPE_YEAR_ONLY else horizon_start_year,
             end_year=horizon_end_year,
             scope_label=scope_label,
-            color_fn=lambda label: solucao_iri_color.get(str(label), "#9fb9d9"),
+            color_fn=_dnit_solution_label_color,
         )
 
     # Tabela de segmentos com priorização DNIT.
@@ -7297,7 +7686,7 @@ def _render_dnit_economic_page(road_scenario_pairs: list[tuple[str, str]]) -> No
         priority_table=work,
         class_colors=zona_colors,
         attended_ids=attended_ids,
-        solution_color=lambda label: solucao_iri_color.get(str(label), "#9fb9d9"),
+        solution_color=_dnit_solution_label_color,
     )
 
 
@@ -7813,7 +8202,7 @@ def _render_comparison_condition_map(
     criterion = (
         "Custo total por SRE"
         if is_financial else
-        ("Classe do IRI" if matrix_type == "Matriz Cadastrada" else "Conceito IAP")
+        ("Solução" if matrix_type == "Matriz Cadastrada" else "Conceito IAP")
     )
     # O cabeçalho traz o cenário do lado, não só "A · Matriz": os dois lados
     # costumam ser da mesma matriz, então o título genérico não dizia qual mapa
@@ -7844,15 +8233,21 @@ def _render_comparison_condition_map(
             budget_segment_keys,
         )
     if matrix_type == "Matriz Cadastrada":
+        # No técnico, colore por SOLUÇÃO (o comparativo é de intervenção); no
+        # financeiro a escala de custo continua mandando na cor.
         render_dnit_map(
             segments,
-            zona_colors=scale_colors if is_financial else (preview.get("zona_colors") if preview else None),
-            zona_order=scale_order if is_financial else (preview.get("zona_order") if preview else None),
-            gap_px=18,
-            legend_title="CUSTO TOTAL POR SRE" if is_financial else "CLASSE IRI (MATRIZ DNIT)",
+            zona_colors=scale_colors if is_financial else (
+                (preview.get("familia_colors") if preview else None) or DNIT_FAMILY_COLORS
+            ),
+            zona_order=scale_order if is_financial else (
+                (preview.get("familia_order") if preview else None) or DNIT_FAMILY_ORDER
+            ),
+            legend_title="CUSTO TOTAL POR SRE" if is_financial else "SOLUÇÃO (MATRIZ CADASTRADA)",
             attended_ids=inside_budget_keys if is_financial else None,
             unattended_color="#ef4444",
             legend_extra_items={"Fora do orçamento": "#ef4444"} if is_financial else None,
+            color_by="iri" if is_financial else "solucao",
         )
         return
 
@@ -7867,7 +8262,6 @@ def _render_comparison_condition_map(
         segments,
         extent_km,
         color_by="iap",
-        gap_px=18,
         class_colors=scale_colors if is_financial else None,
         class_legend_title="CUSTO TOTAL POR SRE" if is_financial else None,
         class_tooltip_label="Faixa de custo" if is_financial else None,
@@ -9725,7 +10119,11 @@ def _render_dnit_linear(segments_df, *, key: str = "dnit_linear_zoom"):
         st.markdown(
             '<div class="chart-heading linear-heading"><div>'
             '<h3>Diagrama linear — IRI · IGG · deflexão</h3>'
-            '<p>Comportamento dos parâmetros DNIT ao longo do km</p></div></div>',
+            # As três trilhas usam verde/amarelo/vermelho, mas com réguas
+            # diferentes: o IRI é medido contra o gatilho da faixa de idade (mesma
+            # régua do mapa e dos donuts), o IGG pelos limites DNIT absolutos.
+            '<p>Bom · Regular · Ruim ao longo do km — IRI pelo gatilho da matriz, '
+            'IGG pelos limites DNIT</p></div></div>',
             unsafe_allow_html=True,
         )
         zoom_min, zoom_max = st.slider(
@@ -9776,7 +10174,17 @@ def _render_dnit_linear(segments_df, *, key: str = "dnit_linear_zoom"):
             )
 
         def iri_fn(r):
-            return r["iri_color"], f"km {r['km_inicial']:.1f}-{r['km_final']:.1f} · IRI {float(r['iri']):.2f} · {r['iri_classe']}"
+            # Mesma régua do mapa e dos donuts: banda de condição contra o gatilho
+            # da faixa de idade, não as 5 classes DNIT absolutas. `iri_classe` segue
+            # existindo nos dados, mas a trilha de IRI não usa mais.
+            cor = r.get("iri_banda_color") or r["iri_color"]
+            banda = r.get("iri_banda") or r["iri_classe"]
+            gatilho = r.get("iri_gatilho")
+            sufixo = f" (gatilho {_fmt_gatilho(gatilho)})" if gatilho else ""
+            return cor, (
+                f"km {r['km_inicial']:.1f}-{r['km_final']:.1f} · "
+                f"IRI {float(r['iri']):.2f} · {banda}{sufixo}"
+            )
 
         def igg_fn(r):
             return r["igg_color"], f"km {r['km_inicial']:.1f}-{r['km_final']:.1f} · IGG {float(r['igg']):.0f} · {r['igg_classe']}"
@@ -9807,8 +10215,20 @@ def _render_dnit_linear(segments_df, *, key: str = "dnit_linear_zoom"):
     return df, (zoom_min, zoom_max)
 
 
-def _dnit_distribution(segments_df, classe_col: str, color_col: str):
-    """Distribuição (classe, percentual, color) ponderada por km — p/ os donuts IRI/IGG."""
+def _fmt_gatilho(valor) -> str:
+    """Gatilho de IRI no formato pt-BR ("2,69"); vazio quando não houver."""
+    try:
+        return f"{float(valor):.2f}".replace(".", ",")
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _dnit_distribution(segments_df, classe_col: str, color_col: str, order: list | None = None):
+    """Distribuição (classe, percentual, color) ponderada por km — p/ os donuts IRI/IGG.
+
+    `order` fixa a ordem das fatias: o IGG usa a régua DNIT (`_DNIT_ORDER`), o IRI
+    usa as bandas de gatilho (`DNIT_IRI_BAND_ORDER`).
+    """
     cols = {classe_col, color_col, "km_inicial", "km_final"}
     if segments_df is None or segments_df.empty or not cols.issubset(segments_df.columns):
         return pd.DataFrame(columns=["classe", "percentual", "color"])
@@ -9821,9 +10241,22 @@ def _dnit_distribution(segments_df, classe_col: str, color_col: str):
     total = float(grp["_ext"].sum()) or 1.0
     grp["percentual"] = grp["_ext"] / total * 100
     grp = grp.rename(columns={classe_col: "classe", color_col: "color"})
-    rank = {c: i for i, c in enumerate(_DNIT_ORDER)}
+    rank = {c: i for i, c in enumerate(order or _DNIT_ORDER)}
     grp["_o"] = grp["classe"].map(rank).fillna(999)
     return grp.sort_values("_o")[["classe", "percentual", "color"]].reset_index(drop=True)
+
+
+def _iri_band_distribution(segments_df, gatilho=None) -> pd.DataFrame:
+    """Distribuição do IRI pelas 3 bandas de condição (Bom/Regular/Ruim).
+
+    Os rótulos são os nomes das classes, os mesmos do mapa, do filtro e do diagrama
+    linear — é o que faz todos os gráficos de IRI falarem a mesma língua. O valor do
+    gatilho fica no subtítulo do donut, porque ele varia com a faixa de idade.
+    `gatilho` é aceito e ignorado para não quebrar chamadas antigas.
+    """
+    return _dnit_distribution(
+        segments_df, "iri_banda", "iri_banda_color", order=DNIT_IRI_BAND_ORDER
+    )
 
 
 def _render_dnit_distributions_for_scenarios(
@@ -9837,11 +10270,17 @@ def _render_dnit_distributions_for_scenarios(
     prepared = []
     for part in parts:
         segments = _filter_by_km_range(part.get("segments"), km_range)
-        segments = _filter_by_iap_class(segments, selected_iri_class, class_col="iri_classe")
+        segments = _filter_by_iap_class(segments, selected_iri_class, class_col="iri_banda")
+        # Cada cenário tem o seu gatilho (o ciclo dele), então o rótulo numérico do
+        # donut é resolvido por cenário, não uma vez para a tela toda.
+        gatilho = part.get("iri_gatilho")
+        if gatilho is None and segments is not None and not segments.empty \
+                and "iri_gatilho" in segments.columns:
+            gatilho = segments["iri_gatilho"].iloc[0]
         prepared.append(
             {
                 "label": str(part.get("_scenario_label") or "Cenário"),
-                "iri_distribution": _dnit_distribution(segments, "iri_classe", "iri_color"),
+                "iri_distribution": _iri_band_distribution(segments, gatilho),
                 "igg_distribution": _dnit_distribution(segments, "igg_classe", "igg_color"),
                 "iri_avg": _weighted_metric_from_segments(segments, "iri", float(part.get("iri_avg") or 0.0)),
                 "igg_avg": _weighted_metric_from_segments(segments, "igg", float(part.get("igg_avg") or 0.0)),
@@ -9912,9 +10351,16 @@ def _render_dnit_overview(road: str, scenario_keys: list[str] | str | None, year
                 "icon": "grid",
             },
             {
-                "title": "% IRI CRÍTICO (> 4)",
-                "value": f"{data['critico_pct']:.1f}%",
-                "subtitle": "Faixa laranja/vermelha da matriz",
+                # Antes era "% IRI CRÍTICO (> 4)", com limite fixo de 4,0. Isso
+                # contradizia o mapa: com gatilho 2,69 havia trecho vermelho na tela
+                # e o card mostrava 0,0%, porque nenhum chegava a 4,0.
+                "title": "% IRI ACIMA DO GATILHO",
+                "value": f"{data.get('acima_gatilho_pct', 0.0):.1f}%",
+                # Sem o valor do gatilho no texto: ele varia com a faixa de idade do
+                # pavimento (3,46 / 2,69 / 2,46), muda com o ano selecionado e pode
+                # ser diferente entre cenários selecionados juntos. O valor de cada
+                # trecho aparece no tooltip do mapa e nas fatias do donut.
+                "subtitle": "Km que exige intervenção pela matriz",
                 "tone": "orange",
                 "icon": "target",
             },
@@ -9931,21 +10377,32 @@ def _render_dnit_overview(road: str, scenario_keys: list[str] | str | None, year
     _km_range = _diagnosis_km_range_from_state(_linear_segments, "dnit_linear_zoom")
     _segments_source = _concat_segments(dnit_parts) if len(dnit_parts) > 1 else data["segments"]
     _segments_km = _filter_by_km_range(_segments_source, _km_range)
-    _iri_distribution_km = _dnit_distribution(_segments_km, "iri_classe", "iri_color")
+    # Filtro e donut de IRI pelas MESMAS 3 bandas de gatilho do mapa. Antes eram as
+    # 5 classes DNIT absolutas (Ótimo/Bom/Regular/Ruim/Péssimo): filtrar "Ótimo" não
+    # correspondia a nenhuma cor da legenda e o donut lia diferente do mapa ao lado.
+    _gatilho = data.get("iri_gatilho")
+    _iri_distribution_km = _dnit_distribution(
+        _segments_km, "iri_banda", "iri_banda_color", order=DNIT_IRI_BAND_ORDER
+    )
     _selected_iri_class = _render_diagnosis_iap_class_filter(
         _iri_distribution_km,
         key="dnit_iri_distribution_class",
-        class_order=_DNIT_ORDER,
+        class_order=DNIT_IRI_BAND_ORDER,
     )
-    _segments_filtered = _filter_by_iap_class(_segments_km, _selected_iri_class, class_col="iri_classe")
-    _iri_distribution_filtered = _dnit_distribution(_segments_filtered, "iri_classe", "iri_color")
+    _segments_filtered = _filter_by_iap_class(_segments_km, _selected_iri_class, class_col="iri_banda")
+    _iri_distribution_filtered = _iri_band_distribution(_segments_filtered, _gatilho)
     _igg_distribution_filtered = _dnit_distribution(_segments_filtered, "igg_classe", "igg_color")
     _iri_avg_filtered = _weighted_metric_from_segments(_segments_filtered, "iri", float(data["iri_avg"]))
     _igg_avg_filtered = _weighted_metric_from_segments(_segments_filtered, "igg", float(data["igg_avg"]))
+    # Cor por IRI × GATILHO da faixa de idade, não pela faixa fixa da matriz DNIT:
+    # o que interessa é a distância do trecho até o limite que dispara intervenção.
     render_dnit_map(
         _segments_filtered,
-        zona_colors=data.get("zona_colors"),
-        zona_order=data.get("zona_order"),
+        zona_colors=data.get("iri_banda_colors") or DNIT_IRI_BAND_COLORS,
+        zona_order=data.get("iri_banda_order") or DNIT_IRI_BAND_ORDER,
+        legend_title="IRI × GATILHO DA MATRIZ",
+        color_by="iri_gatilho",
+        legend_labels=DNIT_IRI_BAND_LEGEND,
     )
     # Donuts de distribuição IRI + IGG (entre o mapa e o diagrama linear).
     if len(dnit_parts) > 1:
@@ -9958,13 +10415,17 @@ def _render_dnit_overview(road: str, scenario_keys: list[str] | str | None, year
         _c_iri, _c_igg = st.columns(2)
         with _c_iri:
             render_iap_distribution(
-                _iri_distribution_filtered if not _iri_distribution_filtered.empty else _iri_distribution_km,
+                _iri_distribution_filtered if not _iri_distribution_filtered.empty
+                else _iri_band_distribution(_segments_km, _gatilho),
                 _iri_avg_filtered,
                 title="IRI",
                 subtitle=(
-                    "Faixa em km e faixa IRI aplicadas ao mapa e à distribuição"
+                    # Aqui o gatilho pode entrar no texto: o donut é de UM cenário,
+                    # então o valor é único e conhecido.
+                    f"Bom/Regular/Ruim pelo gatilho {_fmt_gatilho(_gatilho)}"
                     if _selected_iri_class == "Todas" else
-                    f"Mostrando no mapa e na distribuição apenas a faixa {_selected_iri_class}"
+                    f"Só {str(_selected_iri_class).lower()} "
+                    f"(gatilho {_fmt_gatilho(_gatilho)})"
                 ),
                 center_label="IRI MÉDIO", value_fmt="{:.2f}",
             )
@@ -10003,6 +10464,34 @@ def _filter_map_segments(segments_df, filtered_table):
 
     selected_ids = set(filtered_table["_segment_id"].astype(int).tolist())
     return segments_df[segments_df["segment_id"].astype(int).isin(selected_ids)].copy()
+
+
+def _with_no_work_segments(filtered_segments, all_segments):
+    """Devolve os segmentos filtrados MAIS os trechos sem intervenção ("OK").
+
+    O mapa da Matriz Cadastrada precisa mostrar a rodovia inteira, e os trechos sem
+    obra não estão na tabela — que só lista intervenção — então `_filter_map_segments`
+    os descarta junto com o resto. Aqui eles voltam como pano de fundo azul, sem
+    entrar em nenhuma métrica: extensão, custo e priorização seguem saindo da tabela.
+    """
+    if all_segments is None or all_segments.empty or "solucao_grupo" not in all_segments.columns:
+        return filtered_segments
+
+    sem_obra = all_segments[all_segments["solucao_grupo"].astype(str) == DNIT_FAMILY_NO_WORK]
+    if sem_obra.empty:
+        return filtered_segments
+    if filtered_segments is None or filtered_segments.empty:
+        return sem_obra.copy()
+
+    # Um mesmo segment_id pode aparecer em vários cenários (um por sentido), então
+    # a deduplicação considera o sentido quando ele existe.
+    chaves = ["segment_id"] + (["sentido"] if "sentido" in filtered_segments.columns else [])
+    if all(coluna in sem_obra.columns for coluna in chaves):
+        ja_no_mapa = set(map(tuple, filtered_segments[chaves].astype(str).values))
+        sem_obra = sem_obra[
+            ~sem_obra[chaves].astype(str).apply(lambda linha: tuple(linha) in ja_no_mapa, axis=1)
+        ]
+    return pd.concat([filtered_segments, sem_obra], ignore_index=True)
 
 
 def _align_map_solution_to_table(segments_df, table_df):
@@ -10168,11 +10657,19 @@ def _build_network_overview_impl(
         if selected_scenario_tokens and road_code not in scenario_map:
             continue
         road_years = selected_year_values or [None]
-        scenario_offset_values = {
-            scenario_key: idx - (len(road_scenarios) - 1) / 2.0
-            for idx, scenario_key in enumerate(road_scenarios)
+        # Mesma regra de offset das outras telas (`_scenario_map_offsets`): o lado
+        # vem do SENTIDO e só há deslocamento onde os cenários coincidem em km.
+        # Antes aqui era um leque por índice (`idx - (n-1)/2`), que ignorava o
+        # sentido — dois cenários Crescentes caíam em -0,5 e +0,5, ou seja, lados
+        # opostos, como se fossem sentidos diferentes.
+        _matrix_type = "Matriz Cadastrada" if is_dnit else "Paragon"
+        _scen_by_key = {
+            str(s["key"]): s for s in get_available_scenarios(road, _matrix_type)
         }
-        use_scenario_offset = len(road_scenarios) > 1
+        _keys_com_cenario = [str(k) for k in road_scenarios if k]
+        _offsets = _scenario_map_offsets(_keys_com_cenario, _scen_by_key)
+        scenario_offset_values = dict(zip(_keys_com_cenario, _offsets))
+        use_scenario_offset = len(_keys_com_cenario) > 1
 
         for scenario_key in road_scenarios:
             for year in road_years:
@@ -10255,7 +10752,7 @@ def _build_network_overview_impl(
                         map_segs = segs.copy()
                         if scenario_key:
                             map_segs["sentido"] = map_slice_label
-                            map_segs["offset_side"] = scenario_offset_values.get(scenario_key, 0.0) if use_scenario_offset else 0.0
+                            map_segs["offset_side"] = scenario_offset_values.get(str(scenario_key), 0.0) if use_scenario_offset else 0.0
                         dnit_segments.append(map_segs)
                         dnit_map_keys_added.add(map_key)
                     zona_colors = dn.get("zona_colors")
@@ -10322,7 +10819,7 @@ def _build_network_overview_impl(
                         map_segs = sol["segments"].copy()
                         if scenario_key:
                             map_segs["sentido"] = map_slice_label
-                            map_segs["offset_side"] = scenario_offset_values.get(scenario_key, 0.0) if use_scenario_offset else 0.0
+                            map_segs["offset_side"] = scenario_offset_values.get(str(scenario_key), 0.0) if use_scenario_offset else 0.0
                         paragon_segments.append(map_segs)
                         paragon_map_keys_added.add(map_key)
 
@@ -10688,7 +11185,7 @@ def _render_network_overview(
         ]
     )
     map_subtitle = (
-        "Trechos coloridos pela Matriz DNIT no recorte selecionado."
+        "Trechos coloridos pelo IRI comparado ao gatilho da faixa de idade."
         if is_dnit else
         "Trechos coloridos por conceito IAP no recorte selecionado."
     )
@@ -10708,9 +11205,16 @@ def _render_network_overview(
         )
 
         if is_dnit:
-            render_dnit_map(data["dnit_map"], zona_colors=data.get("zona_colors"), zona_order=data.get("zona_order"))
+            render_dnit_map(
+                data["dnit_map"],
+                zona_colors=data.get("iri_banda_colors") or DNIT_IRI_BAND_COLORS,
+                zona_order=data.get("iri_banda_order") or DNIT_IRI_BAND_ORDER,
+                legend_title="IRI × GATILHO DA MATRIZ",
+                color_by="iri_gatilho",
+                legend_labels=DNIT_IRI_BAND_LEGEND,
+            )
         else:
-            render_overview_map(data["paragon_map"], data["total_km"], gap_px=18)
+            render_overview_map(data["paragon_map"], data["total_km"])
 
     st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
     _render_network_ranking(df, is_dnit)
@@ -12836,22 +13340,23 @@ def _sentido_faixa(nome: str) -> str:
 
 
 def _scenarios_map_segments(road: str, keys, by_key: dict | None = None):
-    """Segmentos dos CENÁRIOS SELECIONADOS no filtro do topo, em camadas deslocadas
-    (offset por pixel, zoom-aware no mapa). Reflete a seleção: 1 cenário → None (o mapa
-    usa a camada única); 2+ → concat com `offset_side` (lado simétrico) e `sentido` (rótulo)."""
-    keys = [k for k in (keys or []) if k]
+    """Segmentos dos CENÁRIOS SELECIONADOS no filtro do topo, em camadas deslocadas.
+    Reflete a seleção: 1 cenário → None (o mapa usa a camada única); 2+ → concat com
+    `offset_side` (via `_scenario_map_offsets`) e `sentido` (rótulo)."""
+    keys = [str(k) for k in (keys or []) if k]
     if len(keys) < 2:
         return None
     if by_key is None:
-        by_key = {s["key"]: s for s in get_available_scenarios(road, "Paragon")}
-    n = len(keys)
+        by_key = {str(s["key"]): s for s in get_available_scenarios(road, "Paragon")}
+    by_key = {str(k): v for k, v in by_key.items()}
+    offsets = _scenario_map_offsets(keys, by_key)
     parts = []
     for i, k in enumerate(keys):
         seg = get_overview_data(road, scenario_key=k).get("segments")
         if seg is None or seg.empty:
             continue
         seg = seg.copy()
-        seg["offset_side"] = i - (n - 1) / 2.0   # lado simétrico; offset em px no mapa
+        seg["offset_side"] = offsets[i]
         seg["sentido"] = _short_scenario_label(by_key.get(k))
         parts.append(seg)
     if len(parts) < 2:
@@ -13879,7 +14384,9 @@ def _render_condition_line_section(
     )
 
 
-def _render_condition_composition_donut(title: str, df_comp: pd.DataFrame) -> None:
+def _render_condition_composition_donut(
+    title: str, df_comp: pd.DataFrame, subtitle: str = "Composição por classe (% da extensão)"
+) -> None:
     """Rosca de composição por classe (Bom/Regular/Ruim), % da extensão (km)."""
     dist = df_comp.copy()
     if not dist.empty:
@@ -13889,9 +14396,51 @@ def _render_condition_composition_donut(title: str, df_comp: pd.DataFrame) -> No
     total_km = float(df_comp["extensao"].sum()) if not df_comp.empty else 0.0
     render_iap_distribution(
         dist, total_km,
-        title=title, subtitle="Composição por classe (% da extensão)",
+        title=title, subtitle=subtitle,
         center_label="KM", value_fmt="{:.0f}",
     )
+
+
+def _render_composition_slicers(rodovia_sel: str) -> tuple[str | None, str | None, int | None]:
+    """Slicers exclusivos dos 3 donuts de composição: levantamento, sentido e faixa.
+
+    Ficam separados do slider de km justamente para NÃO afetarem os diagramas de
+    linha abaixo — eles continuam mostrando os dois sentidos e todas as faixas.
+    Sentido e faixa são de escolha única porque é isso que faz os 3 donuts fecharem
+    no mesmo km: somar sentidos (ou faixas) multiplicaria a extensão da rodovia.
+
+    Devolve `(sentido, faixa, ano)`; `ano=None` significa "a leitura mais recente
+    de cada km", que é o padrão.
+    """
+    sentidos, faixas = get_condition_sentidos_faixas(rodovia_sel)
+    anos = get_survey_years(rodovia_sel)
+    if not sentidos and not faixas:
+        return None, None, None
+
+    _MAIS_RECENTE = "Mais recente"
+    opcoes_ano = [_MAIS_RECENTE] + [str(a) for a in anos]
+    col_lev, col_sent, col_faixa, _spacer = st.columns([0.9, 0.9, 0.7, 1.5], gap="small")
+    with col_lev:
+        _filter_caption("Levantamento")
+        ano_sel = _compact_singleselect(
+            "Levantamento", opcoes_ano, key=f"pav_comp_ano_{rodovia_sel}", default=_MAIS_RECENTE,
+        )
+    with col_sent:
+        _filter_caption("Sentido")
+        sentido_sel = _compact_singleselect(
+            "Sentido", sentidos, key=f"pav_comp_sentido_{rodovia_sel}",
+            format_func=lambda s: str(s).capitalize(),
+            default=sentidos[0] if sentidos else None,
+        )
+    with col_faixa:
+        _filter_caption("Faixa")
+        faixa_sel = _compact_singleselect(
+            "Faixa", faixas, key=f"pav_comp_faixa_{rodovia_sel}",
+            format_func=lambda f: f"Faixa {f}",
+            default=faixas[0] if faixas else None,
+        )
+    ano = None if ano_sel == _MAIS_RECENTE else int(ano_sel)
+    return sentido_sel, faixa_sel, ano
 
 
 def _pavimentacao_km_slider(
@@ -13984,16 +14533,30 @@ def _render_pavimentacao_page() -> None:
     # pro CSS conseguir mirar só esses 3 cards e apertar o componente de
     # rosca (que por padrão reserva 260px fixos pro círculo — não cabem 3
     # com legenda legível sem esse ajuste, ver CSS .pavimentacao-donut-marker).
+    # Slicers só dos donuts (não afetam os diagramas de linha abaixo).
+    _sentido_comp, _faixa_comp, _ano_comp = _render_composition_slicers(rodovia_sel)
+    _comps = get_condition_compositions(
+        rodovia_sel, km_range, sentido=_sentido_comp, faixa=_faixa_comp, ano=_ano_comp,
+    )
+    # Os 3 fecham no MESMO km: a base é a união do que os três mediram no recorte,
+    # e o que faltar em um deles aparece como "Sem dado".
+    _km_base = max((float(d["extensao"].sum()) for d in _comps.values()), default=0.0)
+    _sub_comp = (
+        f"{'Faixa ' + str(_faixa_comp) if _faixa_comp else 'Todas as faixas'}"
+        f" · {str(_sentido_comp).capitalize() if _sentido_comp else 'Todos os sentidos'}"
+        f" · {_km_base:.1f} km".replace(".", ",")
+    )
+    st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
     col_iri, col_atr, col_igg = st.columns(3, gap="medium")
     with col_iri:
         st.markdown('<span class="pavimentacao-donut-marker"></span>', unsafe_allow_html=True)
-        _render_condition_composition_donut("Composição IRI", get_iri_composition(rodovia_sel, km_range))
+        _render_condition_composition_donut("Composição IRI", _comps.get("IRI", pd.DataFrame()), _sub_comp)
     with col_atr:
         st.markdown('<span class="pavimentacao-donut-marker"></span>', unsafe_allow_html=True)
-        _render_condition_composition_donut("Composição ATR", get_atr_composition(rodovia_sel, km_range))
+        _render_condition_composition_donut("Composição ATR", _comps.get("ATR", pd.DataFrame()), _sub_comp)
     with col_igg:
         st.markdown('<span class="pavimentacao-donut-marker"></span>', unsafe_allow_html=True)
-        _render_condition_composition_donut("Composição IGG", get_igg_composition(rodovia_sel, km_range))
+        _render_condition_composition_donut("Composição IGG", _comps.get("IGG", pd.DataFrame()), _sub_comp)
 
     df_iri_f = df_iri[(df_iri["km_final"].fillna(df_iri["km_inicial"]) >= km_range[0]) & (df_iri["km_inicial"] <= km_range[1])]
     sentido_iri = df_iri_f["sentido_trafego"].astype(str).str.strip().str.lower()
@@ -14501,7 +15064,7 @@ def main() -> None:
         _filter_by_iap_class(_linear_km, _selected_iap_class, class_col="classe_iap"),
         metrics["iap_average"],
     )
-    render_overview_map(_map_segments, metrics["extension_km"], gap_px=18)
+    render_overview_map(_map_segments, metrics["extension_km"])
     if len(paragon_parts) > 1:
         _render_iap_distributions_for_scenarios(
             paragon_parts,
