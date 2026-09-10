@@ -33,31 +33,68 @@ jobs:
       - name: Build Docker image (smoke test)
         run: docker build -t relatorio-sgp-strata:ci .
 
+  test-auth-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: auth-gateway
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        working-directory: auth-gateway
+        run: python -m pytest tests/ -v
+
+      - name: Build Docker image (smoke test)
+        run: docker build -t auth-gateway:ci auth-gateway/
+
   deploy:
-    needs: test
+    needs: [test, test-auth-gateway]
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, production, relatorio-sgp-strata]
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        instancia:
+          - nome: homolog
+            pasta: /var/www/relatorio-sgp-strata-hom
+            porta: 8501
+          - nome: sgp-mt
+            pasta: /var/www/relatorio-sgp-strata-mt
+            porta: 8511
     concurrency:
-      group: deploy-production
+      group: deploy-homolog-${{ matrix.instancia.nome }}
       cancel-in-progress: false
     steps:
-      - name: Checkout (preserva .env e data/ locais do servidor)
-        uses: actions/checkout@v4
-        with:
-          clean: false
+      - name: Atualiza o código — ${{ matrix.instancia.nome }}
+        run: |
+          set -e
+          cd ${{ matrix.instancia.pasta }}
+          ssh-keyscan -t rsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git fetch origin
+          git reset --hard origin/main
 
-      - name: Build da imagem
-        run: docker compose build
-
-      - name: Sobe os containers
-        run: docker compose up -d
+      - name: Build e sobe os containers
+        run: |
+          set -e
+          cd ${{ matrix.instancia.pasta }}
+          docker compose build
+          docker compose up -d
 
       - name: Aguarda healthcheck
         run: |
           for i in $(seq 1 10); do
-            if curl -fsS http://127.0.0.1:8501/_stcore/health; then
-              echo "Aplicação saudável."
+            if curl -fsS http://127.0.0.1:${{ matrix.instancia.porta }}/_stcore/health; then
+              echo "Instância ${{ matrix.instancia.nome }} saudável."
               exit 0
             fi
             echo "Tentativa $i falhou, aguardando..."

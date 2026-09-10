@@ -3,10 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: relatorio-sgp-strata:latest
-    container_name: relatorio-sgp-strata
     ports:
-      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:${APP_PORT:-8501}:8501"
     env_file:
       - .env
     volumes:
@@ -21,10 +19,8 @@ services:
     build:
       context: ./auth-gateway
       dockerfile: Dockerfile
-    image: relatorio-sgp-strata-auth-gateway:latest
-    container_name: relatorio-sgp-strata-auth-gateway
     ports:
-      - "127.0.0.1:8502:8502"
+      - "127.0.0.1:${GATEWAY_PORT:-8502}:8502"
     env_file:
       - .env
     restart: unless-stopped
